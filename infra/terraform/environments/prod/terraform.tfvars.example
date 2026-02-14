@@ -1,0 +1,4 @@
+db_password           = "change-me"
+db_security_group_ids = ["sg-xxxxxxxx"]
+db_subnet_group_name  = "my-subnet-group"
+s3_bucket_name        = "gblockparty-builds"

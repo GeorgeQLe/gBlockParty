@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: gblockparty
+      POSTGRES_USER: gblockparty
+      POSTGRES_PASSWORD: password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://gblockparty:password@postgres:5432/gblockparty
+      JWT_SECRET: dev-secret
+      NODE_ENV: development
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:

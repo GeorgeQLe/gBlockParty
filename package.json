@@ -1,0 +1,23 @@
+{
+  "name": "gblockparty",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:dashboard": "turbo run dev --filter=@gblockparty/dashboard",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "clean": "turbo run clean",
+    "db:generate": "turbo run db:generate --filter=@gblockparty/shared",
+    "db:migrate": "turbo run db:migrate --filter=@gblockparty/shared"
+  },
+  "devDependencies": {
+    "turbo": "^2.8.8"
+  }
+}

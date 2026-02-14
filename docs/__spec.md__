@@ -1,0 +1,1214 @@
+# gBlockParty - Deployment Platform Specification
+
+**Author:** George Le | **Date:** February 2026 | **Status:** Final Specification
+
+---
+
+## Executive Summary
+
+gBlockParty is an internal deployment platform for a solo developer that provides GitHub-connected hosting, auto-deploy on push, preview URLs per PR, environment management, and database provisioning. It deploys Next.js apps (static and server-rendered) and arbitrary Dockerized backend services.
+
+The platform runs on a Hetzner VPS with Cloudflare CDN/DNS and AWS RDS Postgres, replacing Vercel (free tier) and Neon ($20/mo) while maintaining cost-neutral total infrastructure spend (~$274/mo including existing Bismarck AWS costs).
+
+---
+
+## Table of Contents
+
+1. [Goals & Non-Goals](#1-goals--non-goals)
+2. [Architecture Overview](#2-architecture-overview)
+3. [GitHub Integration](#3-github-integration)
+4. [Build System](#4-build-system)
+5. [Deployment & Routing](#5-deployment--routing)
+6. [Preview Deployments](#6-preview-deployments)
+7. [Environment Variables](#7-environment-variables)
+8. [Database Management](#8-database-management)
+9. [Dashboard](#9-dashboard)
+10. [CLI Tool](#10-cli-tool)
+11. [Error Handling & Monitoring](#11-error-handling--monitoring)
+12. [Security](#12-security)
+13. [Configuration Format](#13-configuration-format)
+14. [Cost Estimate](#14-cost-estimate)
+15. [Implementation Phases](#15-implementation-phases)
+16. [Future Roadmap](#16-future-roadmap)
+
+---
+
+## 1. Goals & Non-Goals
+
+### Goals
+
+- **Push-to-deploy**: Push to main branch triggers automatic build and deployment
+- **Preview deployments**: Every PR gets a live preview URL with bot comments
+- **Next.js first-class support**: Both static export and full server mode (SSR, API routes, middleware, server actions)
+- **Backend service support**: Deploy arbitrary Dockerized Node.js (and other) backend services
+- **Database provisioning**: Replace Neon with self-managed RDS Postgres, with a dashboard UI to create databases
+- **Environment management**: Per-environment (production/preview) env vars managed via dashboard and CLI
+- **Rollback**: One-click rollback to any of the last 10 deployments
+- **Monorepo support**: Deploy specific services from monorepos
+- **Cost-neutral**: Total infrastructure cost stays ~$274/mo (matching current Bismarck + Neon spend)
+
+### Non-Goals (Out of Scope)
+
+- **Multi-tenancy**: No team/org support, no RBAC, no user management beyond the owner
+- **Billing/metering**: No usage tracking, no pricing tiers, no Stripe integration
+- **Custom domains**: Deferred to a later phase; MVP uses platform subdomains only
+- **Multi-cloud deployment**: MVP deploys to VPS only; provider abstraction designed in for future Azure/Cloudflare support
+- **Bismarck migration**: Deferred; platform should eventually be capable of hosting Bismarck but this is not an MVP goal
+- **Public-facing signup**: No registration flow; GitHub OAuth restricted to the owner's account
+
+---
+
+## 2. Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     CLOUDFLARE                            │
+│  DNS (*.yourdomain.dev → VPS IP)                         │
+│  CDN (caches static assets at edge)                      │
+│  SSL termination (free, automatic)                       │
+└──────────────────┬───────────────────────────────────────┘
+                   │ HTTPS
+┌──────────────────▼───────────────────────────────────────┐
+│                   HETZNER VPS (CX32)                      │
+│              4 vCPU | 8 GB RAM | 80 GB disk               │
+│                                                           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │  CADDY (Reverse Proxy)                               │ │
+│  │  Routes by hostname → Docker containers              │ │
+│  └──────────┬──────────────────────────────────────────┘ │
+│             │                                             │
+│  ┌──────────▼──────────────────────────────────────────┐ │
+│  │  DOCKER CONTAINERS                                   │ │
+│  │                                                       │ │
+│  │  [Platform Control Plane + Dashboard]                 │ │
+│  │    Next.js app (API routes + UI)                      │ │
+│  │    Handles: webhooks, deployments, auth, dashboard    │ │
+│  │                                                       │ │
+│  │  [App: myapp (production)]     port 3001              │ │
+│  │  [App: myapi (production)]     port 3002              │ │
+│  │  [App: myapp (PR #42)]         port 4001              │ │
+│  │  [App: myapp (PR #43)]         port 4002              │ │
+│  │  ...                                                  │ │
+│  └───────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+         │                          │
+         │ AWS SDK                  │ pg connection (SSL)
+         ▼                          ▼
+┌─────────────────┐    ┌─────────────────────────┐
+│  AWS S3          │    │  AWS RDS Postgres        │
+│  Build cache     │    │  db.t4g.micro ($13/mo)   │
+│  Build logs      │    │  Platform DB + App DBs   │
+└─────────────────┘    └─────────────────────────┘
+         │
+         ▼
+┌─────────────────┐
+│  AWS Secrets Mgr │
+│  API keys, creds │
+└─────────────────┘
+```
+
+### Technology Stack
+
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| CDN / DNS / SSL | Cloudflare (free tier) | Free, automatic SSL, global CDN, wildcard DNS |
+| VPS | Hetzner CX32 (US East) | $7/mo, 4 vCPU, 8 GB RAM, close to AWS us-east-1 |
+| Reverse proxy | Caddy | Simple config, admin API for dynamic reloads, static file serving |
+| Container runtime | Docker | Industry standard, good isolation, easy image management |
+| Control plane + Dashboard | Next.js (TypeScript) | Dogfooded on the platform, SSR + API routes in one |
+| Database (platform) | PostgreSQL on RDS | Shared instance with app databases, reliable, automated backups |
+| Database (apps) | PostgreSQL on RDS | Same instance, separate databases per app |
+| Build cache | AWS S3 | Cheap, durable, accessible from VPS via AWS SDK |
+| Secrets | AWS Secrets Manager | Consistent with Bismarck, native encryption, audit trail |
+| Build logs | S3 (long-term) + streaming via WebSocket | |
+| Auth | GitHub OAuth (via GitHub App) | Single sign-on, no separate auth system |
+| Notifications | GitHub commit status + Slack/Discord webhooks | |
+| CLI | TypeScript / Node.js (Commander.js) | Same language as platform |
+| Package manager | pnpm | Primary; detect from lockfile |
+| IaC | Terraform (base infra only) | RDS, S3, Secrets Manager provisioned via Terraform |
+
+### Provider Abstraction
+
+The codebase includes a `DeploymentProvider` interface to support future multi-cloud deployment:
+
+```typescript
+interface DeploymentProvider {
+  createService(config: ServiceConfig): Promise<Service>;
+  updateService(serviceId: string, config: ServiceConfig): Promise<Service>;
+  deleteService(serviceId: string): Promise<void>;
+  getServiceStatus(serviceId: string): Promise<ServiceStatus>;
+  getLogs(serviceId: string, options: LogOptions): AsyncIterable<string>;
+  rollback(serviceId: string, targetDeploymentId: string): Promise<Service>;
+}
+```
+
+MVP implements `DockerProvider` (manages containers on the VPS via Docker API). Future providers: `AWSECSProvider`, `AzureContainerAppsProvider`, `CloudflareProvider`.
+
+---
+
+## 3. GitHub Integration
+
+### GitHub App (not OAuth App)
+
+A full GitHub App is used for:
+- Webhooks scoped to installed repos
+- Bot identity for PR comments
+- Higher rate limits (5000/hr per installation)
+- Granular, repo-level permissions
+
+### Required Permissions
+
+```yaml
+permissions:
+  contents: read        # Clone repos
+  pull_requests: write  # Comment on PRs
+  statuses: write       # Commit status (pending/success/fail)
+  checks: write         # Check runs with build logs
+
+events:
+  - push                # Trigger production deploys
+  - pull_request        # Trigger preview deploys
+  - installation        # Track app installs/uninstalls
+```
+
+### Webhook Flow
+
+```
+GitHub push event (to production branch)
+    ↓
+POST https://platform.yourdomain.dev/api/webhooks/github
+    ↓
+1. Validate HMAC-SHA256 signature (X-Hub-Signature-256)
+2. Parse event type and payload
+3. Look up project by installationId + repoFullName
+4. Check if branch matches production branch
+5. Create deployment record (status: QUEUED)
+6. Set GitHub commit status to "pending"
+7. Return 200 immediately (<500ms)
+    ↓
+8. Start build (async)
+```
+
+### PR Webhook Flow
+
+```
+GitHub pull_request event (opened, synchronize, reopened)
+    ↓
+Same validation as above
+    ↓
+1. Create preview deployment record
+2. Set commit status to "pending"
+3. Start preview build (async)
+    ↓
+On build complete:
+4. Start preview container
+5. Update Caddy config (add preview hostname route)
+6. Set commit status to "success" with preview URL
+7. Post/update PR comment with preview link
+```
+
+### Key Implementation Details
+
+- **Installation tokens**: Cache and refresh proactively (1-hour expiry)
+- **Webhook idempotency**: Use delivery ID to deduplicate; GitHub retries on non-2xx
+- **Signature validation**: Always verify; never skip
+- **Shallow clones**: `git clone --depth 1 --branch {ref}` to minimize clone time
+- **PR comment updates**: Find and update existing bot comment (don't create duplicates)
+
+---
+
+## 4. Build System
+
+### Build Pipeline
+
+```
+Webhook received → Deployment record created
+    ↓
+Build starts on VPS:
+  1. Clone repo (shallow, specific commit SHA)
+  2. Read deploy.yaml (or auto-detect framework)
+  3. For monorepos: identify affected service(s)
+  4. Restore build cache from S3 (node_modules + framework cache)
+  5. Install dependencies (pnpm install)
+  6. Run build command
+  7. Build Docker image
+  8. Tag image: {project}:{commit-sha}
+  9. Save build cache to S3
+  10. Report build status
+    ↓
+Deploy:
+  11. Stop old container (if updating production)
+  12. Start new container from built image
+  13. Update Caddy config (route hostname → new container port)
+  14. Health check (HTTP GET to health endpoint)
+  15. Update deployment status → READY
+  16. Set GitHub commit status → success
+  17. Send Slack/Discord notification (if failure)
+```
+
+### Framework Detection
+
+Auto-detect Next.js configuration from the repo:
+
+```typescript
+function detectFramework(repoPath: string): FrameworkConfig {
+  // Check next.config.js/ts/mjs for output mode
+  const nextConfig = findFile(repoPath, ['next.config.js', 'next.config.ts', 'next.config.mjs']);
+
+  if (nextConfig) {
+    const config = parseNextConfig(nextConfig);
+    const isStaticExport = config.output === 'export';
+
+    return {
+      framework: 'nextjs',
+      mode: isStaticExport ? 'static' : 'server',
+      buildCommand: 'pnpm build',
+      outputDir: isStaticExport ? 'out' : '.next',
+      port: 3000,
+    };
+  }
+
+  // Check for Dockerfile
+  if (fileExists(repoPath, 'Dockerfile')) {
+    return { framework: 'dockerfile', mode: 'server' };
+  }
+
+  // Check for static index.html
+  if (fileExists(repoPath, 'index.html')) {
+    return { framework: 'static', mode: 'static' };
+  }
+
+  throw new Error('Could not detect framework. Add a deploy.yaml to configure.');
+}
+```
+
+### Dockerfile Generation
+
+For Next.js apps, the platform auto-generates an optimized Dockerfile:
+
+**Server mode (standalone output):**
+```dockerfile
+FROM node:20-alpine AS base
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN pnpm build
+
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+**Static export mode:**
+```dockerfile
+FROM node:20-alpine AS base
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN pnpm build
+
+FROM caddy:2-alpine AS runner
+COPY --from=builder /app/out /srv
+COPY <<EOF /etc/caddy/Caddyfile
+:3000 {
+    root * /srv
+    file_server
+    try_files {path} {path}/ /index.html
+}
+EOF
+EXPOSE 3000
+```
+
+For backend services with their own Dockerfile, the platform uses the user-provided Dockerfile as-is.
+
+### Build Caching
+
+**Layer 1: Dependency cache (S3)**
+```
+Key: {projectId}/deps/{pnpm-lock-hash}
+Contents: node_modules/ (tarball)
+Restore: Before pnpm install
+Save: After successful pnpm install (only if lockfile changed)
+```
+
+**Layer 2: Framework build cache (S3)**
+```
+Key: {projectId}/build/{branch}
+Contents: .next/cache/ (tarball)
+Restore: Before build command
+Save: After successful build
+```
+
+**Cache expiry:** 7 days after last access. S3 lifecycle rule.
+
+### Build Concurrency
+
+Builds execute sequentially on the VPS (one at a time). At the current scale (few deploys/day), this is sufficient. A simple queue (in-memory or Redis) manages ordering. If a new push arrives while a build is running for the same project, the queued build is cancelled and replaced.
+
+### Build Limits
+
+| Metric | Limit |
+|--------|-------|
+| Max build time | 15 minutes |
+| Max image size | 2 GB |
+| Concurrent builds | 1 (sequential queue) |
+| Build cache per project | 1 GB |
+
+---
+
+## 5. Deployment & Routing
+
+### Immutable Deployments
+
+Every deployment produces a Docker image tagged with the commit SHA. The image is stored in the local Docker image cache on the VPS. Deployments are immutable — you never modify a running deployment, you create a new one.
+
+```
+Docker images on VPS:
+  myapp:a1b2c3d4    (current production)
+  myapp:e5f6g7h8    (previous)
+  myapp:i9j0k1l2    (older)
+  ...
+  (keep last 10 per project)
+```
+
+### Caddy Routing
+
+Caddy routes requests by hostname to the correct Docker container:
+
+```caddyfile
+# Production apps
+myapp.yourdomain.dev {
+    reverse_proxy localhost:3001
+}
+
+myapi.yourdomain.dev {
+    reverse_proxy localhost:3002
+}
+
+# Preview deployments
+pr-42--myapp.yourdomain.dev {
+    reverse_proxy localhost:4001
+}
+
+pr-43--myapp.yourdomain.dev {
+    reverse_proxy localhost:4002
+}
+
+# Platform dashboard
+platform.yourdomain.dev {
+    reverse_proxy localhost:3000
+}
+```
+
+The platform control plane dynamically updates the Caddyfile via Caddy's admin API (`POST /load`) when deployments change. No Caddy restart required.
+
+### Deployment Flow (Production)
+
+```
+1. Build completes → Docker image tagged {project}:{commit-sha}
+2. Assign next available port (port allocator: 3001-3999 for production, 4000-4999 for previews)
+3. Start new container: docker run -d -p {port}:3000 --name {project}-{sha} --env-file {env-file} {project}:{sha}
+4. Health check: HTTP GET to localhost:{port}/api/health (or /) — retry up to 10 times, 2s interval
+5. On healthy: Update Caddy config to route hostname → new port
+6. Stop old container (graceful: SIGTERM, 30s timeout, then SIGKILL)
+7. Update deployment record: status=READY, url={hostname}
+8. Update GitHub commit status: success
+```
+
+### Rollback
+
+Rollback is re-deploying a previous Docker image:
+
+```
+1. User clicks "Rollback" on deployment X in dashboard (or runs CLI)
+2. Start container from image {project}:{old-commit-sha}
+3. Health check
+4. Update Caddy routing
+5. Stop current container
+6. Create new deployment record (type: ROLLBACK, sourceDeploymentId: X)
+```
+
+Keep last 10 Docker images per project. Older images are pruned automatically via a daily cron job.
+
+### Port Allocation
+
+The platform maintains a port allocation table in the database:
+
+| Range | Purpose |
+|-------|---------|
+| 3000 | Platform dashboard |
+| 3001-3999 | Production deployments |
+| 4000-4999 | Preview deployments |
+
+Port allocation is tracked in the platform database. When a container stops, its port is released.
+
+### URL Scheme
+
+Wildcard DNS: `*.yourdomain.dev → VPS IP` (Cloudflare DNS, proxied)
+
+```
+Platform dashboard:      platform.yourdomain.dev
+Production:              myapp.yourdomain.dev
+Preview (by PR):         pr-42--myapp.yourdomain.dev
+```
+
+The double-dash `--` separator is unambiguous and works with a single wildcard DNS record.
+
+---
+
+## 6. Preview Deployments
+
+### Flow
+
+```
+PR #42 opened (or new commits pushed)
+    ↓
+GitHub webhook: pull_request event
+    ↓
+1. Create deployment record (type: PREVIEW, prNumber: 42)
+2. Build project from PR head commit
+3. Build Docker image: {project}:pr-42-{sha}
+4. Start container on preview port range (4000-4999)
+5. Update Caddy: pr-42--{project}.yourdomain.dev → localhost:{port}
+6. Set GitHub commit status: success (with preview URL)
+7. Post/update PR comment with preview link
+```
+
+### PR Bot Comment
+
+```markdown
+## Deploy Preview for myapp
+
+| Status | URL |
+|--------|-----|
+| Ready  | [pr-42--myapp.yourdomain.dev](https://pr-42--myapp.yourdomain.dev) |
+
+**Commit:** `a1b2c3d` | **Build:** 34s | **Size:** 145 MB
+
+---
+*Deployed by gBlockParty*
+```
+
+The bot finds and updates the same comment on each push (avoids comment spam).
+
+### Preview Container Lifecycle
+
+- **Start**: When PR is opened or new commits are pushed
+- **Running**: Always-on while PR is open (no idle timeout)
+- **Update**: On new push, build new image → stop old container → start new container
+- **Stop**: When PR is merged or closed
+- **Cleanup**: Container stopped, port released, Caddy route removed
+- **Image retention**: Preview images deleted after PR is closed (not counted toward the 10-image retention limit)
+
+### Preview Environment Variables
+
+Preview deployments use the "preview" scope env vars (separate from production). This allows using test databases, staging API keys, etc.
+
+---
+
+## 7. Environment Variables
+
+### Scoping Model
+
+```
+Project
+  ├── Production env vars  (used by production deployments)
+  └── Preview env vars     (used by all preview deployments)
+```
+
+### Storage
+
+Stored in the platform's PostgreSQL database:
+
+```sql
+CREATE TABLE env_vars (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id),
+  scope TEXT NOT NULL CHECK (scope IN ('production', 'preview')),
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,  -- encrypted at application level
+  is_secret BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (project_id, scope, key)
+);
+```
+
+### Injection
+
+Env vars are written to a temporary `.env` file and passed to `docker run --env-file`. The file is deleted after the container starts.
+
+For build-time variables (prefixed with `NEXT_PUBLIC_*`), they are also passed as build args to `docker build`.
+
+### Secret Handling
+
+- Env vars marked as `is_secret` are encrypted at rest in Postgres (AES-256, key stored in AWS Secrets Manager)
+- Secret values are write-only via the API — once set, the API returns `***` instead of the actual value
+- Secrets are never logged (build log output is scrubbed for known secret patterns)
+
+---
+
+## 8. Database Management
+
+### Architecture
+
+A single AWS RDS PostgreSQL instance (db.t4g.micro, $13/mo) hosts:
+- The platform's own database (`gblockparty`)
+- Individual databases for each app that needs one
+
+### RDS Configuration
+
+| Setting | Value |
+|---------|-------|
+| Instance type | db.t4g.micro |
+| vCPU | 2 |
+| RAM | 1 GB |
+| Storage | 20 GB gp3 (expandable) |
+| Backup | Automated, 7-day retention |
+| Multi-AZ | No (single AZ for cost) |
+| Access | Public endpoint, SSL required, security group restricts to VPS IP + local dev IP |
+
+### Database Provisioning
+
+The dashboard provides a "Create Database" button that:
+
+1. Generates a database name: `app_{project_slug}`
+2. Generates a random password (32 chars)
+3. Executes `CREATE DATABASE` and `CREATE USER` on the RDS instance
+4. Stores the connection credentials in the platform DB (encrypted)
+5. Automatically sets `DATABASE_URL` env var for the project (both production and preview scopes)
+
+```
+DATABASE_URL=postgresql://{user}:{password}@{rds-endpoint}:5432/{dbname}?sslmode=require
+```
+
+### Dashboard UI
+
+Database management page shows:
+- List of databases with name, size, connection count
+- "Create Database" button
+- Connection string (copyable, with password hidden by default)
+- "Delete Database" with confirmation
+
+### Neon Migration
+
+Migration from Neon is manual:
+```bash
+# For each database:
+pg_dump "neon-connection-string" > dump.sql
+psql "rds-connection-string" < dump.sql
+```
+
+Update `DATABASE_URL` env vars in the platform after migration.
+
+---
+
+## 9. Dashboard
+
+### Tech Stack
+
+- **Framework**: Next.js (TypeScript)
+- **Styling**: Tailwind CSS
+- **State management**: React hooks + SWR for data fetching
+- **Real-time**: WebSocket for build log streaming
+- **Deployed**: Dogfooded on the platform itself
+
+### Pages
+
+#### 1. Projects List (`/`)
+- Grid/list of all connected repos
+- Each card shows: project name, repo link, latest deployment status, production URL
+- "Connect Repo" button (triggers GitHub App installation flow)
+
+#### 2. Project Detail (`/projects/:id`)
+- Current production URL (clickable)
+- Recent deployments (list with status, commit, branch, duration, timestamp)
+- Quick actions: Deploy, Rollback, View Logs
+- Tabs: Deployments | Settings | Environment | Database
+
+#### 3. Deployment Detail (`/projects/:id/deployments/:deploymentId`)
+- Build logs (streamed in real-time during build, stored after completion)
+- ANSI color support for build output
+- Deployment metadata: commit SHA, branch, duration, image size
+- Preview URL (if preview deployment)
+- Rollback button ("Deploy this version to production")
+
+#### 4. Project Settings (`/projects/:id/settings`)
+- Build settings: build command, output directory, framework override
+- Production branch selection
+- deploy.yaml preview (read-only, shows detected config)
+- Danger zone: disconnect repo, delete project
+
+#### 5. Environment Variables (`/projects/:id/environment`)
+- Toggle between Production and Preview scopes
+- Key-value editor (add, edit, delete)
+- Secret toggle per variable
+- Bulk edit (paste multiple KEY=VALUE lines)
+
+#### 6. Database (`/projects/:id/database`)
+- Connection string (show/hide password)
+- Database stats (size, active connections)
+- "Create Database" if none exists
+- "Delete Database" with confirmation
+
+#### 7. Rollback (`/projects/:id/deployments`)
+- Deployment history with "Rollback to this version" button per entry
+- Shows which deployment is currently active (production)
+- Rollback confirmation dialog
+
+#### 8. Settings (`/settings`)
+- GitHub App connection status
+- Notification preferences (Slack/Discord webhook URL)
+- Platform info (VPS status, disk usage, container count)
+
+### Auth Flow
+
+1. User visits platform dashboard
+2. Redirected to GitHub OAuth (via GitHub App)
+3. After authorization, GitHub returns auth code
+4. Platform exchanges code for user token
+5. Platform verifies user is the allowed GitHub user (hardcoded user ID or GitHub username)
+6. Issues JWT session token, stored in HTTP-only cookie
+7. All API requests include the session cookie
+
+---
+
+## 10. CLI Tool
+
+### Overview
+
+```
+gblockparty - Deployment platform CLI
+
+Usage:
+  gblockparty <command> [options]
+
+Commands:
+  login          Authenticate with GitHub (opens browser)
+  link           Link current directory to a project
+  deploy         Build and deploy current directory
+  env            Manage environment variables
+  logs           View deployment logs
+  rollback       Roll back to a previous deployment
+```
+
+### Commands
+
+#### `gblockparty login`
+Opens browser for GitHub OAuth. Stores auth token locally at `~/.gblockparty/config.json`.
+
+#### `gblockparty link`
+Interactive prompt to select which project to link to the current directory. Creates `.gblockparty/project.json` in the repo root (gitignored).
+
+#### `gblockparty deploy [--prod]`
+Triggers a build and deployment. Without `--prod`, creates a preview deployment. With `--prod`, deploys to production.
+
+Workflow:
+1. Reads linked project config
+2. Pushes current commit info to platform API
+3. Platform starts build
+4. CLI streams build logs in real-time
+5. On success, prints deployment URL
+
+#### `gblockparty env pull`
+Downloads env vars for the linked project to `.env.local`. Prompts for scope (production/preview).
+
+#### `gblockparty env push`
+Uploads `.env.local` to the platform for the linked project. Prompts for scope.
+
+#### `gblockparty logs`
+Tails the latest deployment's build logs (or runtime logs if running).
+
+#### `gblockparty rollback`
+Interactive prompt showing recent deployments. Select one to rollback to.
+
+### Implementation
+
+- **Language**: TypeScript
+- **Framework**: Commander.js
+- **Distribution**: npm package (`npm install -g gblockparty`)
+- **Auth storage**: `~/.gblockparty/config.json`
+- **Project linking**: `.gblockparty/project.json` (gitignored)
+
+---
+
+## 11. Error Handling & Monitoring
+
+### Failure Modes
+
+| Scenario | Response |
+|----------|----------|
+| Build fails | Deployment → FAILED. GitHub commit status → failure. Slack notification. Build logs available in dashboard. |
+| Container crashes after deploy | ECS-style restart via Docker restart policy (max 3). If crash-looping, **auto-rollback** to previous deployment + Slack notification. |
+| Health check fails on new deploy | Don't route traffic to new container. Keep old container running. Deployment → FAILED. Slack notification. |
+| Webhook delivery fails | GitHub retries automatically. Handler is idempotent (checks delivery ID). |
+| Build runner fails to start | Retry once. If still fails, deployment → FAILED with infrastructure error. |
+| VPS disk full | Alert via monitoring. Trigger Docker image prune + cache cleanup. |
+
+### Auto-Rollback
+
+If a newly deployed container crashes 3+ times in 5 minutes:
+1. Stop the new container
+2. Start the last known healthy container (previous production image)
+3. Update Caddy routing
+4. Mark deployment as FAILED with reason "crash-loop-detected"
+5. Send Slack/Discord notification with details
+
+### Notifications
+
+**GitHub:**
+- Commit status checks (pending → success/failure)
+- PR comments with preview URLs
+
+**Slack/Discord:**
+- Build failures
+- Deployment failures
+- Auto-rollback events
+- Sent via configurable webhook URL
+
+### Health Checks
+
+Every deployed container must respond to a health check:
+- **Default**: `GET /` returns 2xx
+- **Custom**: Configurable via `deploy.yaml` (`healthCheck.path`)
+- **Check interval**: Every 30 seconds (Docker HEALTHCHECK)
+- **Startup check**: 10 retries, 2s interval before routing traffic
+
+---
+
+## 12. Security
+
+### Authentication
+
+- GitHub OAuth via the GitHub App
+- Dashboard restricted to a single allowed GitHub user ID
+- JWT session tokens in HTTP-only, secure cookies
+- API routes protected by session middleware
+- CLI uses stored OAuth token
+
+### Webhook Security
+
+- All GitHub webhooks validated via HMAC-SHA256 (`X-Hub-Signature-256`)
+- Webhook secret stored in AWS Secrets Manager
+- Idempotent handler (duplicate delivery protection)
+
+### Secrets Management
+
+- Platform secrets (GitHub App private key, webhook secret, RDS credentials) stored in AWS Secrets Manager
+- User env var secrets encrypted in PostgreSQL (AES-256)
+- Encryption key stored in AWS Secrets Manager
+- Secret values are write-only via API (never returned after creation)
+- Build logs scrubbed for secret patterns
+
+### Network Security
+
+- VPS behind Cloudflare proxy (real IP hidden)
+- Cloudflare firewall rules: only allow Cloudflare IPs to reach VPS
+- RDS: public endpoint with security group restricting to VPS IP + local dev IP
+- All RDS connections require SSL
+- Docker containers run with limited capabilities (no `--privileged`)
+- Inter-container communication via Docker network (not exposed publicly)
+
+### SSH Access
+
+- VPS SSH access restricted to key-based auth only
+- SSH port changed from default 22
+
+---
+
+## 13. Configuration Format
+
+### deploy.yaml
+
+```yaml
+# Single Next.js app (simple)
+name: my-app
+type: nextjs           # auto-generates Dockerfile, detects static/server mode
+port: 3000
+resources:
+  cpu: 256             # 0.25 vCPU (for reference/future use)
+  memory: 512          # 512 MB
+healthCheck:
+  path: /api/health
+
+# Monorepo with multiple services
+name: my-platform
+services:
+  web:
+    type: nextjs
+    path: apps/web           # subdirectory in monorepo
+    port: 3000
+    resources:
+      cpu: 256
+      memory: 512
+    healthCheck:
+      path: /
+  api:
+    type: dockerfile
+    path: services/api       # subdirectory with Dockerfile
+    dockerfile: Dockerfile   # relative to path
+    port: 8080
+    resources:
+      cpu: 256
+      memory: 512
+    healthCheck:
+      path: /health
+
+# Single backend service with custom Dockerfile
+name: my-api
+type: dockerfile
+dockerfile: ./Dockerfile
+port: 8080
+healthCheck:
+  path: /health
+```
+
+### Configuration Precedence
+
+1. `deploy.yaml` in repo root (highest priority)
+2. Dashboard settings (overrides for build command, output dir, etc.)
+3. Auto-detection (fallback for simple Next.js apps)
+
+### Supported Types
+
+| Type | Description | Dockerfile |
+|------|-------------|------------|
+| `nextjs` | Next.js app (static or server mode, auto-detected) | Auto-generated |
+| `dockerfile` | Custom Dockerfile | User-provided |
+| `static` | Plain static files (HTML/CSS/JS) | Auto-generated (Caddy-based) |
+
+### Package Manager Detection
+
+Detected from lockfile in the repo root (or service subdirectory for monorepos):
+
+| Lockfile | Package Manager |
+|----------|----------------|
+| `pnpm-lock.yaml` | pnpm |
+| `package-lock.json` | npm |
+| `yarn.lock` | yarn |
+| `bun.lockb` | bun |
+
+Default: pnpm (if no lockfile found).
+
+---
+
+## 14. Cost Estimate
+
+### Platform-Specific Costs
+
+| Component | Monthly Cost | Notes |
+|-----------|-------------|-------|
+| Hetzner VPS CX32 | $7 | 4 vCPU, 8 GB RAM, 80 GB disk |
+| AWS RDS Postgres (db.t4g.micro) | $13 | Replaces Neon ($20/mo) |
+| AWS S3 (build cache + logs) | $2 | Minimal storage |
+| AWS Secrets Manager | $5 | ~12 secrets |
+| Cloudflare (DNS + CDN) | $0 | Free tier |
+| **Platform total** | **$27/mo** | |
+
+### Savings
+
+| Item | Change |
+|------|--------|
+| Neon → RDS | -$7/mo savings |
+| Vercel (free tier) → Platform | $0 change |
+
+### Total Infrastructure Cost
+
+| Item | Monthly Cost |
+|------|-------------|
+| Bismarck AWS (unchanged) | $254 |
+| gBlockParty platform | $27 |
+| **Total** | **$281/mo** |
+
+**vs. current $274/mo** ($254 Bismarck + $20 Neon) = **$7/mo net increase** for a full deployment platform with preview deployments, centralized management, and reliable Postgres.
+
+### Future Consolidation
+
+If Bismarck migrates to the platform (later phase), shared infrastructure (VPC, NAT Gateway, ALB) could reduce Bismarck's costs by ~$80/mo, bringing total spend down to ~$200/mo.
+
+---
+
+## 15. Implementation Phases
+
+### Phase 1: Core Platform (MVP)
+
+**Goal:** Push to main → app is live at `{project}.yourdomain.dev`
+
+- [ ] VPS setup (Hetzner CX32, Docker, Caddy)
+- [ ] Cloudflare DNS (wildcard `*.yourdomain.dev`)
+- [ ] RDS Postgres provisioning (Terraform)
+- [ ] Platform database schema + migrations
+- [ ] GitHub App registration
+- [ ] Webhook handler (push events)
+- [ ] Build pipeline (clone → detect → build → Docker image)
+- [ ] Deployment pipeline (start container → Caddy config → health check)
+- [ ] Auto-generated Dockerfiles for Next.js (static + server mode)
+- [ ] Framework detection (Next.js, Dockerfile, static)
+- [ ] Port allocation system
+- [ ] Basic dashboard: project list, connect repo, deployment list, build logs
+- [ ] GitHub OAuth authentication
+- [ ] Environment variables (production + preview scopes, dashboard UI)
+
+**Result:** Can deploy a Next.js app by connecting a repo and pushing to main.
+
+### Phase 2: Previews, Caching, CLI
+
+**Goal:** PRs get preview URLs. Builds are fast. CLI works.
+
+- [ ] Preview deployments (PR webhook → build → unique URL)
+- [ ] PR bot comments with preview links
+- [ ] GitHub commit status checks (pending/success/failure)
+- [ ] Build caching (S3: dependency cache + framework cache)
+- [ ] Instant rollback (start previous image, update Caddy)
+- [ ] Rollback UI in dashboard
+- [ ] Build log streaming (WebSocket)
+- [ ] CLI tool (login, link, deploy, env pull/push, logs, rollback)
+- [ ] Slack/Discord webhook notifications
+- [ ] Auto-rollback on crash-looping
+- [ ] Docker image cleanup (keep last 10 per project)
+
+**Result:** Full deployment workflow with previews, caching, and CLI.
+
+### Phase 3: Database & Polish
+
+**Goal:** Managed Postgres databases. Neon migration complete.
+
+- [ ] Database management UI (create, delete, connection strings)
+- [ ] Database provisioning (CREATE DATABASE on shared RDS)
+- [ ] Neon → RDS migration (manual, 30-40 databases)
+- [ ] Monorepo support (deploy.yaml with multiple services)
+- [ ] Deploy.yaml parsing and validation
+- [ ] Backend service deployment (arbitrary Dockerfiles)
+- [ ] Dashboard polish (settings page, platform status)
+- [ ] VPS monitoring (disk usage alerts, container health dashboard)
+
+**Result:** Full platform replacing Vercel + Neon.
+
+### Phase 4: Future (Post-MVP)
+
+- [ ] Custom domain support (verification, SSL, Caddy config)
+- [ ] AWS ECS provider (DeploymentProvider abstraction)
+- [ ] Bismarck migration planning and execution
+- [ ] Multi-cloud providers (Azure, Cloudflare)
+- [ ] Branch-based environments
+- [ ] Deploy hooks (trigger builds via API)
+- [ ] Deployment protection (password, IP allowlist)
+
+---
+
+## 16. Future Roadmap
+
+### Bismarck Migration Path
+
+When the platform is stable enough to handle Bismarck's requirements:
+
+1. **Phase A**: Deploy Bismarck's web frontend via the platform (static/SPA)
+2. **Phase B**: Move Bismarck's Orchestrator to the platform (requires WebSocket support in Caddy — already supported)
+3. **Phase C**: Manage Bismarck's Runner tasks via the platform (requires ephemeral container support — new feature)
+4. **Phase D**: Consolidate AWS base infrastructure (shared VPC, NAT, ALB)
+
+Estimated savings after full consolidation: ~$80/mo on shared networking costs.
+
+### Multi-Cloud Provider Abstraction
+
+The `DeploymentProvider` interface allows adding new deployment targets:
+
+```
+DockerProvider         → VPS with Docker (MVP)
+AWSECSProvider         → AWS ECS Fargate (Phase 4)
+AzureContainerApps     → Azure Container Apps (future)
+CloudflareProvider     → Cloudflare Workers/Containers (future)
+```
+
+Each provider implements the same interface, allowing per-project deployment target selection.
+
+---
+
+## Data Model
+
+### Core Tables
+
+```sql
+-- Projects (connected repos)
+CREATE TABLE projects (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  github_installation_id BIGINT NOT NULL,
+  github_repo_full_name TEXT NOT NULL UNIQUE,
+  framework TEXT,                          -- 'nextjs', 'dockerfile', 'static'
+  next_mode TEXT,                          -- 'static', 'server' (for nextjs)
+  build_command TEXT,
+  output_dir TEXT,
+  production_branch TEXT DEFAULT 'main',
+  production_deployment_id UUID,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Deployments
+CREATE TABLE deployments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id),
+  type TEXT NOT NULL CHECK (type IN ('production', 'preview', 'rollback')),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'building', 'deploying', 'ready', 'failed', 'archived')),
+  commit_sha TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  pr_number INTEGER,                      -- null for production deploys
+  docker_image_tag TEXT,
+  container_id TEXT,                       -- Docker container ID
+  port INTEGER,
+  url TEXT,
+  build_duration_ms INTEGER,
+  build_log_s3_key TEXT,
+  error_message TEXT,
+  source_deployment_id UUID,              -- for rollbacks: which deployment was rolled back to
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Environment variables
+CREATE TABLE env_vars (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id),
+  scope TEXT NOT NULL CHECK (scope IN ('production', 'preview')),
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,                    -- encrypted for secrets
+  is_secret BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (project_id, scope, key)
+);
+
+-- Databases (managed Postgres databases on shared RDS)
+CREATE TABLE managed_databases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id),
+  db_name TEXT NOT NULL UNIQUE,
+  db_user TEXT NOT NULL,
+  db_password_encrypted TEXT NOT NULL,    -- encrypted
+  size_bytes BIGINT DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- GitHub installations
+CREATE TABLE github_installations (
+  id BIGINT PRIMARY KEY,                  -- GitHub installation ID
+  github_account_login TEXT NOT NULL,
+  github_account_type TEXT NOT NULL,      -- 'User' or 'Organization'
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Port allocations
+CREATE TABLE port_allocations (
+  port INTEGER PRIMARY KEY,
+  deployment_id UUID REFERENCES deployments(id),
+  allocated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Notification settings
+CREATE TABLE notification_settings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slack_webhook_url TEXT,
+  discord_webhook_url TEXT,
+  notify_on_failure BOOLEAN DEFAULT true,
+  notify_on_rollback BOOLEAN DEFAULT true,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+### Indexes
+
+```sql
+CREATE INDEX idx_deployments_project_created ON deployments(project_id, created_at DESC);
+CREATE INDEX idx_deployments_status ON deployments(status) WHERE status IN ('queued', 'building', 'deploying');
+CREATE INDEX idx_env_vars_project_scope ON env_vars(project_id, scope);
+CREATE INDEX idx_port_allocations_deployment ON port_allocations(deployment_id);
+```
+
+---
+
+## API Routes
+
+### Webhooks
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/webhooks/github` | GitHub webhook handler |
+
+### Projects
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/projects` | List all projects |
+| POST | `/api/projects` | Create project (connect repo) |
+| GET | `/api/projects/:id` | Get project details |
+| PATCH | `/api/projects/:id` | Update project settings |
+| DELETE | `/api/projects/:id` | Disconnect and delete project |
+
+### Deployments
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/projects/:id/deployments` | List deployments |
+| POST | `/api/projects/:id/deployments` | Trigger manual deployment |
+| GET | `/api/projects/:id/deployments/:did` | Get deployment details |
+| POST | `/api/projects/:id/deployments/:did/rollback` | Rollback to this deployment |
+| GET | `/api/projects/:id/deployments/:did/logs` | Get build logs |
+| WS | `/api/projects/:id/deployments/:did/logs/stream` | Stream build logs (WebSocket) |
+
+### Environment Variables
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/projects/:id/env?scope=production` | List env vars |
+| POST | `/api/projects/:id/env` | Create env var |
+| PATCH | `/api/projects/:id/env/:varId` | Update env var |
+| DELETE | `/api/projects/:id/env/:varId` | Delete env var |
+
+### Databases
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/projects/:id/database` | Get database info |
+| POST | `/api/projects/:id/database` | Create database |
+| DELETE | `/api/projects/:id/database` | Delete database |
+
+### Auth
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/auth/github` | Initiate GitHub OAuth |
+| GET | `/api/auth/github/callback` | GitHub OAuth callback |
+| POST | `/api/auth/logout` | Logout |
+| GET | `/api/auth/me` | Get current user |
+
+### CLI
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/cli/deploy` | Trigger deployment from CLI |
+| GET | `/api/cli/env/:projectId` | Download env vars (for `env pull`) |
+| POST | `/api/cli/env/:projectId` | Upload env vars (for `env push`) |
