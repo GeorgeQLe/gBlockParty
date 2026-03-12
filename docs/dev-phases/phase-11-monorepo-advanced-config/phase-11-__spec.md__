@@ -1,0 +1,183 @@
+# Phase 11: Monorepo & Advanced Configuration
+
+**Phase:** 11 of 12
+**Status:** Not Started
+**Dependencies:** Phase 4 (Build System -- BuildRunner, framework detection, Dockerfile generation), Phase 5 (Deployment Engine -- Deployer, port allocator, Caddy routing), Phase 6 (Webhook handler that triggers builds)
+**Blocks:** Phase 12 (polished settings page may display deploy.yaml config)
+
+---
+
+## Goal
+
+The platform supports monorepos with multiple services via `deploy.yaml`. A single push to a monorepo can deploy multiple services (e.g., a Next.js frontend and a Dockerized API backend), each with its own Docker image, container, port, and hostname. Backend services with custom Dockerfiles can be deployed alongside auto-detected Next.js apps. The `deploy.yaml` file overrides auto-detection when present, and the platform intelligently detects which services are affected by a push based on changed files.
+
+---
+
+## Context
+
+Currently, the build pipeline (Phase 4) handles single-project repos: it clones the repo, auto-detects the framework, builds a Docker image, and deploys it. This phase extends that pipeline to support:
+
+1. **deploy.yaml configuration** that explicitly declares service type, build settings, and health checks
+2. **Multi-service monorepos** where a single repo contains multiple deployable services in subdirectories
+3. **Selective builds** that only rebuild services affected by the changes in a push
+4. **Backend services** with user-provided Dockerfiles (not auto-generated)
+
+### Why This Phase Exists
+
+Many real-world projects use monorepos. A typical setup might have:
+```
+my-platform/
+  apps/web/          # Next.js frontend
+  services/api/      # Express/Fastify API with Dockerfile
+  packages/shared/   # Shared types/utils (not deployed)
+```
+
+Without this phase, each service would need to be a separate repo with its own project in the platform. With monorepo support, a single push to `main` can detect that `apps/web/` changed and deploy only the web service, or detect that `services/api/` changed and deploy only the API.
+
+### Architecture Context
+
+```
+GitHub push webhook (commit with changed files)
+    |
+    v
+Webhook Handler (Phase 6)
+    |
+    v
+ConfigParser.parse(repoPath)
+    |
+    +-- deploy.yaml found?
+    |       |
+    |       YES --> Parse with deployYamlSchema (Zod)
+    |       |       Return DeployConfig (single or multi-service)
+    |       |
+    |       NO --> Fall back to framework auto-detection (Phase 4)
+    |
+    v
+MonorepoDetector.getAffectedServices(config, changedFiles)
+    |
+    +-- Single-service config --> always affected
+    +-- Multi-service config --> match changedFiles against service paths
+    |
+    v
+For each affected service:
+    |
+    +-- BuildRunner.run() with service-specific context
+    |       (path, buildCommand, framework, port)
+    |
+    +-- Deployer.deploy() with service-specific image
+    |       (each service gets its own port, container, hostname)
+    |
+    v
+All affected services are live
+```
+
+---
+
+## Key Files
+
+| File | Package | Purpose | Status |
+|------|---------|---------|--------|
+| `packages/core/src/build/config-parser.ts` | core | Parse deploy.yaml, validate with Zod, return DeployConfig | New file |
+| `packages/core/src/build/monorepo.ts` | core | Detect affected services from changed files | New file |
+| `packages/core/src/build/builder.ts` | core | BuildRunner -- needs modification for service context | TODO stub exists |
+| `packages/core/src/build/framework-detector.ts` | core | Framework auto-detection (fallback) | TODO stub exists |
+| `packages/core/src/build/dockerfile-generator.ts` | core | Auto-generate Dockerfiles for Next.js/static | Exists |
+| `packages/core/src/deploy/deployer.ts` | core | Deployer -- needs modification for multi-service deploys | TODO stub exists |
+| `packages/shared/src/validation/deploy-yaml.ts` | shared | Zod schema for deploy.yaml | Implemented |
+| `packages/shared/src/constants/deployment.ts` | shared | FRAMEWORKS, PORT_RANGES constants | Implemented |
+| `packages/core/src/github/webhooks.ts` | core | Webhook handler -- needs to call config parser | Exists |
+
+---
+
+## Steps
+
+### Step 1: deploy.yaml Parser & Validator
+Parse the `deploy.yaml` file from the repo root using the existing Zod schema (`deployYamlSchema` from `packages/shared/src/validation/deploy-yaml.ts`). Support single-service configs (top-level `type` field) and multi-service configs (`services` map). When `deploy.yaml` is present, it overrides framework auto-detection. When absent, fall back to `detectFramework()`.
+
+**File:** `packages/core/src/build/config-parser.ts`
+**Spec:** `step-01-config-parser-__spec.md__`
+
+### Step 2: Monorepo Service Detection
+For monorepos with multiple services, detect which services are affected by a push based on the changed files in the commit. Each service has a `path` field pointing to its subdirectory. A service is affected if any changed file starts with its path prefix. Shared directories (files outside all service paths) trigger a rebuild of all services.
+
+**File:** `packages/core/src/build/monorepo.ts`
+**Spec:** `step-02-monorepo-detection-__spec.md__`
+
+### Step 3: Multi-Service Deployment Orchestration
+Deploy multiple services from a single push. Each service gets its own Docker image tag (e.g., `{project}-{service}:{sha}`), container, port allocation, and hostname (e.g., `{service}--{project}.yourdomain.dev`). Build and deploy services in parallel (or sequentially if resources are constrained). Integration with existing BuildRunner and Deployer classes.
+
+**Spec:** `step-03-multi-service-orchestration-__spec.md__`
+
+### Step 4: Backend Service Deployment
+Support `type: dockerfile` services where the user provides their own Dockerfile. The platform uses the Dockerfile as-is (no auto-generation), builds the image with `docker build`, supports custom ports and health check paths. Integrates with the existing framework detection as a fallback when a Dockerfile is found but no `deploy.yaml` exists.
+
+**Spec:** `step-04-backend-service-deployment-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+1. `ConfigParser.parse(repoPath)` reads and validates `deploy.yaml` from the repo root.
+2. Single-service `deploy.yaml` (with top-level `type`) returns a `DeployConfig` with one service.
+3. Multi-service `deploy.yaml` (with `services` map) returns a `DeployConfig` with multiple services.
+4. Missing `deploy.yaml` falls back to `detectFramework()` from Phase 4.
+5. Invalid `deploy.yaml` throws a descriptive validation error (from Zod).
+6. `MonorepoDetector.getAffectedServices()` correctly identifies which services have changed files.
+7. Changes to files outside all service paths trigger a rebuild of all services.
+8. Changes within a single service path only trigger a rebuild of that service.
+9. Each service in a multi-service deploy gets its own Docker image, container, port, and hostname.
+10. Service hostnames follow the pattern `{service}--{project}.yourdomain.dev` for multi-service projects.
+11. Single-service projects keep the existing hostname pattern `{project}.yourdomain.dev`.
+12. `type: dockerfile` services use the user-provided Dockerfile (no auto-generation).
+13. `type: dockerfile` services support custom `port` and `healthCheck.path` configuration.
+14. The build pipeline correctly changes its working directory to the service's `path` subdirectory for monorepo services.
+15. Build cache keys include the service name for multi-service projects.
+16. `pnpm typecheck` passes after all changes.
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On (Phase 4)
+- `BuildRunner` class exists and handles the build pipeline (clone, detect, build, image).
+- `detectFramework()` and `detectPackageManager()` exist (even as stubs).
+- `DockerfileGenerator` can produce Dockerfiles for Next.js and static apps.
+- Build cache mechanism (S3) is implemented or stubbed.
+
+### Depends On (Phase 5)
+- `Deployer.deploy()` handles the full deployment pipeline (port, container, health check, Caddy, DB update).
+- `PortAllocator` allocates ports from the correct range.
+- `CaddyClient.addRoute()` routes hostnames to container ports.
+
+### Depends On (Phase 6)
+- Webhook handler receives push events and has access to the commit's changed file list.
+- The handler creates deployment records and triggers builds.
+
+### Enables (Phase 12)
+- The settings page can display the parsed `deploy.yaml` configuration.
+- Multi-service projects show per-service deployment status.
+
+---
+
+## Risk & Mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| deploy.yaml parsing edge cases (malformed YAML) | Medium | Low | Use `yaml` npm package with error handling; return descriptive parse errors |
+| Changed files list unavailable from GitHub webhook | Low | Medium | GitHub push events include `commits[].added/modified/removed`; fallback: rebuild all services |
+| Port exhaustion with many services | Low | Medium | Production range has 999 ports; each multi-service deploy uses N ports; log warning at 80% |
+| Service hostname collisions | Low | High | Validate service names are unique within a project; hostnames derived deterministically |
+| Build parallelism exceeds VPS resources | Medium | Medium | Default to sequential builds (one at a time); parallel is future optimization |
+| Dockerfile not found at specified path | Medium | Low | Validate Dockerfile existence before build; return descriptive error |
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: deploy.yaml Parser & Validator | 2-3 hours |
+| Step 2: Monorepo Service Detection | 1-2 hours |
+| Step 3: Multi-Service Deployment Orchestration | 3-4 hours |
+| Step 4: Backend Service Deployment | 2-3 hours |
+| **Total** | **8-12 hours** |

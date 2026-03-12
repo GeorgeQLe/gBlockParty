@@ -1,0 +1,372 @@
+# Step 1: Projects API Routes
+
+**Phase:** 6, Step 1
+**Status:** Not Started
+**Depends on:** Phase 3 (auth -- `withAuth` middleware), Phase 2 (database -- `projects` table migrated)
+**Blocks:** Steps 2-8 (all other steps reference projects by ID)
+
+---
+
+## Goal
+
+Implement all 5 project CRUD endpoints in the dashboard API. After this step, the platform can create, list, retrieve, update, and delete projects via authenticated HTTP requests. Project creation generates a URL-safe slug from the project name and stores the GitHub installation ID and repository full name for webhook routing.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/api/projects/route.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (_request, _session) => {
+  // TODO: List all projects from database
+  return jsonResponse([]);
+});
+
+export const POST = withAuth(async (request, _session) => {
+  // TODO: Validate body with createProjectSchema
+  // TODO: Create project in database
+  // TODO: Set up GitHub webhook for repo
+  return errorResponse("Not implemented", 501);
+});
+```
+
+### `apps/dashboard/src/app/api/projects/[id]/route.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (_request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Get project by ID from database
+  return errorResponse("Not implemented", 501);
+});
+
+export const PATCH = withAuth(async (request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Validate body with updateProjectSchema
+  // TODO: Update project in database
+  return errorResponse("Not implemented", 501);
+});
+
+export const DELETE = withAuth(async (_request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Delete project and clean up (stop containers, remove routes)
+  return errorResponse("Not implemented", 501);
+});
+```
+
+---
+
+## Implementation Details
+
+### File: `apps/dashboard/src/app/api/projects/route.ts`
+
+#### GET /api/projects -- List All Projects
+
+1. Import `getDb` from `@/lib/db` and the `projects`, `deployments` schema tables from `@gblockparty/shared/db`.
+2. Query all projects ordered by `createdAt DESC`.
+3. For each project, join or subquery to get the latest deployment (most recent by `createdAt` where `projectId` matches). This provides the `latestDeploymentStatus` for the projects list UI.
+4. Return `jsonResponse(projectsWithStatus)`.
+
+**Query approach -- subquery for latest deployment:**
+
+```typescript
+import { getDb } from "@/lib/db";
+import { projects, deployments } from "@gblockparty/shared/db";
+import { eq, desc, sql } from "drizzle-orm";
+
+const db = getDb();
+const allProjects = await db
+  .select({
+    id: projects.id,
+    name: projects.name,
+    slug: projects.slug,
+    githubRepoFullName: projects.githubRepoFullName,
+    framework: projects.framework,
+    productionBranch: projects.productionBranch,
+    productionDeploymentId: projects.productionDeploymentId,
+    createdAt: projects.createdAt,
+    updatedAt: projects.updatedAt,
+  })
+  .from(projects)
+  .orderBy(desc(projects.createdAt));
+```
+
+Then for each project, fetch the latest deployment status:
+
+```typescript
+const result = await Promise.all(
+  allProjects.map(async (project) => {
+    const [latestDeployment] = await db
+      .select({
+        id: deployments.id,
+        status: deployments.status,
+        url: deployments.url,
+        createdAt: deployments.createdAt,
+      })
+      .from(deployments)
+      .where(eq(deployments.projectId, project.id))
+      .orderBy(desc(deployments.createdAt))
+      .limit(1);
+
+    return {
+      ...project,
+      latestDeployment: latestDeployment ?? null,
+    };
+  }),
+);
+```
+
+**Response format:**
+
+```json
+[
+  {
+    "id": "uuid",
+    "name": "My App",
+    "slug": "my-app",
+    "githubRepoFullName": "georgele/my-app",
+    "framework": "nextjs",
+    "productionBranch": "main",
+    "productionDeploymentId": "uuid-or-null",
+    "createdAt": "2026-02-15T10:00:00Z",
+    "updatedAt": "2026-02-15T10:00:00Z",
+    "latestDeployment": {
+      "id": "uuid",
+      "status": "ready",
+      "url": "https://my-app.yourdomain.dev",
+      "createdAt": "2026-02-15T12:00:00Z"
+    }
+  }
+]
+```
+
+#### POST /api/projects -- Create Project
+
+1. Parse the request body with `request.json()`.
+2. Validate with `createProjectSchema.safeParse(body)`. On failure, return `errorResponse` with Zod error details and 400 status.
+3. Generate a slug from the project name using a `slugify` utility function:
+   - Lowercase the name
+   - Replace spaces and non-alphanumeric characters with hyphens
+   - Remove leading/trailing hyphens
+   - Remove consecutive hyphens
+   - If the resulting slug is empty, use `"project"`
+4. Check slug uniqueness by querying `projects` table. If collision, append a 4-character random suffix (e.g., `my-app-x7k2`).
+5. Insert the new project into the `projects` table with Drizzle:
+   ```typescript
+   const [created] = await db
+     .insert(projects)
+     .values({
+       name: validated.name,
+       slug,
+       githubInstallationId: validated.githubInstallationId,
+       githubRepoFullName: validated.githubRepoFullName,
+       productionBranch: validated.productionBranch,
+     })
+     .returning();
+   ```
+6. Return `jsonResponse(created, 201)`.
+
+**Slug generation utility** (add to `apps/dashboard/src/lib/slug.ts` or inline):
+
+```typescript
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    || "project";
+}
+```
+
+**Error responses:**
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| Invalid body (Zod) | 400 | `{ error: "Validation failed", details: zodError.issues }` |
+| Duplicate `githubRepoFullName` | 409 | `{ error: "Repository is already connected to a project" }` |
+
+### File: `apps/dashboard/src/app/api/projects/[id]/route.ts`
+
+#### GET /api/projects/:id -- Get Project Detail
+
+1. Extract `id` from `await context.params`.
+2. Validate that `id` is a valid UUID format. If not, return 400.
+3. Query the project by ID:
+   ```typescript
+   const [project] = await db
+     .select()
+     .from(projects)
+     .where(eq(projects.id, id));
+   ```
+4. If not found, return `errorResponse("Project not found", 404)`.
+5. Fetch the latest 5 deployments for the project:
+   ```typescript
+   const recentDeployments = await db
+     .select()
+     .from(deployments)
+     .where(eq(deployments.projectId, id))
+     .orderBy(desc(deployments.createdAt))
+     .limit(5);
+   ```
+6. Return `jsonResponse({ ...project, recentDeployments })`.
+
+#### PATCH /api/projects/:id -- Update Project Settings
+
+1. Extract `id` from params.
+2. Parse and validate body with `updateProjectSchema.safeParse()`. Return 400 on failure.
+3. Verify the project exists. Return 404 if not.
+4. Update the project:
+   ```typescript
+   const [updated] = await db
+     .update(projects)
+     .set({
+       ...validated,
+       updatedAt: new Date(),
+     })
+     .where(eq(projects.id, id))
+     .returning();
+   ```
+5. Return `jsonResponse(updated)`.
+
+**Allowed update fields** (from `updateProjectSchema`):
+- `name` (optional)
+- `framework` (optional, nullable)
+- `nextMode` (optional, nullable)
+- `buildCommand` (optional, nullable)
+- `outputDir` (optional, nullable)
+- `productionBranch` (optional)
+
+If `name` is updated, do NOT regenerate the slug. The slug is immutable after creation (it is used in production URLs).
+
+#### DELETE /api/projects/:id -- Delete Project
+
+1. Extract `id` from params.
+2. Verify the project exists. Return 404 if not.
+3. Before deleting from the database, perform cleanup:
+   - Query all active deployments for this project (status `ready` or `deploying`).
+   - For each active deployment, stop the Docker container and release the port. This calls into `@gblockparty/core` deploy functions. If the core functions are not yet fully implemented, log a warning and continue -- the database cascade delete will clean up the records.
+   - Remove Caddy routes for this project (if routing module is available).
+4. Delete the project from the database. The `ON DELETE CASCADE` foreign keys will automatically delete all deployments, env vars, managed databases, and port allocations.
+   ```typescript
+   await db.delete(projects).where(eq(projects.id, id));
+   ```
+5. Return `jsonResponse({ deleted: true })`.
+
+**Cleanup error handling:** If container cleanup fails (e.g., container already stopped), log the error but do not block the delete operation. The database delete must always succeed.
+
+---
+
+## New Files
+
+### `apps/dashboard/src/lib/slug.ts`
+
+Utility for generating URL-safe slugs from project names:
+
+```typescript
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    || "project";
+}
+```
+
+---
+
+## Dependencies
+
+### Imports Required
+
+```typescript
+// Both route files
+import { getDb } from "@/lib/db";
+import { projects, deployments } from "@gblockparty/shared/db";
+import { eq, desc } from "drizzle-orm";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+// POST /api/projects
+import { createProjectSchema } from "@gblockparty/shared/validation";
+import { slugify } from "@/lib/slug";
+
+// PATCH /api/projects/:id
+import { updateProjectSchema } from "@gblockparty/shared/validation";
+```
+
+---
+
+## Validation Schemas Reference
+
+### `createProjectSchema`
+
+```typescript
+z.object({
+  name: z.string().min(1).max(100),
+  githubRepoFullName: z.string().regex(/^[^/]+\/[^/]+$/),
+  githubInstallationId: z.number().int().positive(),
+  productionBranch: z.string().default("main"),
+});
+```
+
+### `updateProjectSchema`
+
+```typescript
+z.object({
+  name: z.string().min(1).max(100).optional(),
+  framework: z.enum(["nextjs", "dockerfile", "static"]).nullable().optional(),
+  nextMode: z.enum(["static", "server"]).nullable().optional(),
+  buildCommand: z.string().nullable().optional(),
+  outputDir: z.string().nullable().optional(),
+  productionBranch: z.string().optional(),
+});
+```
+
+---
+
+## Error Handling Matrix
+
+| Scenario | Endpoint | Status | Response |
+|----------|----------|--------|----------|
+| Not authenticated | All | 401 | `{ error: "Unauthorized" }` |
+| Invalid JSON body | POST, PATCH | 400 | `{ error: "Invalid JSON" }` |
+| Zod validation failure | POST, PATCH | 400 | `{ error: "Validation failed", details: [...] }` |
+| Project ID not a UUID | GET, PATCH, DELETE | 400 | `{ error: "Invalid project ID" }` |
+| Project not found | GET, PATCH, DELETE | 404 | `{ error: "Project not found" }` |
+| Duplicate repo | POST | 409 | `{ error: "Repository is already connected to a project" }` |
+| Database error | All | 500 | `{ error: "Internal server error" }` |
+
+---
+
+## Testing
+
+### Manual Tests
+
+1. **List projects (empty):** `GET /api/projects` returns `[]`.
+2. **Create project:** `POST /api/projects` with valid body returns 201 with created project.
+3. **Create project (duplicate repo):** POST with same `githubRepoFullName` returns 409.
+4. **Create project (invalid body):** POST with missing `name` returns 400 with Zod errors.
+5. **Get project:** `GET /api/projects/:id` returns project with recent deployments.
+6. **Get project (not found):** GET with random UUID returns 404.
+7. **Update project:** `PATCH /api/projects/:id` with `{ productionBranch: "develop" }` returns updated project.
+8. **Update project (invalid):** PATCH with `{ framework: "invalid" }` returns 400.
+9. **Delete project:** `DELETE /api/projects/:id` returns `{ deleted: true }`. Subsequent GET returns 404.
+10. **Auth check:** All endpoints return 401 without a valid session cookie.
+
+### Slug Generation Tests
+
+| Input Name | Expected Slug |
+|-----------|---------------|
+| `"My App"` | `"my-app"` |
+| `"Next.js Blog"` | `"next-js-blog"` |
+| `"---"` | `"project"` |
+| `"Hello World 123"` | `"hello-world-123"` |
+| `"UPPERCASE"` | `"uppercase"` |
+| `"my--app"` | `"my-app"` |

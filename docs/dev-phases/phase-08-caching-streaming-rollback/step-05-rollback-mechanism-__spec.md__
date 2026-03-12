@@ -1,0 +1,395 @@
+# Step 5: Rollback Mechanism
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 5 of 8
+**Status:** Not Started
+**Depends on:** Phase 5 (Deployer -- container start, health check, Caddy update, port allocation)
+
+---
+
+## Goal
+
+Implement `rollbackDeployment()` in `packages/core/src/deploy/rollback.ts`. Rollback re-deploys a previous Docker image by creating a new deployment record, starting a container from the old image, running a health check, updating Caddy routing, and stopping the current container. This is the core mechanism used by both manual rollback (Step 6) and auto-rollback (Step 7).
+
+---
+
+## Background
+
+The platform stores immutable Docker images tagged with commit SHAs. When a deployment goes wrong, the fastest recovery is to start a container from a known-good previous image rather than rebuilding from source. This is what makes rollback near-instant (~10-15 seconds vs. 60-120 seconds for a full rebuild).
+
+### Spec Reference
+
+From `__spec.md__` Section 5 (Deployment & Routing):
+
+```
+Rollback is re-deploying a previous Docker image:
+  1. User clicks "Rollback" on deployment X in dashboard (or runs CLI)
+  2. Start container from image {project}:{old-commit-sha}
+  3. Health check
+  4. Update Caddy routing
+  5. Stop current container
+  6. Create new deployment record (type: ROLLBACK, sourceDeploymentId: X)
+```
+
+From `__spec.md__` Section 11 (Error Handling):
+
+```
+If a newly deployed container crashes 3+ times in 5 minutes:
+  1. Stop the new container
+  2. Start the last known healthy container (previous production image)
+  3. Update Caddy routing
+  4. Mark deployment as FAILED with reason "crash-loop-detected"
+  5. Send Slack/Discord notification with details
+```
+
+---
+
+## Implementation
+
+### File: `packages/core/src/deploy/rollback.ts`
+
+Replace the existing TODO stub:
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+import { createLogger } from "@gblockparty/shared/backend";
+import { deployments, projects } from "@gblockparty/shared/db";
+import { eq, and, desc } from "drizzle-orm";
+import { createDockerClient, runContainer, stopContainer } from "../providers/docker/client";
+import { allocatePort, releasePort } from "./port-allocator";
+import { updateCaddyRoute } from "../caddy/config"; // Caddy config module
+import { HEALTH_CHECK } from "@gblockparty/shared/constants";
+
+const logger = createLogger("rollback");
+
+export async function rollbackDeployment(
+  db: Database,
+  projectId: string,
+  targetDeploymentId: string,
+): Promise<string> {
+  logger.info({ projectId, targetDeploymentId }, "Rollback initiated");
+
+  // 1. Fetch the target deployment (the one we're rolling back TO)
+  const targetDeployment = await db.query.deployments.findFirst({
+    where: and(
+      eq(deployments.id, targetDeploymentId),
+      eq(deployments.projectId, projectId),
+    ),
+  });
+
+  if (!targetDeployment) {
+    throw new Error(`Target deployment ${targetDeploymentId} not found`);
+  }
+
+  if (!targetDeployment.dockerImageTag) {
+    throw new Error(`Target deployment ${targetDeploymentId} has no Docker image tag`);
+  }
+
+  // 2. Validate the Docker image still exists
+  const docker = createDockerClient();
+  const imageExists = await checkImageExists(docker, targetDeployment.dockerImageTag);
+  if (!imageExists) {
+    throw new Error(
+      `Docker image ${targetDeployment.dockerImageTag} has been pruned and is no longer available`,
+    );
+  }
+
+  // 3. Fetch the project and current production deployment
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  });
+
+  if (!project) {
+    throw new Error(`Project ${projectId} not found`);
+  }
+
+  // 4. Create new deployment record (type: rollback)
+  const [newDeployment] = await db
+    .insert(deployments)
+    .values({
+      projectId,
+      type: "rollback",
+      status: "deploying",
+      commitSha: targetDeployment.commitSha,
+      branch: targetDeployment.branch,
+      dockerImageTag: targetDeployment.dockerImageTag,
+      sourceDeploymentId: targetDeploymentId,
+    })
+    .returning();
+
+  try {
+    // 5. Allocate port
+    const port = await allocatePort(db, newDeployment.id, "production");
+
+    // 6. Start container from target image
+    const containerId = await runContainer(
+      docker,
+      targetDeployment.dockerImageTag,
+      `${project.slug}-${newDeployment.id.slice(0, 8)}`,
+      port,
+      {}, // Env vars loaded from project config
+    );
+
+    // 7. Health check
+    const healthCheckPath = project.healthCheckPath ?? HEALTH_CHECK.DEFAULT_PATH;
+    await performHealthCheck(port, healthCheckPath);
+
+    // 8. Update Caddy routing
+    const hostname = `${project.slug}.${process.env.PLATFORM_DOMAIN}`;
+    await updateCaddyRoute(hostname, port);
+
+    // 9. Stop current production container
+    if (project.productionDeploymentId) {
+      const currentDeployment = await db.query.deployments.findFirst({
+        where: eq(deployments.id, project.productionDeploymentId),
+      });
+      if (currentDeployment?.containerId) {
+        await stopContainer(docker, currentDeployment.containerId);
+      }
+      // Release old port
+      if (currentDeployment?.port) {
+        await releasePort(db, currentDeployment.port);
+      }
+      // Archive old deployment
+      await db
+        .update(deployments)
+        .set({ status: "archived" })
+        .where(eq(deployments.id, project.productionDeploymentId));
+    }
+
+    // 10. Update deployment record and project
+    await db
+      .update(deployments)
+      .set({
+        status: "ready",
+        containerId,
+        port,
+        url: `https://${hostname}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(deployments.id, newDeployment.id));
+
+    await db
+      .update(projects)
+      .set({
+        productionDeploymentId: newDeployment.id,
+        updatedAt: new Date(),
+      })
+      .where(eq(projects.id, projectId));
+
+    logger.info(
+      { projectId, newDeploymentId: newDeployment.id, targetDeploymentId },
+      "Rollback complete",
+    );
+
+    return newDeployment.id;
+  } catch (error) {
+    // Rollback the rollback -- mark as failed
+    await db
+      .update(deployments)
+      .set({
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "Unknown error",
+        updatedAt: new Date(),
+      })
+      .where(eq(deployments.id, newDeployment.id));
+
+    logger.error(
+      { projectId, targetDeploymentId, error },
+      "Rollback failed",
+    );
+
+    throw error;
+  }
+}
+```
+
+### Health Check
+
+The health check function retries an HTTP GET request to the container's health endpoint:
+
+```typescript
+async function performHealthCheck(port: number, path: string): Promise<void> {
+  const url = `http://localhost:${port}${path}`;
+
+  for (let attempt = 1; attempt <= HEALTH_CHECK.MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        logger.info({ port, path, attempt }, "Health check passed");
+        return;
+      }
+      logger.warn({ port, path, attempt, status: response.status }, "Health check failed");
+    } catch (error) {
+      logger.warn({ port, path, attempt, error }, "Health check connection failed");
+    }
+
+    if (attempt < HEALTH_CHECK.MAX_RETRIES) {
+      await new Promise((resolve) => setTimeout(resolve, HEALTH_CHECK.RETRY_INTERVAL_MS));
+    }
+  }
+
+  throw new Error(
+    `Health check failed after ${HEALTH_CHECK.MAX_RETRIES} attempts on ${url}`,
+  );
+}
+```
+
+Uses constants from `HEALTH_CHECK`:
+- `MAX_RETRIES`: 10 attempts
+- `RETRY_INTERVAL_MS`: 2000ms between attempts
+
+Total max wait: 10 * 2s = 20 seconds for the container to become healthy.
+
+### Image Existence Check
+
+Before starting the rollback, verify the Docker image has not been pruned:
+
+```typescript
+async function checkImageExists(docker: Dockerode, imageTag: string): Promise<boolean> {
+  try {
+    const image = docker.getImage(imageTag);
+    await image.inspect();
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("404")) {
+      return false;
+    }
+    throw error;
+  }
+}
+```
+
+---
+
+## Rollback Flow Diagram
+
+```
+rollbackDeployment(db, projectId, targetDeploymentId)
+  |
+  v
+Fetch target deployment from DB
+  |-- Not found? -> Error: "Target deployment not found"
+  |-- No image tag? -> Error: "No Docker image tag"
+  |
+  v
+Check Docker image exists
+  |-- Pruned? -> Error: "Docker image has been pruned"
+  |
+  v
+Fetch project record
+  |
+  v
+INSERT new deployment record (type: rollback, status: deploying)
+  |
+  v
+Allocate port (3001-3999 range)
+  |
+  v
+Start container from target image (docker run)
+  |
+  v
+Health check (10 retries, 2s interval)
+  |-- All retries fail? -> Mark deployment FAILED, throw error
+  |
+  v
+Update Caddy (route hostname -> new port)
+  |
+  v
+Stop current production container
+Release old port
+Archive old deployment
+  |
+  v
+Update new deployment (status: ready, containerId, port, url)
+Update project (productionDeploymentId -> new deployment)
+  |
+  v
+Return new deployment ID
+```
+
+---
+
+## Database Operations
+
+### New Deployment Record
+
+```sql
+INSERT INTO deployments (
+  project_id, type, status, commit_sha, branch,
+  docker_image_tag, source_deployment_id
+) VALUES (
+  :projectId, 'rollback', 'deploying', :commitSha, :branch,
+  :imageTag, :targetDeploymentId
+) RETURNING *;
+```
+
+Key fields:
+- `type`: `'rollback'` (distinct from `'production'` and `'preview'`)
+- `source_deployment_id`: points to the deployment being rolled back TO (the target)
+- `commit_sha` and `branch`: copied from the target deployment
+- `docker_image_tag`: same as the target deployment (reusing the old image)
+
+### Deployment Status Transitions
+
+```
+New rollback deployment:   deploying -> ready (success) or deploying -> failed (error)
+Current production:        ready -> archived (replaced by rollback)
+```
+
+---
+
+## Error Handling
+
+| Error Condition | Behavior |
+|----------------|----------|
+| Target deployment not found | Throw error immediately, no deployment record created |
+| Target has no image tag | Throw error immediately |
+| Image has been pruned | Throw error immediately |
+| Port allocation fails | Deployment record marked `failed` |
+| Container fails to start | Deployment record marked `failed` |
+| Health check fails | Deployment record marked `failed`, container stopped, port released |
+| Caddy update fails | Deployment record marked `failed`, container stopped |
+| Old container stop fails | Log warning but do not fail the rollback (new container is already serving) |
+
+The try/catch in the implementation ensures that if any step after creating the deployment record fails, the record is updated to `failed` with the error message.
+
+---
+
+## Concurrency Safety
+
+Only one deployment operation (deploy or rollback) should run per project at a time. The caller (API endpoint in Step 6, or auto-rollback in Step 7) should acquire a lock before calling `rollbackDeployment()`. This can be done via:
+
+1. **Database-level advisory lock**: `SELECT pg_advisory_lock(hashtext(:projectId))` before rollback, `SELECT pg_advisory_unlock(...)` after.
+2. **Application-level mutex**: An in-memory lock per project ID (simpler for single-process VPS).
+
+This prevents race conditions where a new push deployment and a rollback execute simultaneously for the same project.
+
+---
+
+## Verification Checklist
+
+- [ ] `rollbackDeployment()` fetches target deployment and validates it exists
+- [ ] Validates target deployment has a `docker_image_tag`
+- [ ] Validates Docker image still exists (not pruned)
+- [ ] Creates new deployment record with `type: 'rollback'` and `source_deployment_id`
+- [ ] Allocates a port from the production range
+- [ ] Starts container from the target deployment's image
+- [ ] Runs health check with 10 retries at 2s intervals
+- [ ] Updates Caddy to route traffic to the new container
+- [ ] Stops the current production container gracefully
+- [ ] Releases the old port allocation
+- [ ] Archives the previous production deployment
+- [ ] Updates `projects.production_deployment_id` to the new rollback deployment
+- [ ] On failure: marks new deployment as `failed` with error message
+- [ ] Logs all steps with structured Pino logging
+
+---
+
+## Output
+
+After this step:
+
+- `packages/core/src/deploy/rollback.ts` has a working `rollbackDeployment()` function.
+- Rollback creates a new deployment, starts a container from an old image, and swaps traffic.
+- The function is reusable by both the API endpoint (Step 6) and auto-rollback (Step 7).

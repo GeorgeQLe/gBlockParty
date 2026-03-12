@@ -1,0 +1,232 @@
+# Phase 9: CLI Tool
+
+**Phase:** 9 of 12
+**Status:** Not Started
+**Depends on:** Phase 3 (Auth -- GitHub OAuth tokens, `withAuth` middleware for API routes), Phase 6 (Dashboard API -- project listing, deployment triggers, env var CRUD), Phase 8 (Caching, Streaming & Rollback -- build log streaming via WebSocket/SSE, rollback endpoint)
+**Blocks:** None (final user-facing feature phase)
+
+---
+
+## Goal
+
+The `gblockparty` CLI tool is fully functional. Users can authenticate via GitHub OAuth, link a local directory to a project, trigger deployments, manage environment variables, view build logs, and rollback to previous deployments -- all from the terminal.
+
+After this phase:
+- `gblockparty login` opens the browser, authenticates via GitHub OAuth, and stores an auth token at `~/.gblockparty/config.json`
+- `gblockparty link` fetches the user's projects from the API and saves the selected project ID to `.gblockparty/config.json` in the current directory
+- `gblockparty deploy` triggers a deployment, streams build logs in real-time, and prints the deployment URL on success
+- `gblockparty env pull` downloads env vars to `.env.local` and `gblockparty env push` uploads them
+- `gblockparty logs` shows build logs for the latest deployment with `-f` for real-time streaming
+- `gblockparty rollback` lists recent deployments and rolls back to a selected one
+- Server-side CLI API routes at `/api/cli/deploy` and `/api/cli/env/:projectId` are implemented and secured with Bearer token auth
+
+---
+
+## Architecture Context
+
+```
+Developer Machine                   Dashboard (Next.js 15)              GitHub
+  |                                       |                              |
+  | $ gblockparty login                   |                              |
+  |-- open browser ---------------------->|-- /api/auth/github --------->|
+  |                                       |<-- OAuth callback -----------|
+  |<-- local server receives token -------|                              |
+  |-- save to ~/.gblockparty/config.json  |                              |
+  |                                       |                              |
+  | $ gblockparty link                    |                              |
+  |-- GET /api/projects ----------------->|                              |
+  |<-- [{ id, name, slug }] -------------|                              |
+  |-- (user selects project)              |                              |
+  |-- save to .gblockparty/config.json    |                              |
+  |                                       |                              |
+  | $ gblockparty deploy --prod           |                              |
+  |-- POST /api/cli/deploy -------------->|                              |
+  |   { projectId, branch, commitSha,     |-- queue build                |
+  |     production: true }                |-- start build pipeline       |
+  |<-- SSE/WS: build log stream ---------|                              |
+  |<-- { url, deploymentId } ------------|                              |
+  |                                       |                              |
+  | $ gblockparty env pull                |                              |
+  |-- GET /api/cli/env/:projectId ------->|                              |
+  |   ?scope=production                   |                              |
+  |<-- { vars: [{ key, value }] } -------|                              |
+  |-- write to .env.local                 |                              |
+  |                                       |                              |
+  | $ gblockparty env push                |                              |
+  |-- POST /api/cli/env/:projectId ------>|                              |
+  |   { scope, vars: [{ key, value }] }  |-- upsert env_vars table      |
+  |<-- { updated: N } -------------------|                              |
+  |                                       |                              |
+  | $ gblockparty logs -f                 |                              |
+  |-- GET /api/projects/:id/deployments ->|                              |
+  |-- WS /api/.../logs/stream ----------->|                              |
+  |<-- streamed log lines ----------------|                              |
+  |                                       |                              |
+  | $ gblockparty rollback                |                              |
+  |-- GET /api/projects/:id/deployments ->|                              |
+  |<-- [{ id, commitSha, status, ... }] --|                              |
+  |-- (user selects deployment)           |                              |
+  |-- POST /api/.../rollback ------------>|-- re-deploy old image        |
+  |<-- { ok, deploymentId } -------------|                              |
+```
+
+---
+
+## Existing Implementation
+
+### Fully Implemented (no changes needed)
+
+| File | What it does |
+|------|-------------|
+| `packages/cli/src/index.ts` | Commander program with all 6 commands registered (`login`, `link`, `deploy`, `env`, `logs`, `rollback`) |
+| `packages/cli/src/lib/api-client.ts` | `ApiClient` class with `get<T>()`, `post<T>()`, `delete()` methods, reads token from global config, sends `Authorization: Bearer {token}` header |
+| `packages/cli/src/lib/config.ts` | Config management: `getGlobalConfig()` / `saveGlobalConfig()` for `~/.gblockparty/config.json`, `getProjectConfig()` / `saveProjectConfig()` for `.gblockparty/config.json` |
+| `apps/dashboard/src/lib/api-helpers.ts` | `withAuth(handler)` middleware, `jsonResponse()`, `errorResponse()` helpers |
+| `apps/dashboard/src/lib/auth.ts` | Session management with JWT creation, validation, cookie handling |
+
+### TODO Stubs (need full implementation)
+
+| File | Current state | What needs to be built |
+|------|--------------|----------------------|
+| `apps/dashboard/src/app/api/cli/deploy/route.ts` | Returns 501 "Not implemented" | Validate auth token, parse body, look up project, queue deployment, return deployment ID and streaming URL |
+| `apps/dashboard/src/app/api/cli/env/[projectId]/route.ts` | GET returns empty `{}`, POST returns 501 | GET: query env_vars for project+scope, mask secrets; POST: parse body, upsert env_vars |
+| `packages/cli/src/commands/login.ts` | Prints "Login not yet implemented" | Browser-based OAuth flow with local callback server |
+| `packages/cli/src/commands/link.ts` | Prints "Link not yet implemented" | Fetch projects, interactive selection, save config |
+| `packages/cli/src/commands/deploy.ts` | Prints "Deploy not yet implemented" | Read config, POST deploy, stream build logs, print URL |
+| `packages/cli/src/commands/env.ts` | Pull/push subcommands print "not yet implemented" | Pull: GET + write file; Push: read file + POST |
+| `packages/cli/src/commands/logs.ts` | Prints "Logs not yet implemented" | GET or stream logs from API |
+| `packages/cli/src/commands/rollback.ts` | Prints "Rollback not yet implemented" | List deployments, select, POST rollback |
+
+---
+
+## CLI Libraries
+
+The CLI uses the following npm packages (already in `packages/cli/package.json` or to be added):
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `commander` | ^12.x | Command parsing, options, subcommands |
+| `chalk` | ^5.x | Terminal colors for output formatting |
+| `ora` | ^8.x | Spinners for async operations |
+| `inquirer` | ^9.x | Interactive prompts (project selection, scope selection, confirmation) |
+| `open` | ^10.x | Open browser for OAuth login |
+| `eventsource` | ^2.x | SSE client for build log streaming (if using SSE instead of WebSocket) |
+| `ws` | ^8.x | WebSocket client for build log streaming (if using WebSocket) |
+
+---
+
+## Config File Formats
+
+### Global Config: `~/.gblockparty/config.json`
+
+```json
+{
+  "token": "gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "apiUrl": "https://platform.yourdomain.dev"
+}
+```
+
+Created by `gblockparty login`. The `token` field stores the GitHub OAuth access token (or a platform-issued JWT). The `apiUrl` defaults to `http://localhost:3000` in development.
+
+### Project Config: `.gblockparty/config.json`
+
+```json
+{
+  "projectId": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+Created by `gblockparty link`. This file should be gitignored. Each local directory is linked to exactly one project.
+
+---
+
+## Steps
+
+| # | Step | Key Deliverable |
+|---|------|----------------|
+| 1 | CLI API Routes | Server-side `/api/cli/deploy` and `/api/cli/env/:projectId` routes with token auth |
+| 2 | Login Command | Browser-based OAuth flow with local callback server, token storage |
+| 3 | Link Command | Interactive project selection, project config saved to `.gblockparty/config.json` |
+| 4 | Deploy Command | Trigger deployment, stream build logs, print deployment URL |
+| 5 | Env Pull/Push Commands | Download/upload env vars, mask secrets, `.env.local` file I/O |
+| 6 | Logs Command | Fetch/stream build logs with `-n` and `-f` options |
+| 7 | Rollback Command | List deployments, interactive selection, confirm and execute rollback |
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+- `ApiClient` correctly attaches Authorization header (already covered by existing implementation)
+- `getGlobalConfig()` / `saveGlobalConfig()` round-trip (already covered)
+- `getProjectConfig()` / `saveProjectConfig()` round-trip (already covered)
+- Login command: mock `open` and local HTTP server, verify token is saved
+- Link command: mock API response, verify project config is saved with correct ID
+- Deploy command: mock API response and SSE/WS stream, verify output contains deployment URL
+- Env pull: mock API response, verify `.env.local` file contents match
+- Env push: mock file read, verify POST body matches file contents
+- Logs command: mock API response, verify output formatting
+- Rollback command: mock API responses for listing and rollback, verify correct deployment ID is sent
+
+### Integration Tests
+
+- CLI API routes: POST `/api/cli/deploy` with valid token returns 200 and deployment ID
+- CLI API routes: POST `/api/cli/deploy` without token returns 401
+- CLI API routes: GET `/api/cli/env/:projectId` returns env vars for requested scope
+- CLI API routes: POST `/api/cli/env/:projectId` upserts env vars and returns count
+
+### Manual Verification
+
+- Run `gblockparty login` and complete the OAuth flow in the browser
+- Verify `~/.gblockparty/config.json` contains a valid token
+- Run `gblockparty link` and select a project from the list
+- Verify `.gblockparty/config.json` contains the correct project ID
+- Run `gblockparty deploy --prod` and observe build logs streaming in the terminal
+- Verify the deployment URL is printed and accessible
+- Run `gblockparty env pull` and verify `.env.local` is created with correct vars
+- Run `gblockparty env push` and verify env vars appear in the dashboard
+- Run `gblockparty logs -f` and verify log streaming works
+- Run `gblockparty rollback` and verify the rollback completes successfully
+
+---
+
+## Security Considerations
+
+1. **Token storage**: Auth token stored in `~/.gblockparty/config.json` with `0600` file permissions (owner read/write only)
+2. **Token transmission**: All API requests use `Authorization: Bearer {token}` over HTTPS
+3. **CLI API auth**: Server-side routes validate the Bearer token against the session/GitHub token system; reject with 401 if invalid
+4. **Secret masking**: `env pull` never downloads secret values (API returns `***` for `is_secret=true` vars); only non-secret vars are written to `.env.local`
+5. **Local callback server**: The OAuth callback server binds to `127.0.0.1` only (not `0.0.0.0`) and shuts down immediately after receiving the callback
+6. **`.env.local` safety**: The `env push` command warns before overwriting existing env vars in a different scope
+7. **Project config gitignore**: The `.gblockparty/` directory should be added to `.gitignore` to prevent committing project-specific config or tokens
+
+---
+
+## Error Handling
+
+| Scenario | CLI Behavior |
+|----------|-------------|
+| Not logged in (no token) | Print "Not authenticated. Run `gblockparty login` first." and exit with code 1 |
+| No linked project (no project config) | Print "No project linked. Run `gblockparty link` first." and exit with code 1 |
+| API returns 401 | Print "Session expired. Run `gblockparty login` to re-authenticate." and exit with code 1 |
+| API returns 404 (project not found) | Print "Project not found. It may have been deleted. Run `gblockparty link` to re-link." and exit with code 1 |
+| API returns 500 | Print "Server error. Please try again later." with the error message and exit with code 1 |
+| Network error (server unreachable) | Print "Could not connect to {apiUrl}. Check your network and try again." and exit with code 1 |
+| Build fails during deploy | Print build log output (including error), print "Deployment failed" in red, exit with code 1 |
+| WebSocket/SSE connection drops during log streaming | Attempt reconnect once; if fails, print "Connection lost. Deployment may still be running." |
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: CLI API Routes | 1-2 hours |
+| Step 2: Login Command | 2-3 hours |
+| Step 3: Link Command | 1-2 hours |
+| Step 4: Deploy Command | 2-3 hours |
+| Step 5: Env Pull/Push Commands | 1-2 hours |
+| Step 6: Logs Command | 1-2 hours |
+| Step 7: Rollback Command | 1-2 hours |
+| **Total** | **9-16 hours** |

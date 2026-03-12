@@ -1,0 +1,478 @@
+# Step 2: Preview Deployment Pipeline
+
+**Phase:** 7 -- Preview Deployments
+**Step:** 2 of 5
+**Status:** Not Started
+**Depends on:** Step 1 (PR webhook handler creates deployment record and dispatches build), Phase 4 (build system for Docker image creation), Phase 5 (Deployer, PortAllocator, CaddyClient)
+
+---
+
+## Goal
+
+Create a preview-specific deployment pipeline that builds a Docker image from the PR head commit, allocates a port from the preview range (4000-4999), starts a container with preview-scope environment variables, configures Caddy with the preview hostname, and updates the deployment record. This is the core async work that runs after the webhook handler creates the deployment record.
+
+---
+
+## Background
+
+### Existing Deployer
+
+The production `Deployer` class at `packages/core/src/deploy/deployer.ts` defines the general deployment interface:
+
+```typescript
+export interface DeployOptions {
+  db: Database;
+  projectId: string;
+  deploymentId: string;
+  imageTag: string;
+  envVars: Record<string, string>;
+  healthCheckPath: string;
+}
+
+export class Deployer {
+  constructor(private options: DeployOptions) {}
+
+  async deploy(): Promise<{ containerId: string; port: number; url: string }> {
+    // TODO: Full deploy pipeline
+    throw new Error("Not implemented");
+  }
+}
+```
+
+### Existing Infrastructure
+
+| Component | File | Role |
+|-----------|------|------|
+| `PortAllocator` | `packages/core/src/deploy/port-allocator.ts` | Allocates/releases ports from preview range (4000-4999) |
+| `CaddyClient` | `packages/core/src/routing/caddy.ts` | Adds/removes reverse proxy routes via Caddy admin API |
+| `generatePreviewUrl` | `packages/core/src/routing/url.ts` | Returns `https://pr-{N}--{slug}.{domain}` |
+| `PORT_RANGES` | `packages/shared/src/constants/deployment.ts` | `PREVIEW_MIN: 4000`, `PREVIEW_MAX: 4999` |
+| `HEALTH_CHECK` | `packages/shared/src/constants/deployment.ts` | `MAX_RETRIES: 10`, `RETRY_INTERVAL_MS: 2000` |
+
+---
+
+## Design Decision: New Class vs. Extended Deployer
+
+Two approaches are available:
+
+**Option A: New `PreviewDeployer` class** (recommended for Phase 7)
+- Separate file at `packages/core/src/deploy/preview-deployer.ts`
+- Contains preview-specific logic (PR-based image tagging, preview URL generation, preview env vars)
+- Can reuse `PortAllocator` and `CaddyClient` by composition
+- Easier to understand and modify independently
+
+**Option B: Extend `Deployer` with a `type` parameter**
+- Single class handles both production and preview
+- Risk of coupling production and preview logic
+
+Option A is recommended because preview deployments have distinct behavior around image tagging, old container cleanup (per-PR, not per-project), and URL generation.
+
+---
+
+## File: `packages/core/src/deploy/preview-deployer.ts`
+
+### Interface
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+
+export interface PreviewDeployOptions {
+  db: Database;
+  projectId: string;
+  projectSlug: string;
+  deploymentId: string;
+  prNumber: number;
+  commitSha: string;
+  branch: string;
+  repoFullName: string;
+  installationId: number;
+  healthCheckPath?: string;
+}
+
+export class PreviewDeployer {
+  constructor(private options: PreviewDeployOptions) {}
+
+  async deploy(): Promise<{ containerId: string; port: number; url: string }> {
+    // Full preview deployment pipeline
+  }
+}
+```
+
+---
+
+## Pipeline Steps
+
+The preview deployment pipeline executes the following steps sequentially. If any step fails, the pipeline must clean up resources allocated in earlier steps.
+
+### Step 2a: Update Deployment Status to `building`
+
+```typescript
+await db.update(deployments)
+  .set({ status: 'building', updatedAt: new Date() })
+  .where(eq(deployments.id, this.options.deploymentId));
+```
+
+### Step 2b: Build Docker Image
+
+Clone the repository at the PR head commit and build a Docker image. The build pipeline from Phase 4 handles:
+1. Shallow clone: `git clone --depth 1 --branch {branch} {repo-url}`
+2. Checkout specific commit: `git checkout {commitSha}`
+3. Framework detection (Next.js, Dockerfile, static)
+4. Dockerfile generation (if auto-detected framework)
+5. Docker build with appropriate tags
+
+**Image tag format:**
+```
+{projectSlug}:pr-{prNumber}-{sha7}
+```
+
+Example: `myapp:pr-42-a1b2c3d`
+
+The 7-character short SHA ensures uniqueness within a PR while keeping tags readable. The PR number prefix distinguishes preview images from production images.
+
+```typescript
+const sha7 = this.options.commitSha.slice(0, 7);
+const imageTag = `${this.options.projectSlug}:pr-${this.options.prNumber}-${sha7}`;
+
+const buildStart = Date.now();
+
+// Use the build pipeline from Phase 4
+const buildResult = await buildImage({
+  repoFullName: this.options.repoFullName,
+  commitSha: this.options.commitSha,
+  branch: this.options.branch,
+  imageTag,
+  installationId: this.options.installationId,
+});
+
+const buildDurationMs = Date.now() - buildStart;
+```
+
+If the build fails, update the deployment record to `status='failed'` with the error message and exit.
+
+### Step 2c: Load Preview Environment Variables
+
+Fetch environment variables scoped to `preview` for this project:
+
+```typescript
+const envRows = await db.select().from(envVars)
+  .where(
+    and(
+      eq(envVars.projectId, this.options.projectId),
+      eq(envVars.scope, 'preview'),
+    )
+  );
+
+const envMap: Record<string, string> = {};
+for (const row of envRows) {
+  envMap[row.key] = row.isSecret ? decrypt(row.value) : row.value;
+}
+```
+
+Secret values are decrypted at this point (AES-256, key from AWS Secrets Manager). The decrypted values are written to a temporary `.env` file that is passed to `docker run --env-file` and deleted after the container starts.
+
+### Step 2d: Stop Previous Preview Container (if exists)
+
+Before starting the new container, find and stop any existing preview container for the same PR:
+
+```typescript
+const previousPreview = await db.select().from(deployments)
+  .where(
+    and(
+      eq(deployments.projectId, this.options.projectId),
+      eq(deployments.type, 'preview'),
+      eq(deployments.prNumber, this.options.prNumber),
+      inArray(deployments.status, ['ready', 'deploying']),
+      not(eq(deployments.id, this.options.deploymentId)), // Exclude current
+    )
+  )
+  .orderBy(desc(deployments.createdAt))
+  .limit(1);
+
+if (previousPreview.length > 0) {
+  const prev = previousPreview[0];
+  logger.info(
+    { prevDeploymentId: prev.id, prevContainerId: prev.containerId },
+    "Stopping previous preview container",
+  );
+
+  if (prev.containerId) {
+    await dockerStop(prev.containerId, { timeout: 30 });
+  }
+  if (prev.port) {
+    await portAllocator.release(prev.port);
+  }
+  // Note: Caddy route will be overwritten with new port (same hostname)
+
+  await db.update(deployments)
+    .set({ status: 'archived', updatedAt: new Date() })
+    .where(eq(deployments.id, prev.id));
+}
+```
+
+### Step 2e: Update Deployment Status to `deploying`
+
+```typescript
+await db.update(deployments)
+  .set({ status: 'deploying', updatedAt: new Date() })
+  .where(eq(deployments.id, this.options.deploymentId));
+```
+
+### Step 2f: Allocate Preview Port
+
+```typescript
+const portAllocator = new PortAllocator(db);
+const port = await portAllocator.allocate(this.options.deploymentId, 'preview');
+
+logger.info({ port, deploymentId: this.options.deploymentId }, "Preview port allocated");
+```
+
+If port allocation fails (all 1000 ports in use), the deployment fails. This is unlikely for a single developer but should be handled gracefully.
+
+### Step 2g: Start Container
+
+```typescript
+const containerName = `${this.options.projectSlug}-pr-${this.options.prNumber}`;
+
+const containerId = await dockerRun({
+  image: imageTag,
+  name: containerName,
+  port: { host: port, container: 3000 },  // Map host port to container's 3000
+  envFile: tempEnvFilePath,
+  network: 'gblockparty',
+  labels: {
+    'gblockparty.type': 'preview',
+    'gblockparty.project': this.options.projectSlug,
+    'gblockparty.pr': String(this.options.prNumber),
+    'gblockparty.deployment': this.options.deploymentId,
+  },
+  restartPolicy: 'unless-stopped',
+});
+
+// Delete temporary env file immediately after container starts
+await fs.unlink(tempEnvFilePath);
+```
+
+Container naming uses `{slug}-pr-{N}` (without SHA) so the same name is reused across commits. Docker will require the old container to be removed first (handled in Step 2d).
+
+### Step 2h: Health Check
+
+Wait for the container to become healthy before routing traffic:
+
+```typescript
+const healthCheckPath = this.options.healthCheckPath ?? HEALTH_CHECK.DEFAULT_PATH;
+
+for (let attempt = 1; attempt <= HEALTH_CHECK.MAX_RETRIES; attempt++) {
+  try {
+    const response = await fetch(`http://localhost:${port}${healthCheckPath}`);
+    if (response.ok) {
+      logger.info({ port, attempt }, "Preview container is healthy");
+      break;
+    }
+  } catch {
+    // Connection refused or timeout -- container not ready yet
+  }
+
+  if (attempt === HEALTH_CHECK.MAX_RETRIES) {
+    throw new Error(`Health check failed after ${HEALTH_CHECK.MAX_RETRIES} attempts`);
+  }
+
+  await sleep(HEALTH_CHECK.RETRY_INTERVAL_MS);
+}
+```
+
+If the health check fails after all retries, the deployment fails. The container must be stopped and the port released (handled in the error cleanup path).
+
+### Step 2i: Configure Caddy Route
+
+Add a reverse proxy route in Caddy for the preview hostname:
+
+```typescript
+const previewHostname = `pr-${this.options.prNumber}--${this.options.projectSlug}.${domain}`;
+
+const caddy = new CaddyClient();
+await caddy.addRoute(previewHostname, port);
+
+logger.info({ previewHostname, port }, "Caddy preview route configured");
+```
+
+The `CaddyClient.addRoute()` posts to the Caddy admin API at `http://localhost:2019`. If a route for this hostname already exists (from a previous commit), it is overwritten.
+
+### Step 2j: Update Deployment Record to `ready`
+
+```typescript
+const previewUrl = generatePreviewUrl(this.options.projectSlug, this.options.prNumber);
+
+await db.update(deployments)
+  .set({
+    status: 'ready',
+    dockerImageTag: imageTag,
+    containerId,
+    port,
+    url: previewUrl,
+    buildDurationMs,
+    updatedAt: new Date(),
+  })
+  .where(eq(deployments.id, this.options.deploymentId));
+
+return { containerId, port, url: previewUrl };
+```
+
+---
+
+## Error Handling and Cleanup
+
+If any step fails after resources have been allocated, those resources must be cleaned up:
+
+```typescript
+async deploy(): Promise<{ containerId: string; port: number; url: string }> {
+  let allocatedPort: number | null = null;
+  let startedContainerId: string | null = null;
+
+  try {
+    // ... Steps 2a through 2j ...
+  } catch (error) {
+    logger.error(
+      { error, deploymentId: this.options.deploymentId },
+      "Preview deployment failed",
+    );
+
+    // Clean up allocated resources
+    if (startedContainerId) {
+      try { await dockerStop(startedContainerId); } catch {}
+      try { await dockerRemove(startedContainerId); } catch {}
+    }
+    if (allocatedPort) {
+      try { await portAllocator.release(allocatedPort); } catch {}
+    }
+
+    // Update deployment record to failed
+    await db.update(deployments)
+      .set({
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : String(error),
+        buildDurationMs: buildDurationMs ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(deployments.id, this.options.deploymentId));
+
+    throw error; // Re-throw for the caller to handle (commit status, PR comment)
+  }
+}
+```
+
+---
+
+## Integration with Steps 3 and 4
+
+After the pipeline completes (success or failure), the calling function (from Step 1's `startPreviewBuild`) should:
+
+1. **On success**: Call `setCommitStatus('success', { targetUrl: previewUrl })` (Step 3) and `createOrUpdatePRComment()` (Step 4)
+2. **On failure**: Call `setCommitStatus('failure', { description: error.message })` (Step 3) and `createOrUpdatePRComment()` with failure status (Step 4)
+
+This orchestration lives in a wrapper function:
+
+```typescript
+async function startPreviewBuild(
+  db: Database,
+  project: Project,
+  deployment: Deployment,
+): Promise<void> {
+  const octokit = await githubApp.getInstallationOctokit(project.githubInstallationId);
+  const [owner, repo] = project.githubRepoFullName.split('/');
+
+  // Set commit status to pending
+  await setCommitStatus(octokit, owner, repo, deployment.commitSha, 'pending', {
+    description: 'Preview deployment building...',
+    context: 'gblockparty/preview',
+  });
+
+  try {
+    const deployer = new PreviewDeployer({
+      db,
+      projectId: project.id,
+      projectSlug: project.slug,
+      deploymentId: deployment.id,
+      prNumber: deployment.prNumber!,
+      commitSha: deployment.commitSha!,
+      branch: deployment.branch!,
+      repoFullName: project.githubRepoFullName,
+      installationId: project.githubInstallationId,
+    });
+
+    const result = await deployer.deploy();
+
+    // Set commit status to success with preview URL
+    await setCommitStatus(octokit, owner, repo, deployment.commitSha, 'success', {
+      targetUrl: result.url,
+      description: 'Preview deployment ready',
+      context: 'gblockparty/preview',
+    });
+
+    // Post/update PR comment
+    await createOrUpdatePRComment(
+      octokit, owner, repo, deployment.prNumber!,
+      formatDeploymentComment('ready', result.url, deployment.buildDurationMs),
+    );
+  } catch (error) {
+    // Set commit status to failure
+    try {
+      await setCommitStatus(octokit, owner, repo, deployment.commitSha, 'failure', {
+        description: `Preview deployment failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        context: 'gblockparty/preview',
+      });
+    } catch {}
+
+    // Update PR comment with failure
+    try {
+      await createOrUpdatePRComment(
+        octokit, owner, repo, deployment.prNumber!,
+        formatDeploymentComment('failed', null, null),
+      );
+    } catch {}
+  }
+}
+```
+
+---
+
+## Docker Commands Reference
+
+The pipeline uses the Docker Engine API (via `dockerode` or CLI wrapper). Key operations:
+
+| Operation | Docker CLI Equivalent | Notes |
+|-----------|----------------------|-------|
+| Build image | `docker build -t {tag} .` | Via build pipeline from Phase 4 |
+| Run container | `docker run -d --name {name} -p {hostPort}:3000 --env-file {file} --network gblockparty --restart unless-stopped {image}` | Returns container ID |
+| Stop container | `docker stop --time 30 {containerId}` | 30s graceful timeout |
+| Remove container | `docker rm {containerId}` | After stop |
+| List containers | `docker ps --filter label=gblockparty.pr={N}` | For finding preview containers |
+
+---
+
+## Verification Checklist
+
+- [ ] `PreviewDeployer` class created at `packages/core/src/deploy/preview-deployer.ts`
+- [ ] Image tagged as `{slug}:pr-{N}-{sha7}` (7 char short SHA)
+- [ ] Port allocated from 4000-4999 range using `PortAllocator`
+- [ ] Container started with preview-scope env vars
+- [ ] Health check retries up to 10 times with 2s interval
+- [ ] Caddy route added: `pr-{N}--{slug}.{domain}` -> `localhost:{port}`
+- [ ] Deployment record updated to `ready` with `url`, `port`, `containerId`, `dockerImageTag`, `buildDurationMs`
+- [ ] Previous preview container for same PR is stopped and archived
+- [ ] Build failure sets deployment to `failed` with `errorMessage`
+- [ ] Health check failure stops container and releases port
+- [ ] Port allocation failure results in clean failure
+- [ ] Temporary env file deleted after container starts
+- [ ] Container labeled with gblockparty metadata (type, project, PR, deployment)
+
+---
+
+## Output
+
+After this step:
+- Preview containers can be built and started for any PR
+- Each preview is accessible at a unique port in the 4000-4999 range
+- Caddy routes traffic from `pr-{N}--{slug}.domain` to the container
+- Deployment records track the full state of each preview
+- Failed deployments are cleaned up with resources released

@@ -1,0 +1,236 @@
+# Step 2: Login Command
+
+**Phase:** 9 -- CLI Tool
+**Step:** 2 of 7
+**Status:** Not Started
+**Depends on:** Step 1 (CLI API routes must exist for post-login verification), Phase 3 (OAuth flow, GitHub App credentials)
+**Depends on this step:** Steps 3-7 (all commands require authentication)
+
+---
+
+## Goal
+
+Implement `gblockparty login` so the user can authenticate via GitHub OAuth from the terminal. The command opens the browser to the GitHub OAuth authorization URL, starts a temporary local HTTP server to receive the callback, extracts the auth token, and saves it to `~/.gblockparty/config.json`.
+
+---
+
+## Background
+
+The CLI cannot use cookie-based sessions. Instead, the login flow works as follows:
+
+1. CLI generates a random `state` parameter for CSRF protection
+2. CLI starts a local HTTP server on `127.0.0.1` on a random available port
+3. CLI opens the browser to `{apiUrl}/api/auth/github?cli=true&port={localPort}&state={state}`
+4. The dashboard's OAuth initiation route detects the `cli=true` parameter and sets the `redirect_uri` to `http://localhost:{port}/callback`
+5. User authorizes the GitHub App in the browser
+6. GitHub redirects to the dashboard's OAuth callback route
+7. The dashboard callback route verifies the user, creates a session token, and redirects to `http://localhost:{port}/callback?token={token}&user={githubLogin}`
+8. The local server receives the callback, extracts the token, saves it to config, and shuts down
+
+This approach avoids requiring the user to manually copy-paste tokens.
+
+---
+
+## File to Modify
+
+### `packages/cli/src/commands/login.ts`
+
+**Current state:** Prints "Login not yet implemented".
+
+**Target implementation:**
+
+```typescript
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+import open from "open";
+import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
+import { getGlobalConfig, saveGlobalConfig } from "../lib/config";
+
+export const loginCommand = new Command("login")
+  .description("Authenticate with gBlockParty via GitHub")
+  .action(async () => {
+    const config = getGlobalConfig();
+    const apiUrl = config.apiUrl ?? "http://localhost:3000";
+
+    // Check if already logged in
+    if (config.token) {
+      console.log(chalk.yellow("You are already logged in."));
+      console.log("Run with --force to re-authenticate (or continue to overwrite).");
+    }
+
+    // Generate CSRF state
+    const state = randomBytes(16).toString("hex");
+
+    // Start local callback server
+    const { port, tokenPromise, server } = await startCallbackServer(state);
+
+    // Build OAuth URL
+    const authUrl = `${apiUrl}/api/auth/github?cli=true&port=${port}&state=${state}`;
+
+    console.log(chalk.dim("Opening browser for authentication..."));
+    console.log(chalk.dim(`If the browser doesn't open, visit: ${authUrl}`));
+
+    // Open browser
+    await open(authUrl);
+
+    // Wait for callback
+    const spinner = ora("Waiting for authentication...").start();
+
+    try {
+      const { token, user } = await tokenPromise;
+
+      // Save token to global config
+      saveGlobalConfig({
+        ...config,
+        token,
+      });
+
+      spinner.succeed(chalk.green(`Authenticated as ${chalk.bold(user)}`));
+    } catch (error) {
+      spinner.fail(chalk.red("Authentication failed"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    } finally {
+      server.close();
+    }
+  });
+
+function startCallbackServer(
+  expectedState: string
+): Promise<{
+  port: number;
+  tokenPromise: Promise<{ token: string; user: string }>;
+  server: ReturnType<typeof createServer>;
+}> {
+  return new Promise((resolveServer) => {
+    let resolveToken: (value: { token: string; user: string }) => void;
+    let rejectToken: (error: Error) => void;
+
+    const tokenPromise = new Promise<{ token: string; user: string }>(
+      (resolve, reject) => {
+        resolveToken = resolve;
+        rejectToken = reject;
+      }
+    );
+
+    const server = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", `http://localhost`);
+
+      if (url.pathname === "/callback") {
+        const token = url.searchParams.get("token");
+        const user = url.searchParams.get("user");
+        const state = url.searchParams.get("state");
+        const error = url.searchParams.get("error");
+
+        if (error) {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end("<html><body><h1>Authentication failed</h1><p>You can close this tab.</p></body></html>");
+          rejectToken(new Error(error));
+          return;
+        }
+
+        if (state !== expectedState) {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end("<html><body><h1>Invalid state</h1><p>CSRF validation failed.</p></body></html>");
+          rejectToken(new Error("CSRF state mismatch"));
+          return;
+        }
+
+        if (!token || !user) {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end("<html><body><h1>Missing token</h1><p>Authentication incomplete.</p></body></html>");
+          rejectToken(new Error("Missing token or user in callback"));
+          return;
+        }
+
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(
+          "<html><body><h1>Authenticated!</h1><p>You can close this tab and return to the terminal.</p></body></html>"
+        );
+        resolveToken({ token, user });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    // Bind to localhost only (security: not externally accessible)
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolveServer({ port, tokenPromise, server });
+    });
+
+    // Timeout after 5 minutes
+    setTimeout(() => {
+      rejectToken(new Error("Authentication timed out (5 minutes)"));
+      server.close();
+    }, 5 * 60 * 1000);
+  });
+}
+```
+
+---
+
+## Dashboard OAuth Route Changes
+
+The existing `/api/auth/github/route.ts` needs a small modification to support CLI login. When the `cli=true` query parameter is present, the OAuth callback should redirect to the CLI's local server instead of the dashboard.
+
+The `/api/auth/github/callback/route.ts` needs to detect CLI mode and redirect to `http://localhost:{port}/callback?token={jwt}&user={githubLogin}&state={state}` instead of setting a cookie and redirecting to the dashboard.
+
+**These changes may already be partially implemented in Phase 3.** If not, the following modifications are needed:
+
+### `apps/dashboard/src/app/api/auth/github/route.ts`
+
+Add CLI-aware redirect_uri construction:
+- If `cli=true` is in the query params, store `port` and `state` in the OAuth `state` parameter (JSON-encoded or concatenated)
+- Set `redirect_uri` to the dashboard callback URL (same as always -- the dashboard callback route handles the CLI redirect)
+
+### `apps/dashboard/src/app/api/auth/github/callback/route.ts`
+
+After successful OAuth and user verification:
+- If the OAuth state contains CLI metadata (port, original state), redirect to `http://localhost:{port}/callback?token={jwt}&user={login}&state={originalState}`
+- Otherwise, proceed with the normal cookie-based flow
+
+---
+
+## Security Considerations
+
+1. **Local server binds to `127.0.0.1` only**: Prevents other machines on the network from intercepting the callback
+2. **CSRF state parameter**: Random 32-character hex string is generated, sent with the OAuth request, and validated on callback
+3. **5-minute timeout**: The local server automatically shuts down after 5 minutes to prevent dangling processes
+4. **Token storage permissions**: `saveGlobalConfig()` should write the config file with `0600` permissions (owner read/write only). This may require updating `config.ts` to use `writeFileSync` with `{ mode: 0o600 }`
+5. **No token in URL bar**: The token is passed via query parameter to localhost only -- it never leaves the local machine
+
+---
+
+## Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Browser does not open automatically | Print the URL so the user can open it manually |
+| User denies GitHub authorization | Callback receives `error` parameter; CLI prints error and exits |
+| User closes the browser tab without completing auth | 5-minute timeout fires; CLI prints timeout error and exits |
+| Port conflict on local server | Uses port `0` (OS assigns random available port); conflicts are impossible |
+| Already logged in | Print warning, continue with re-authentication (overwrites existing token) |
+| `apiUrl` not configured | Default to `http://localhost:3000`; user can set via `gblockparty config set apiUrl <url>` |
+
+---
+
+## Verification Checklist
+
+- [ ] `gblockparty login` opens the browser to the correct OAuth URL
+- [ ] Local server starts on `127.0.0.1` with a random port
+- [ ] After completing OAuth in the browser, the token is saved to `~/.gblockparty/config.json`
+- [ ] The browser tab shows "Authenticated! You can close this tab."
+- [ ] The terminal shows a success message with the GitHub username
+- [ ] The local server shuts down after receiving the callback
+- [ ] CSRF state parameter is validated (mismatched state is rejected)
+- [ ] 5-minute timeout works (server shuts down, CLI exits with error)
+- [ ] Config file is created with correct permissions
+- [ ] Running `gblockparty login` again overwrites the existing token
+- [ ] `pnpm typecheck` passes

@@ -1,0 +1,227 @@
+# Step 1: Slack Webhook Integration
+
+**Phase:** 12 -- Notifications, Monitoring & Polish
+**Step:** 1 of 6
+**Type:** Backend implementation
+**Depends on:** None (self-contained implementation within existing stub)
+**Blocks:** Step 3 (settings page needs to test Slack notifications), Step 4 (trigger integration calls this function)
+
+---
+
+## Objective
+
+Replace the TODO stub in `sendSlackNotification()` with a working implementation that sends a rich formatted message to a Slack Incoming Webhook URL. Messages include color-coded attachments (red for failures, green for success, yellow for rollbacks), project context, error details, and a link to the dashboard.
+
+---
+
+## Current State
+
+The file `packages/core/src/notifications/notifier.ts` has the following stub:
+
+```typescript
+export async function sendSlackNotification(
+  webhookUrl: string,
+  payload: NotificationPayload,
+): Promise<void> {
+  // TODO: Send Slack webhook message
+  logger.info({ projectName: payload.projectName }, "Sending Slack notification");
+  throw new Error("Not implemented");
+}
+```
+
+The `NotificationPayload` interface is already defined:
+
+```typescript
+export interface NotificationPayload {
+  projectName: string;
+  deploymentType: string;
+  status: string;
+  url?: string;
+  errorMessage?: string;
+}
+```
+
+---
+
+## Slack Webhook API
+
+Slack Incoming Webhooks accept a POST request with a JSON body. The URL format is:
+```
+https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+### Message Format
+
+Use Slack's attachment format for rich messages with color coding:
+
+```typescript
+interface SlackMessage {
+  text: string;               // fallback text for notifications
+  attachments: SlackAttachment[];
+}
+
+interface SlackAttachment {
+  color: string;              // hex color: "#FF0000" (red), "#36a64f" (green), "#FFA500" (yellow)
+  title: string;              // e.g., "Build Failed: my-project"
+  title_link?: string;        // link to dashboard
+  text?: string;              // error message or details
+  fields: SlackField[];
+  footer: string;             // "gBlockParty"
+  ts: number;                 // Unix timestamp
+}
+
+interface SlackField {
+  title: string;
+  value: string;
+  short: boolean;
+}
+```
+
+---
+
+## Implementation
+
+```typescript
+export async function sendSlackNotification(
+  webhookUrl: string,
+  payload: NotificationPayload,
+): Promise<void> {
+  const color = getStatusColor(payload.status);
+  const title = formatTitle(payload);
+  const dashboardUrl = payload.url
+    ? payload.url
+    : `${process.env.NEXT_PUBLIC_DASHBOARD_URL ?? "https://platform.yourdomain.dev"}`;
+
+  const message = {
+    text: title, // fallback for push notifications
+    attachments: [
+      {
+        color,
+        title,
+        title_link: dashboardUrl,
+        text: payload.errorMessage ?? undefined,
+        fields: [
+          {
+            title: "Project",
+            value: payload.projectName,
+            short: true,
+          },
+          {
+            title: "Event",
+            value: payload.deploymentType,
+            short: true,
+          },
+          {
+            title: "Status",
+            value: payload.status,
+            short: true,
+          },
+        ],
+        footer: "gBlockParty",
+        ts: Math.floor(Date.now() / 1000),
+      },
+    ],
+  };
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(message),
+    signal: AbortSignal.timeout(10_000), // 10 second timeout
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "unknown");
+    logger.error(
+      { status: response.status, body, projectName: payload.projectName },
+      "Slack notification failed",
+    );
+    throw new Error(`Slack webhook returned ${response.status}: ${body}`);
+  }
+
+  logger.info({ projectName: payload.projectName }, "Slack notification sent");
+}
+```
+
+### Color Mapping
+
+```typescript
+function getStatusColor(status: string): string {
+  switch (status) {
+    case "failed":
+      return "#FF0000";      // red
+    case "success":
+    case "ready":
+      return "#36a64f";      // green
+    case "rollback":
+      return "#FFA500";      // yellow/orange
+    default:
+      return "#808080";      // gray
+  }
+}
+```
+
+### Title Formatting
+
+```typescript
+function formatTitle(payload: NotificationPayload): string {
+  switch (payload.status) {
+    case "failed":
+      return `Build/Deploy Failed: ${payload.projectName}`;
+    case "rollback":
+      return `Auto-Rollback: ${payload.projectName}`;
+    case "ready":
+    case "success":
+      return `Deployment Successful: ${payload.projectName}`;
+    default:
+      return `${payload.status}: ${payload.projectName}`;
+  }
+}
+```
+
+---
+
+## Example Messages
+
+### Build Failure
+
+```
+[RED] Build/Deploy Failed: my-project
+| Project: my-project | Event: production | Status: failed |
+Error: "Command 'pnpm build' failed with exit code 1"
+gBlockParty | Today at 3:45 PM
+```
+
+### Auto-Rollback
+
+```
+[YELLOW] Auto-Rollback: my-project
+| Project: my-project | Event: rollback | Status: rollback |
+"Crash-loop detected. Rolled back to deployment abc123."
+gBlockParty | Today at 3:47 PM
+```
+
+---
+
+## Error Handling
+
+- **Network timeout**: `AbortSignal.timeout(10_000)` ensures the request doesn't hang.
+- **Non-200 response**: Log the status and body, throw an error.
+- **Invalid webhook URL**: Will result in a network error or non-200; caught by the caller.
+- **The `notify()` aggregator uses `Promise.allSettled()`**: A Slack failure does not prevent Discord from sending.
+
+---
+
+## Verification
+
+- [ ] `sendSlackNotification()` sends HTTP POST to webhook URL with correct JSON body
+- [ ] Message includes color-coded attachment (red for failure)
+- [ ] Message includes project name, event type, and status as fields
+- [ ] Error message included when present in payload
+- [ ] Dashboard link included as `title_link`
+- [ ] Footer shows "gBlockParty"
+- [ ] Timestamp is current Unix time
+- [ ] Non-200 response throws error with status and body details
+- [ ] Network timeout (10s) is enforced
+- [ ] No sensitive information in the notification message
+- [ ] Logger called with project name on success and failure

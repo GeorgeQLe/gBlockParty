@@ -1,0 +1,305 @@
+# Step 8: Docker Image Retention & Cleanup
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 8 of 8
+**Status:** Not Started
+**Depends on:** Phase 5 (Docker client), Step 5 (Rollback -- images must not be pruned if they are rollback targets)
+
+---
+
+## Goal
+
+Implement `pruneImages()` in `packages/core/src/providers/docker/client.ts` to keep only the last 10 Docker images per project (configurable via `BUILD_LIMITS.MAX_IMAGES_PER_PROJECT`). Pruning runs after each successful production deploy. Preview deployment images are deleted when the PR is closed. This prevents the VPS's 80 GB disk from filling up with stale images.
+
+---
+
+## Background
+
+Every build produces a Docker image tagged `{project}:{commit-sha}`. Over time, these images accumulate. A typical Next.js app image is 150-300 MB. With 10+ deploys per week across multiple projects, disk usage grows by 1-3 GB per week without cleanup.
+
+From `__spec.md__` Section 5:
+
+> Keep last 10 Docker images per project. Older images are pruned automatically.
+
+From `__spec.md__` Section 6 (Preview Deployments):
+
+> Preview images deleted after PR is closed (not counted toward the 10-image retention limit).
+
+### Constants
+
+From `packages/shared/src/constants/deployment.ts`:
+
+```typescript
+BUILD_LIMITS.MAX_IMAGES_PER_PROJECT = 10  // configurable retention count
+```
+
+---
+
+## Implementation
+
+### File: `packages/core/src/providers/docker/client.ts`
+
+Replace the `pruneImages` TODO stub:
+
+```typescript
+import Dockerode from "dockerode";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("docker-client");
+
+/**
+ * Remove old Docker images for a project, keeping only the most recent `keepCount`.
+ * Images currently in use by running containers are never removed.
+ */
+export async function pruneImages(
+  docker: Dockerode,
+  projectName: string,
+  keepCount: number,
+): Promise<{ removed: string[]; kept: string[] }> {
+  // 1. List all images for this project
+  const allImages = await docker.listImages({
+    filters: {
+      reference: [`${projectName}:*`],
+    },
+  });
+
+  if (allImages.length <= keepCount) {
+    logger.info(
+      { projectName, imageCount: allImages.length, keepCount },
+      "No images to prune",
+    );
+    return { removed: [], kept: allImages.map((i) => i.RepoTags?.[0] ?? i.Id) };
+  }
+
+  // 2. Sort by creation date (newest first)
+  const sorted = allImages.sort((a, b) => b.Created - a.Created);
+
+  // 3. Identify images to keep (newest N)
+  const toKeep = sorted.slice(0, keepCount);
+  const toPrune = sorted.slice(keepCount);
+
+  // 4. Get running container image IDs to avoid removing in-use images
+  const containers = await docker.listContainers({ all: false }); // only running
+  const inUseImageIds = new Set(containers.map((c) => c.ImageID));
+
+  // 5. Remove old images
+  const removed: string[] = [];
+  const kept: string[] = toKeep.map((i) => i.RepoTags?.[0] ?? i.Id);
+
+  for (const imageInfo of toPrune) {
+    const imageId = imageInfo.Id;
+    const imageTag = imageInfo.RepoTags?.[0] ?? imageId;
+
+    // Skip if the image is in use by a running container
+    if (inUseImageIds.has(imageId)) {
+      logger.info({ imageTag }, "Skipping in-use image");
+      kept.push(imageTag);
+      continue;
+    }
+
+    try {
+      const image = docker.getImage(imageId);
+      await image.remove({ force: false });
+      removed.push(imageTag);
+      logger.info({ imageTag }, "Image removed");
+    } catch (error) {
+      // Image might be referenced by other tags or intermediate layers
+      logger.warn({ imageTag, error }, "Failed to remove image");
+      kept.push(imageTag);
+    }
+  }
+
+  logger.info(
+    { projectName, removed: removed.length, kept: kept.length },
+    "Image pruning complete",
+  );
+
+  return { removed, kept };
+}
+```
+
+### Preview Image Cleanup
+
+Preview images follow a different naming convention: `{project}:pr-{N}-{sha}`.
+
+When a PR is closed (webhook event `pull_request.closed`), all images for that PR should be deleted:
+
+```typescript
+/**
+ * Remove all Docker images for a specific preview deployment (PR).
+ * Called when a PR is closed or merged.
+ */
+export async function removePreviewImages(
+  docker: Dockerode,
+  projectName: string,
+  prNumber: number,
+): Promise<string[]> {
+  const pattern = `${projectName}:pr-${prNumber}-*`;
+
+  const images = await docker.listImages({
+    filters: {
+      reference: [pattern],
+    },
+  });
+
+  // Also check for running containers using these images
+  const containers = await docker.listContainers({ all: false });
+  const inUseImageIds = new Set(containers.map((c) => c.ImageID));
+
+  const removed: string[] = [];
+
+  for (const imageInfo of images) {
+    const imageId = imageInfo.Id;
+    const imageTag = imageInfo.RepoTags?.[0] ?? imageId;
+
+    if (inUseImageIds.has(imageId)) {
+      logger.warn({ imageTag }, "Skipping in-use preview image");
+      continue;
+    }
+
+    try {
+      const image = docker.getImage(imageId);
+      await image.remove({ force: false });
+      removed.push(imageTag);
+      logger.info({ imageTag }, "Preview image removed");
+    } catch (error) {
+      logger.warn({ imageTag, error }, "Failed to remove preview image");
+    }
+  }
+
+  return removed;
+}
+```
+
+---
+
+## Integration Points
+
+### 1. After Successful Production Deploy
+
+In `packages/core/src/deploy/deployer.ts`, call `pruneImages()` after a successful production deployment:
+
+```typescript
+// At the end of Deployer.deploy(), after status is set to "ready"
+import { pruneImages } from "../providers/docker/client";
+import { BUILD_LIMITS } from "@gblockparty/shared/constants";
+
+// ... deploy success ...
+
+// Prune old images (fire-and-forget, non-blocking)
+pruneImages(docker, project.slug, BUILD_LIMITS.MAX_IMAGES_PER_PROJECT).catch((error) => {
+  logger.warn({ error, projectName: project.slug }, "Image pruning failed");
+});
+```
+
+Pruning is fire-and-forget -- it runs after the deployment is complete and serving traffic. A pruning failure does not affect the deployment.
+
+### 2. After PR Close (Preview Cleanup)
+
+In the GitHub webhook handler for `pull_request.closed` events:
+
+```typescript
+// In the PR close handler
+import { removePreviewImages } from "@gblockparty/core/providers/docker/client";
+
+// After stopping the preview container and removing Caddy route:
+await removePreviewImages(docker, project.slug, prNumber);
+```
+
+### 3. After Rollback
+
+After a successful rollback (in `rollbackDeployment()`), pruning is not needed because rollback reuses an existing image and does not create a new one. The next production deploy will trigger pruning.
+
+---
+
+## Image Tagging Convention
+
+Understanding the image tag format is important for pruning:
+
+| Type | Tag Format | Example | Counted in Retention |
+|------|-----------|---------|---------------------|
+| Production | `{slug}:{commit-sha}` | `myapp:a1b2c3d4` | Yes |
+| Preview | `{slug}:pr-{N}-{commit-sha}` | `myapp:pr-42-e5f6g7h8` | No (separate cleanup) |
+| Rollback | No new image (reuses existing) | N/A | N/A |
+
+The `pruneImages()` function uses `{projectName}:*` as the reference filter. This matches both production and preview tags. However, preview images should be cleaned up separately when the PR closes, not counted against the retention limit.
+
+To avoid pruning preview images during production pruning, filter them out:
+
+```typescript
+// In pruneImages(), after listing images:
+const productionImages = allImages.filter((img) => {
+  const tag = img.RepoTags?.[0] ?? "";
+  // Exclude preview images (pr-N-sha pattern)
+  return !tag.includes(":pr-");
+});
+```
+
+---
+
+## Edge Cases
+
+1. **Fewer than 10 images**: `pruneImages()` returns early, nothing to remove.
+2. **Image in use by a running container**: Skipped. Docker prevents removal of in-use images, but we check proactively to avoid error logs.
+3. **Image referenced by multiple tags**: `docker.getImage(id).remove()` removes the image by ID. If the image has multiple tags, only the specific tag reference is removed. The image data is removed when all tag references are gone.
+4. **Concurrent deploys creating images**: Pruning runs after deploy completion. If another deploy is in progress, its image will not appear in the list yet (not built yet). No race condition.
+5. **Pruning removes a potential rollback target**: Rollback targets older than position 10 in the image list will be pruned. The rollback mechanism (Step 5) checks for image existence and returns a clear error. The dashboard UI could gray out rollback buttons for pruned images.
+6. **Dangling images (no tag)**: `docker.listImages({ filters: { reference: [...] } })` only matches tagged images. Dangling images from failed builds are not cleaned up by this function. A separate `docker image prune` can be run periodically if needed.
+7. **PR with multiple pushes**: Each push to a PR creates a new preview image. When the PR closes, `removePreviewImages()` removes all images matching `pr-{N}-*` for that PR.
+
+---
+
+## Disk Space Estimation
+
+| Metric | Value |
+|--------|-------|
+| Typical Next.js image size | 150-300 MB |
+| Images retained per project | 10 |
+| Max disk per project (production) | 3 GB |
+| Projects on VPS | ~5-10 |
+| Max production image disk usage | 15-30 GB |
+| VPS disk capacity | 80 GB |
+| Available for other uses | 50-65 GB |
+
+With 10 images retained per project and ~10 projects, image storage uses 15-30 GB of the 80 GB disk. This leaves ample room for the OS, Docker layers, build caches, and application data.
+
+---
+
+## Testing Approach
+
+1. **Unit test `pruneImages`**: Mock Dockerode. Create 15 mock images. Call with `keepCount=10`. Verify 5 oldest are removed.
+2. **Unit test: skip in-use images**: Mark 2 of the old images as in-use. Verify they are not removed.
+3. **Unit test: preview images excluded**: Include preview-tagged images in the list. Verify they are not counted toward retention.
+4. **Unit test `removePreviewImages`**: Create mock preview images for PR #42. Verify all are removed.
+5. **Integration test**: Build 12 images for a project. Trigger pruning. Verify only 10 remain on Docker.
+
+---
+
+## Verification Checklist
+
+- [ ] `pruneImages(docker, projectName, keepCount)` implemented
+- [ ] Lists all images matching `{projectName}:*` reference
+- [ ] Sorts by creation date (newest first)
+- [ ] Keeps the newest `keepCount` images
+- [ ] Removes older images via Docker API
+- [ ] Skips images in use by running containers
+- [ ] Excludes preview images from production retention counting
+- [ ] Returns list of removed and kept images
+- [ ] `removePreviewImages(docker, projectName, prNumber)` implemented
+- [ ] Removes all images matching `{projectName}:pr-{N}-*`
+- [ ] Skips in-use preview images
+- [ ] Pruning called after each successful production deploy (fire-and-forget)
+- [ ] Preview cleanup called on PR close webhook
+- [ ] Pruning failures logged but do not affect deployments
+- [ ] `BUILD_LIMITS.MAX_IMAGES_PER_PROJECT` (10) used as default retention count
+
+---
+
+## Output
+
+After this step:
+
+- `packages/core/src/providers/docker/client.ts` has working `pruneImages()` and `removePreviewImages()` functions.
+- Production deploys trigger automatic image pruning to the retention limit.
+- PR close events trigger preview image cleanup.
+- VPS disk usage is bounded and predictable.

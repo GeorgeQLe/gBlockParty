@@ -1,0 +1,244 @@
+# Step 2: S3 Framework Build Cache
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 2 of 8
+**Status:** Not Started
+**Depends on:** Step 1 (S3 Dependency Cache -- same file, same S3 client pattern)
+
+---
+
+## Goal
+
+Add framework-specific build cache support to `packages/core/src/build/cache.ts`. For Next.js projects, cache the `.next/cache/` directory in S3 so that incremental builds (unchanged pages, same data fetching) can reuse compiled artifacts. Configure a 7-day S3 lifecycle rule to automatically expire stale caches.
+
+---
+
+## Background
+
+Next.js stores incremental compilation artifacts in `.next/cache/`. When this directory is present at build time, Next.js skips recompilation of unchanged pages and reuses cached webpack/turbopack chunks. Without this cache, every build recompiles the entire application from scratch.
+
+The framework cache is separate from the dependency cache (Step 1) because:
+
+1. **Different invalidation**: Dependencies change when `pnpm-lock.yaml` changes; build cache changes on every commit (different source code may produce different cached artifacts).
+2. **Different scope**: Dependency cache is project-wide (same lockfile across branches). Build cache is per-branch because production and preview branches may have divergent source trees.
+3. **Different lifecycle**: Dependency cache is valid as long as the lockfile hash matches. Build cache expires after 7 days to prevent stale artifacts from causing build issues.
+
+### Cache Key Format
+
+```
+{projectId}/build/{branch}
+```
+
+Example: `a1b2c3d4-e5f6-7890-abcd-ef1234567890/build/main`
+
+The key uses the branch name (not a content hash) because the build cache is always overwritten on each successful build. The latest cache for a branch is always the most useful one.
+
+### Cache Flow
+
+```
+Build starts (after dependency install)
+  |
+  v
+restoreBuildCache(bucket, projectId, branch)
+  |-- Cache hit:  Download tarball, extract .next/cache/ into project directory
+  |-- Cache miss: Continue (cold build)
+  |
+  v
+Run build command (pnpm build)
+  (Next.js uses .next/cache/ for incremental compilation if present)
+  |
+  v
+saveBuildCache(bucket, projectId, branch, tarball)
+  |-- Always save after successful build (overwrite previous)
+  |-- Skip if tarball exceeds BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES (1 GB)
+  |
+  v
+Continue to Docker image build
+```
+
+---
+
+## Implementation
+
+### File: `packages/core/src/build/cache.ts`
+
+Add two new functions alongside the dependency cache functions from Step 1:
+
+#### `saveBuildCache(bucket, projectId, branch, data)`
+
+1. Construct the S3 key: `${projectId}/build/${branch}`
+2. Validate tarball size against `BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES`.
+3. Call `uploadToS3(bucket, key, data)`.
+4. Log the upload with project ID, branch, and tarball size.
+
+#### `restoreBuildCache(bucket, projectId, branch)`
+
+1. Construct the S3 key: `${projectId}/build/${branch}`
+2. Call `downloadFromS3(bucket, key)`.
+3. If `null` (cache miss), log and return `null`.
+4. If buffer returned (cache hit), log with size and return the buffer.
+
+### Function Signatures
+
+```typescript
+// Framework build cache
+export async function saveBuildCache(
+  bucket: string,
+  projectId: string,
+  branch: string,
+  data: Buffer,
+): Promise<void>;
+
+export async function restoreBuildCache(
+  bucket: string,
+  projectId: string,
+  branch: string,
+): Promise<Buffer | null>;
+```
+
+### Framework-Specific Cache Directories
+
+The tarball content depends on the detected framework:
+
+| Framework | Cache Directory | Contents |
+|-----------|----------------|----------|
+| `nextjs` | `.next/cache/` | Webpack/Turbopack chunks, optimized images, fetch cache |
+| `dockerfile` | None | No framework cache (user manages their own build caching in Dockerfile) |
+| `static` | None | No build step, no cache |
+
+The `BuildRunner` should only call build cache functions when the framework is `nextjs`. For `dockerfile` and `static` types, skip build caching entirely.
+
+### Tarball Creation for Framework Cache
+
+```typescript
+// Create tarball of .next/cache/ directory
+async function createBuildCacheTarball(projectDir: string): Promise<Buffer | null> {
+  const cacheDir = path.join(projectDir, ".next", "cache");
+  if (!existsSync(cacheDir)) {
+    return null; // No cache directory to save
+  }
+  const chunks: Buffer[] = [];
+  const stream = tar.create(
+    { gzip: true, cwd: projectDir },
+    [".next/cache"],
+  );
+  for await (const chunk of stream) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
+}
+```
+
+### Integration with BuildRunner
+
+In `packages/core/src/build/builder.ts`, the `BuildRunner.run()` method should call framework cache functions around the build step:
+
+```
+Step 1: Clone repo
+Step 2: Detect framework
+Step 3: Hash lockfile
+Step 4: Restore deps cache (Step 1)
+Step 5: pnpm install
+Step 6: Save deps cache (Step 1)
+Step 7: Restore build cache (this step) -- only for nextjs
+Step 8: Run build command (pnpm build)
+Step 9: Save build cache (this step) -- only for nextjs, only on success
+Step 10: Build Docker image
+```
+
+---
+
+## S3 Lifecycle Rule
+
+Configure a 7-day expiry rule on the S3 bucket for objects under the `*/build/` prefix. This prevents stale build caches from accumulating indefinitely.
+
+### Lifecycle Rule Configuration
+
+This can be configured via:
+
+1. **Terraform** (preferred, if S3 bucket is Terraform-managed):
+
+```hcl
+resource "aws_s3_bucket_lifecycle_configuration" "cache_expiry" {
+  bucket = aws_s3_bucket.build_cache.id
+
+  rule {
+    id     = "expire-build-cache"
+    status = "Enabled"
+
+    filter {
+      prefix = ""  # Applies to all objects (deps and build caches)
+    }
+
+    expiration {
+      days = 7
+    }
+  }
+}
+```
+
+2. **AWS CLI** (if Terraform is not managing the bucket):
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket $S3_CACHE_BUCKET \
+  --lifecycle-configuration '{
+    "Rules": [{
+      "ID": "expire-build-cache",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "Expiration": { "Days": 7 }
+    }]
+  }'
+```
+
+Note: The 7-day expiry applies to all cache objects (both deps and build). This is acceptable because dependency caches are re-created on any build with the same lockfile, and builds happen more frequently than every 7 days for active projects.
+
+---
+
+## Edge Cases
+
+1. **First build for a project on a branch**: Cache miss. Cold build. Cache saved after successful build.
+2. **Rebuild same branch with no source changes**: Cache hit. Next.js uses `.next/cache/` for incremental compilation, producing the same output faster.
+3. **New branch from main**: Cache miss for the new branch name. Could optimize by falling back to `main` branch cache, but this is deferred for simplicity.
+4. **Framework is not Next.js**: Skip build cache entirely. `BuildRunner` checks framework type before calling cache functions.
+5. **`.next/cache/` does not exist after build**: Some Next.js configurations or error states may not produce a cache directory. `createBuildCacheTarball` returns `null`, and no cache is saved.
+6. **Branch name contains special characters**: Branch names like `feature/my-feature` contain `/`, which is valid in S3 keys. No special handling needed.
+7. **S3 lifecycle deletes cache during a build**: The cache is downloaded at the start of the build. Once downloaded, the local copy is used. S3 deletion during the build has no effect.
+
+---
+
+## Performance Expectations
+
+| Scenario | Without Cache | With Cache |
+|----------|--------------|------------|
+| Next.js cold build (100 pages) | ~60s | ~60s (no change on first build) |
+| Next.js rebuild (1 page changed) | ~60s | ~15-25s (incremental) |
+| Next.js rebuild (no changes) | ~60s | ~10-15s (fully cached) |
+
+Actual performance depends on project size, number of pages, and data fetching. The build cache primarily helps with webpack/turbopack recompilation and static page generation.
+
+---
+
+## Verification Checklist
+
+- [ ] `saveBuildCache()` uploads tarball to `{projectId}/build/{branch}` in S3
+- [ ] `restoreBuildCache()` downloads tarball on cache hit, returns `null` on miss
+- [ ] Build cache only used for `nextjs` framework (skipped for `dockerfile`, `static`)
+- [ ] `.next/cache/` directory tarballed and extracted correctly
+- [ ] Tarball size validated against `BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES`
+- [ ] S3 errors during cache operations do not fail the build
+- [ ] S3 lifecycle rule set to expire cache objects after 7 days
+- [ ] `BuildRunner` integrates build cache restore before `pnpm build` and save after
+- [ ] Incremental Next.js build with cache hit is measurably faster
+
+---
+
+## Output
+
+After this step:
+
+- `packages/core/src/build/cache.ts` has `saveBuildCache()` and `restoreBuildCache()` functions alongside the dependency cache functions from Step 1.
+- `packages/core/src/build/builder.ts` calls build cache functions for Next.js projects.
+- S3 bucket has a lifecycle rule expiring cache objects after 7 days.
+- Incremental Next.js builds benefit from cached compilation artifacts.

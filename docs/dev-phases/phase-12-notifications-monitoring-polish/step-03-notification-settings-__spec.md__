@@ -1,0 +1,240 @@
+# Step 3: Notification Settings API & Dashboard UI
+
+**Phase:** 12 -- Notifications, Monitoring & Polish
+**Step:** 3 of 6
+**Type:** API + Frontend implementation
+**Depends on:** Steps 1-2 (Slack/Discord implementations for the "Test" button), `notificationSettings` table in schema
+**Blocks:** Step 4 (trigger integration reads settings from this table), Step 5 (settings page embeds this form)
+
+---
+
+## Objective
+
+Create the API routes for reading and updating notification settings, and build the dashboard form for configuring Slack/Discord webhook URLs and event toggles. Since gBlockParty is a single-user platform, notification settings are global (one row in the `notification_settings` table), not per-project.
+
+---
+
+## Database Schema
+
+The `notification_settings` table already exists in `packages/shared/src/db/schema.ts`:
+
+```typescript
+export const notificationSettings = pgTable("notification_settings", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  slackWebhookUrl: text("slack_webhook_url"),
+  discordWebhookUrl: text("discord_webhook_url"),
+  notifyOnFailure: boolean("notify_on_failure").default(true).notNull(),
+  notifyOnRollback: boolean("notify_on_rollback").default(true).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+```
+
+This is a single-row table. The first GET creates a default row if none exists.
+
+---
+
+## API Route: `apps/dashboard/src/app/api/settings/notifications/route.ts`
+
+### GET `/api/settings/notifications`
+
+Returns the current notification settings.
+
+**Flow:**
+1. Query the `notification_settings` table (take the first row).
+2. If no row exists, return default settings:
+   ```json
+   {
+     "slackWebhookUrl": null,
+     "discordWebhookUrl": null,
+     "notifyOnFailure": true,
+     "notifyOnRollback": true
+   }
+   ```
+3. If a row exists, return its values.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "slackWebhookUrl": "https://hooks.slack.com/services/...",
+  "discordWebhookUrl": null,
+  "notifyOnFailure": true,
+  "notifyOnRollback": true,
+  "updatedAt": "2026-03-02T12:00:00Z"
+}
+```
+
+### PUT `/api/settings/notifications`
+
+Creates or updates the notification settings.
+
+**Request body** (Zod-validated):
+```typescript
+const updateSettingsSchema = z.object({
+  slackWebhookUrl: z.string().url().nullable().optional(),
+  discordWebhookUrl: z.string().url().nullable().optional(),
+  notifyOnFailure: z.boolean().optional(),
+  notifyOnRollback: z.boolean().optional(),
+});
+```
+
+**Flow:**
+1. Parse and validate the request body.
+2. Query for existing row.
+3. If exists: update the row with provided fields (merge with existing values).
+4. If not exists: insert a new row with provided fields + defaults.
+5. Return the updated settings.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "slackWebhookUrl": "https://hooks.slack.com/services/...",
+  "discordWebhookUrl": "https://discord.com/api/webhooks/...",
+  "notifyOnFailure": true,
+  "notifyOnRollback": false,
+  "updatedAt": "2026-03-02T12:05:00Z"
+}
+```
+
+### POST `/api/settings/notifications/test`
+
+Sends a test notification to verify the webhook URL works.
+
+**Request body:**
+```typescript
+const testSchema = z.object({
+  type: z.enum(["slack", "discord"]),
+  webhookUrl: z.string().url(),
+});
+```
+
+**Flow:**
+1. Parse and validate the request body.
+2. Create a test payload:
+   ```typescript
+   const testPayload: NotificationPayload = {
+     projectName: "Test Project",
+     deploymentType: "test",
+     status: "success",
+     url: dashboardUrl,
+   };
+   ```
+3. Call `sendSlackNotification()` or `sendDiscordNotification()` based on `type`.
+4. Return success or error.
+
+**Response (200):**
+```json
+{ "message": "Test notification sent successfully" }
+```
+
+**Response (400, webhook failed):**
+```json
+{ "error": "Webhook test failed: Slack returned 404" }
+```
+
+---
+
+## API Route Path
+
+Create the file at: `apps/dashboard/src/app/api/settings/notifications/route.ts`
+
+For the test endpoint, there are two options:
+- **Option A**: Separate file at `apps/dashboard/src/app/api/settings/notifications/test/route.ts` (POST only)
+- **Option B**: Handle POST in the main route file with a query parameter or body discriminator
+
+Prefer **Option A** for clean separation.
+
+---
+
+## Dashboard Component: `notification-settings.tsx`
+
+### File: `apps/dashboard/src/components/settings/notification-settings.tsx`
+
+### Layout
+
+```
++-------------------------------------------------------+
+| Notification Settings                                   |
+|                                                         |
+| Slack Webhook URL                                       |
+| [https://hooks.slack.com/services/...    ] [Test]      |
+|                                                         |
+| Discord Webhook URL                                     |
+| [https://discord.com/api/webhooks/...    ] [Test]      |
+|                                                         |
+| Event Notifications                                     |
+| [x] Notify on build/deployment failures                |
+| [x] Notify on auto-rollback events                     |
+|                                                         |
+| [Save Settings]                                         |
+|                                                         |
+| [Status message: "Settings saved" or error]             |
++-------------------------------------------------------+
+```
+
+### Behavior
+
+1. **Load current settings**: Use SWR to fetch `GET /api/settings/notifications`.
+2. **Form state**: Local state for webhook URLs and toggles, initialized from fetched data.
+3. **Save button**: PUT to `/api/settings/notifications` with the form values. Show loading state, then success/error message.
+4. **Test buttons**: POST to `/api/settings/notifications/test` with the current webhook URL. Show loading state on the button, then a checkmark (success) or error message.
+5. **URL validation**: Client-side validation that webhook URLs match expected patterns:
+   - Slack: starts with `https://hooks.slack.com/`
+   - Discord: starts with `https://discord.com/api/webhooks/`
+   Accept any valid URL but show a warning for non-standard patterns.
+6. **Empty URL handling**: If a webhook URL field is empty, treat it as `null` (disabled).
+
+### Test Button States
+
+```
+[Test]              -- default
+[Testing...]        -- loading (disabled)
+[Sent!]             -- success (green, reverts after 3s)
+[Failed: reason]    -- error (red, stays until dismissed)
+```
+
+---
+
+## Webhook URL Validation
+
+### Client-Side (Warning, Not Blocking)
+
+```typescript
+function isLikelySlackUrl(url: string): boolean {
+  return url.startsWith("https://hooks.slack.com/");
+}
+
+function isLikelyDiscordUrl(url: string): boolean {
+  return url.startsWith("https://discord.com/api/webhooks/");
+}
+```
+
+Show a warning icon/text if the URL doesn't match the expected pattern, but don't prevent saving. The user may have a custom webhook proxy.
+
+### Server-Side (Required)
+
+The Zod schema validates that the value is a valid URL format. The actual webhook validation happens via the "Test" button.
+
+---
+
+## Verification
+
+- [ ] GET returns default settings when no row exists
+- [ ] GET returns stored settings when row exists
+- [ ] PUT creates a new settings row when none exists
+- [ ] PUT updates existing settings row
+- [ ] PUT validates request body with Zod (rejects invalid URLs)
+- [ ] PUT accepts null webhook URLs (to clear/disable)
+- [ ] POST test endpoint sends Slack notification with test payload
+- [ ] POST test endpoint sends Discord notification with test payload
+- [ ] POST test returns error if webhook URL is invalid or unreachable
+- [ ] Dashboard form loads current settings from API
+- [ ] Dashboard form saves settings via PUT
+- [ ] Dashboard form shows success/error feedback on save
+- [ ] Test buttons send test notifications and show results
+- [ ] URL validation warnings shown for non-standard patterns
+- [ ] Empty URL fields treated as null (disabled)
+- [ ] All API routes protected by `withAuth`

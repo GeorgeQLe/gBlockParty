@@ -1,0 +1,347 @@
+# Step 1: PR Webhook Handler
+
+**Phase:** 7 -- Preview Deployments
+**Step:** 1 of 5
+**Status:** Not Started
+**Depends on:** Phase 3 Step 5 (webhook event router foundation), Phase 6 (webhook endpoint with signature validation)
+
+---
+
+## Goal
+
+Extend the `handleWebhook()` function in `packages/core/src/github/webhooks.ts` to process `pull_request` events. When a PR is opened, updated with new commits, or reopened, the handler creates a preview deployment record and kicks off the async preview build pipeline. When a PR is closed or merged, the handler triggers preview cleanup.
+
+---
+
+## Background
+
+The `handleWebhook()` function currently has a `case "pull_request"` branch with TODO comments. The function receives a `WebhookContext` containing the parsed payload, event type, delivery ID, and database connection. The webhook API route in the dashboard (`apps/dashboard/src/app/api/webhooks/github/route.ts`) has already validated the HMAC-SHA256 signature and parsed the event type before calling `handleWebhook()`.
+
+### Current State
+
+**File:** `packages/core/src/github/webhooks.ts`
+
+```typescript
+export interface WebhookContext {
+  db: Database;
+  payload: WebhookPayload;
+  event: string;
+  deliveryId: string;
+}
+
+export async function handleWebhook(ctx: WebhookContext): Promise<void> {
+  const { event, payload, deliveryId } = ctx;
+
+  logger.info({ event, deliveryId }, "Processing webhook");
+
+  switch (event) {
+    case "push":
+      // TODO: Handle push to production branch -> trigger production deployment
+      break;
+    case "pull_request":
+      // TODO: Handle PR opened/synchronize -> preview deployment
+      // TODO: Handle PR closed/merged -> cleanup preview
+      break;
+    case "installation":
+      // TODO: Handle app installation/uninstallation
+      break;
+    default:
+      logger.debug({ event }, "Unhandled webhook event");
+  }
+}
+```
+
+---
+
+## Pull Request Event Payload
+
+GitHub sends the following payload structure for `pull_request` events:
+
+```typescript
+interface PullRequestPayload {
+  action: 'opened' | 'synchronize' | 'reopened' | 'closed' | 'edited' | 'ready_for_review' | ...;
+  number: number;
+  pull_request: {
+    number: number;
+    state: 'open' | 'closed';
+    merged: boolean;
+    head: {
+      sha: string;           // The commit SHA to build
+      ref: string;           // The branch name (e.g., "feature/my-feature")
+      repo: {
+        full_name: string;   // "owner/repo"
+      };
+    };
+    base: {
+      ref: string;           // Target branch (e.g., "main")
+      repo: {
+        full_name: string;   // "owner/repo"
+      };
+    };
+  };
+  installation?: {
+    id: number;              // GitHub App installation ID
+  };
+  repository: {
+    full_name: string;       // "owner/repo"
+  };
+}
+```
+
+### Actions to Handle
+
+| Action | Meaning | Response |
+|--------|---------|----------|
+| `opened` | PR just created | Start preview build |
+| `synchronize` | New commits pushed to PR branch | Rebuild preview |
+| `reopened` | Previously closed PR reopened | Start preview build |
+| `closed` | PR closed (may or may not be merged) | Clean up preview |
+
+All other actions (`edited`, `assigned`, `labeled`, `ready_for_review`, etc.) should be logged at debug level and ignored.
+
+---
+
+## Implementation
+
+### Step 1a: Extract PR Payload Fields
+
+Parse the PR-specific fields from the webhook payload:
+
+```typescript
+case "pull_request": {
+  const action = payload.action;
+  const prNumber = payload.pull_request.number;
+  const headSha = payload.pull_request.head.sha;
+  const headRef = payload.pull_request.head.ref;
+  const repoFullName = payload.repository.full_name;
+  const installationId = payload.installation?.id;
+  const isMerged = payload.pull_request.merged;
+
+  logger.info(
+    { action, prNumber, headSha: headSha.slice(0, 7), repoFullName },
+    "Processing pull_request event",
+  );
+
+  // ...
+}
+```
+
+### Step 1b: Look Up Project
+
+Find the project by installation ID and repository full name:
+
+```typescript
+const project = await findProjectByRepo(ctx.db, installationId, repoFullName);
+if (!project) {
+  logger.warn({ repoFullName, installationId }, "No project found for repo");
+  return;
+}
+```
+
+The `findProjectByRepo` helper queries:
+
+```sql
+SELECT * FROM projects
+WHERE github_installation_id = ? AND github_repo_full_name = ?
+LIMIT 1;
+```
+
+If no project is found, log a warning and return (this repo is not connected to the platform).
+
+### Step 1c: Route by Action
+
+```typescript
+switch (action) {
+  case "opened":
+  case "synchronize":
+  case "reopened":
+    await handlePreviewDeploy(ctx.db, project, prNumber, headSha, headRef);
+    break;
+  case "closed":
+    await handlePreviewCleanup(ctx.db, project, prNumber, isMerged);
+    break;
+  default:
+    logger.debug({ action, prNumber }, "Ignoring pull_request action");
+}
+```
+
+### Step 1d: Create Preview Deployment Record
+
+The `handlePreviewDeploy` function creates a deployment record and dispatches the async build:
+
+```typescript
+async function handlePreviewDeploy(
+  db: Database,
+  project: Project,
+  prNumber: number,
+  commitSha: string,
+  branch: string,
+): Promise<void> {
+  // Create deployment record
+  const deployment = await db.insert(deployments).values({
+    projectId: project.id,
+    type: 'preview',
+    status: 'queued',
+    commitSha,
+    branch,
+    prNumber,
+  }).returning();
+
+  logger.info(
+    { deploymentId: deployment[0].id, projectId: project.id, prNumber },
+    "Preview deployment record created",
+  );
+
+  // Dispatch async preview build (do not await -- webhook must return quickly)
+  // This will be implemented in Step 2 (PreviewDeployer)
+  void startPreviewBuild(db, project, deployment[0]);
+}
+```
+
+Key points:
+- The deployment record is created synchronously (fast DB insert)
+- The actual build is dispatched with `void` (fire-and-forget) so the webhook returns 200 within 500ms
+- The `startPreviewBuild` function will be implemented in Step 2
+
+### Step 1e: Trigger Preview Cleanup
+
+The `handlePreviewCleanup` function finds the active preview for the PR and triggers cleanup:
+
+```typescript
+async function handlePreviewCleanup(
+  db: Database,
+  project: Project,
+  prNumber: number,
+  isMerged: boolean,
+): Promise<void> {
+  logger.info(
+    { projectId: project.id, prNumber, isMerged },
+    "Preview cleanup triggered",
+  );
+
+  // Find active preview deployment for this PR
+  const activePreview = await db.select().from(deployments)
+    .where(
+      and(
+        eq(deployments.projectId, project.id),
+        eq(deployments.type, 'preview'),
+        eq(deployments.prNumber, prNumber),
+        eq(deployments.status, 'ready'),
+      )
+    )
+    .orderBy(desc(deployments.createdAt))
+    .limit(1);
+
+  if (activePreview.length === 0) {
+    logger.info({ projectId: project.id, prNumber }, "No active preview to clean up");
+    return;
+  }
+
+  // Dispatch async cleanup (do not await)
+  // This will be implemented in Step 5 (cleanupPreview)
+  void cleanupPreview(db, project, activePreview[0]);
+}
+```
+
+---
+
+## Delivery ID Deduplication
+
+GitHub may retry webhook delivery if it does not receive a 2xx response. The handler should check if a delivery has already been processed:
+
+```typescript
+// At the top of handleWebhook, before the switch:
+const alreadyProcessed = await checkDeliveryId(ctx.db, ctx.deliveryId);
+if (alreadyProcessed) {
+  logger.info({ deliveryId }, "Duplicate webhook delivery, skipping");
+  return;
+}
+await recordDeliveryId(ctx.db, ctx.deliveryId);
+```
+
+Implementation options:
+1. A `webhook_deliveries` table with `delivery_id TEXT PRIMARY KEY` and `processed_at TIMESTAMPTZ`
+2. An in-memory Set (simpler but lost on restart -- acceptable for MVP since GitHub retries are rare)
+3. Idempotent handler design where re-processing is safe (preferred: check if deployment already exists for this commit+PR)
+
+For MVP, option 3 is recommended: before creating a deployment record, check if one already exists for the same project + PR number + commit SHA. If it does, skip.
+
+```typescript
+const existing = await db.select().from(deployments)
+  .where(
+    and(
+      eq(deployments.projectId, project.id),
+      eq(deployments.prNumber, prNumber),
+      eq(deployments.commitSha, commitSha),
+    )
+  )
+  .limit(1);
+
+if (existing.length > 0) {
+  logger.info({ prNumber, commitSha: commitSha.slice(0, 7) }, "Deployment already exists for this commit, skipping");
+  return;
+}
+```
+
+---
+
+## Error Handling
+
+- If the project lookup fails (DB error), log the error and return (do not crash the webhook handler)
+- If the deployment record creation fails, log the error and return
+- If the async build dispatch fails, the error is caught within `startPreviewBuild` (not in the webhook path)
+- The webhook endpoint always returns 200 to GitHub unless there is a signature validation failure (which happens before `handleWebhook` is called)
+
+```typescript
+case "pull_request": {
+  try {
+    // ... all PR handling logic
+  } catch (error) {
+    logger.error({ error, event, deliveryId }, "Failed to process pull_request event");
+    // Do not rethrow -- webhook should still return 200
+  }
+  break;
+}
+```
+
+---
+
+## WebhookPayload Type Extension
+
+The `WebhookPayload` interface in `packages/shared/src/types/github.ts` may need to be extended to include PR-specific fields. Verify the existing type covers:
+
+- `payload.action` (string)
+- `payload.pull_request` (object with `number`, `head`, `base`, `merged`, `state`)
+- `payload.number` (PR number, top-level)
+- `payload.installation.id` (number)
+- `payload.repository.full_name` (string)
+
+If the type is a loose `Record<string, unknown>`, use type assertions with runtime checks. If it is a discriminated union, add the `PullRequestPayload` variant.
+
+---
+
+## Verification Checklist
+
+- [ ] `handleWebhook()` has a complete `case "pull_request"` implementation
+- [ ] PR `opened` action creates a deployment record with `type='preview'`, `status='queued'`, `pr_number` set
+- [ ] PR `synchronize` action creates a new deployment record (same fields as opened)
+- [ ] PR `reopened` action creates a new deployment record (same fields as opened)
+- [ ] PR `closed` action looks up active preview and triggers cleanup
+- [ ] PR `closed` with no active preview logs and returns without error
+- [ ] Unknown PR actions (e.g., `labeled`, `assigned`) are logged at debug level and ignored
+- [ ] Project lookup by `installationId` + `repoFullName` works
+- [ ] Missing project logs a warning and returns (no error thrown)
+- [ ] Duplicate delivery/commit is detected and skipped
+- [ ] Async build dispatch does not block the webhook response
+- [ ] All errors are caught and logged (webhook always returns 200)
+
+---
+
+## Output
+
+After this step:
+- `handleWebhook()` correctly routes `pull_request` events
+- Preview deployment records are created in the database
+- The handler delegates to `startPreviewBuild()` (implemented in Step 2) for the actual build
+- The handler delegates to `cleanupPreview()` (implemented in Step 5) for PR close
+- The webhook returns within 500ms for all PR events

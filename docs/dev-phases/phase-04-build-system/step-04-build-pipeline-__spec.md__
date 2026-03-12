@@ -1,0 +1,576 @@
+# Step 4: Build Pipeline (BuildRunner)
+
+**Phase:** 4 -- Build System
+**Step:** 4 of 5
+**Type:** Code implementation
+**Depends on:** Step 1 (framework detection), Step 2 (Docker client `buildImage()`), Step 5 (build logging -- developed in parallel), Phase 3 (installation tokens for git clone)
+**Blocks:** Phase 5 (Deployment engine starts containers from images produced here), Phase 7 (Preview builds use this pipeline)
+
+---
+
+## Objective
+
+Implement the full build pipeline in `BuildRunner.run()` in `packages/core/src/build/builder.ts`. This is the core of the build system: it takes a GitHub repo reference (clone URL, commit SHA, branch) and produces a tagged Docker image ready for deployment.
+
+---
+
+## Current State
+
+```typescript
+// packages/core/src/build/builder.ts
+import type { Database } from "@gblockparty/shared/db";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("build-runner");
+
+export interface BuildRunnerOptions {
+  db: Database;
+  projectId: string;
+  commitSha: string;
+  branch: string;
+  cloneUrl: string;
+  installationId: number;
+}
+
+export class BuildRunner {
+  constructor(private options: BuildRunnerOptions) {}
+
+  async run(): Promise<{ imageTag: string; durationMs: number }> {
+    // TODO: Full build pipeline:
+    // 1. Clone repo (shallow, specific commit)
+    // 2. Read deploy.yaml or auto-detect framework
+    // 3. Restore build cache from S3
+    // 4. Install dependencies
+    // 5. Run build command
+    // 6. Build Docker image
+    // 7. Save build cache to S3
+    // 8. Return image tag and duration
+    logger.info(
+      { projectId: this.options.projectId, commitSha: this.options.commitSha },
+      "Build started",
+    );
+    throw new Error("Not implemented");
+  }
+}
+```
+
+---
+
+## Implementation Plan
+
+### Pipeline Overview
+
+The `run()` method executes these steps in order. Each step is documented below with its implementation details.
+
+```typescript
+async run(): Promise<{ imageTag: string; durationMs: number }> {
+  const startTime = Date.now();
+  const buildDir = path.join(BUILD_DIR, `${this.options.projectId}-${this.options.commitSha}`);
+
+  try {
+    // Step 1: Update deployment status to "building"
+    await this.updateDeploymentStatus("building");
+
+    // Step 2: Clone repo
+    await this.cloneRepo(buildDir);
+
+    // Step 3: Detect framework (or read deploy.yaml)
+    const framework = await this.detectOrReadConfig(buildDir);
+
+    // Step 4: Detect package manager
+    const packageManager = detectPackageManager(buildDir);
+
+    // Step 5: Restore build cache from S3
+    await this.restoreCache(buildDir, packageManager);
+
+    // Step 6: Install dependencies
+    await this.installDependencies(buildDir, packageManager);
+
+    // Step 7: Run build command
+    await this.runBuildCommand(buildDir, framework);
+
+    // Step 8: Generate Dockerfile (if needed)
+    await this.prepareDockerfile(buildDir, framework, packageManager);
+
+    // Step 9: Build Docker image
+    const imageTag = await this.buildDockerImage(buildDir);
+
+    // Step 10: Save build cache to S3
+    await this.saveCache(buildDir, packageManager);
+
+    // Step 11: Update deployment status to "deploying"
+    const durationMs = Date.now() - startTime;
+    await this.updateDeploymentRecord({ status: "deploying", imageTag, durationMs });
+
+    return { imageTag, durationMs };
+  } catch (err) {
+    const durationMs = Date.now() - startTime;
+    await this.updateDeploymentRecord({
+      status: "failed",
+      errorMessage: err instanceof Error ? err.message : String(err),
+      durationMs,
+    });
+    throw err;
+  } finally {
+    // Always clean up the build directory
+    await this.cleanup(buildDir);
+  }
+}
+```
+
+---
+
+### Step-by-Step Implementation
+
+#### 1. Clone Repository
+
+Use `child_process.execFile` to run `git clone`:
+
+```typescript
+private async cloneRepo(buildDir: string): Promise<void> {
+  // Get installation token from Phase 3's GitHubAppClient
+  const token = await getInstallationToken(this.options.installationId);
+
+  // Build authenticated clone URL
+  // Original: https://github.com/owner/repo.git
+  // Authenticated: https://x-access-token:{token}@github.com/owner/repo.git
+  const authedUrl = this.options.cloneUrl.replace(
+    "https://github.com",
+    `https://x-access-token:${token}@github.com`,
+  );
+
+  await execAsync("git", [
+    "clone",
+    "--depth", "1",
+    "--branch", this.options.branch,
+    "--single-branch",
+    authedUrl,
+    buildDir,
+  ]);
+
+  // If we need a specific commit (not just branch HEAD), checkout the SHA
+  await execAsync("git", ["checkout", this.options.commitSha], { cwd: buildDir });
+}
+```
+
+The clone URL in logs must be scrubbed (Step 5) to remove the installation token.
+
+**Flags explained:**
+- `--depth 1`: Shallow clone (only latest commit) -- minimizes clone time and disk usage
+- `--branch {branch}`: Clone only the specified branch
+- `--single-branch`: Don't fetch other branches
+
+#### 2. Detect or Read Config
+
+Check for `deploy.yaml` first, then fall back to auto-detection:
+
+```typescript
+private async detectOrReadConfig(buildDir: string): Promise<DetectedFramework> {
+  const deployYamlPath = path.join(buildDir, "deploy.yaml");
+
+  if (fs.existsSync(deployYamlPath)) {
+    // Parse deploy.yaml (uses Zod validation from @gblockparty/shared/validation)
+    const raw = await fs.promises.readFile(deployYamlPath, "utf-8");
+    const config = parseDeployConfig(raw); // Zod-validated
+    return {
+      framework: config.type ?? "dockerfile",
+      nextMode: config.type === "nextjs" ? detectNextMode(buildDir) : undefined,
+      buildCommand: config.buildCommand ?? FRAMEWORK_DEFAULTS[config.type ?? "dockerfile"].buildCommand,
+      outputDir: config.outputDir ?? FRAMEWORK_DEFAULTS[config.type ?? "dockerfile"].outputDir,
+    };
+  }
+
+  // Auto-detect framework
+  return detectFramework(buildDir);
+}
+```
+
+#### 3. Restore Build Cache
+
+Restore dependency cache and framework build cache from S3:
+
+```typescript
+private async restoreCache(buildDir: string, packageManager: string): Promise<void> {
+  try {
+    // Restore dependency cache
+    const lockfileHash = await this.getLockfileHash(buildDir, packageManager);
+    const depsCache = await restoreCache(
+      S3_BUCKET, this.options.projectId, this.options.branch, lockfileHash,
+    );
+    if (depsCache) {
+      await extractTarball(depsCache, path.join(buildDir, "node_modules"));
+      logger.info("Dependency cache restored from S3");
+    }
+
+    // Restore framework build cache (.next/cache for Next.js)
+    const buildCache = await restoreCache(
+      S3_BUCKET, this.options.projectId, this.options.branch, "build-cache",
+    );
+    if (buildCache) {
+      await extractTarball(buildCache, path.join(buildDir, ".next", "cache"));
+      logger.info("Framework build cache restored from S3");
+    }
+  } catch (err) {
+    // Cache restore failures are non-fatal -- log and continue
+    logger.warn({ err }, "Failed to restore build cache, continuing without cache");
+  }
+}
+```
+
+#### 4. Install Dependencies
+
+Run the package manager's install command:
+
+```typescript
+private async installDependencies(buildDir: string, packageManager: string): Promise<void> {
+  const installCommands: Record<string, string[]> = {
+    pnpm: ["pnpm", ["install", "--frozen-lockfile"]],
+    npm: ["npm", ["ci"]],
+    yarn: ["yarn", ["install", "--frozen-lockfile"]],
+    bun: ["bun", ["install", "--frozen-lockfile"]],
+  };
+
+  const [cmd, args] = installCommands[packageManager] ?? installCommands.pnpm;
+  await execAsync(cmd, args, { cwd: buildDir });
+}
+```
+
+#### 5. Run Build Command
+
+Execute the framework's build command:
+
+```typescript
+private async runBuildCommand(buildDir: string, framework: DetectedFramework): Promise<void> {
+  if (!framework.buildCommand) {
+    logger.info("No build command configured, skipping build step");
+    return;
+  }
+
+  const [cmd, ...args] = framework.buildCommand.split(" ");
+  await execAsync(cmd, args, { cwd: buildDir });
+}
+```
+
+#### 6. Prepare Dockerfile
+
+Generate a Dockerfile if one doesn't already exist:
+
+```typescript
+private async prepareDockerfile(
+  buildDir: string,
+  framework: DetectedFramework,
+  packageManager: string,
+): Promise<void> {
+  const dockerfilePath = path.join(buildDir, "Dockerfile");
+
+  if (framework.framework === "dockerfile") {
+    // User provided their own Dockerfile -- nothing to do
+    if (!fs.existsSync(dockerfilePath)) {
+      throw new Error("Framework detected as 'dockerfile' but no Dockerfile found in repo root");
+    }
+    return;
+  }
+
+  // Generate Dockerfile using the existing generateDockerfile() function
+  const dockerfile = generateDockerfile(framework.framework, {
+    nextMode: framework.nextMode,
+    packageManager,
+    buildCommand: framework.buildCommand,
+    outputDir: framework.outputDir,
+  });
+
+  await fs.promises.writeFile(dockerfilePath, dockerfile, "utf-8");
+  logger.info({ framework: framework.framework }, "Generated Dockerfile");
+}
+```
+
+**Note:** The `generateDockerfile()` function from `packages/core/src/build/dockerfile-generator.ts` is already fully implemented. It handles Next.js server mode (standalone output), Next.js static export (Caddy-based), and plain static sites.
+
+#### 7. Build Docker Image
+
+Use the Docker client to build the image:
+
+```typescript
+private async buildDockerImage(buildDir: string): Promise<string> {
+  const docker = createDockerClient();
+  const projectSlug = await this.getProjectSlug();
+  const imageTag = `${projectSlug}:${this.options.commitSha}`;
+
+  await buildImage(docker, buildDir, imageTag);
+
+  logger.info({ imageTag }, "Docker image built");
+
+  // Prune old images (keep last 10 per project)
+  await pruneImages(docker, projectSlug, BUILD_LIMITS.MAX_IMAGES_PER_PROJECT);
+
+  return imageTag;
+}
+```
+
+#### 8. Save Build Cache
+
+Save dependency and build caches to S3:
+
+```typescript
+private async saveCache(buildDir: string, packageManager: string): Promise<void> {
+  try {
+    // Save dependency cache
+    const lockfileHash = await this.getLockfileHash(buildDir, packageManager);
+    const nodeModulesPath = path.join(buildDir, "node_modules");
+    if (fs.existsSync(nodeModulesPath)) {
+      const depsTarball = await createTarball(nodeModulesPath);
+      await saveCache(S3_BUCKET, this.options.projectId, this.options.branch, lockfileHash, depsTarball);
+      logger.info("Dependency cache saved to S3");
+    }
+
+    // Save framework build cache
+    const nextCachePath = path.join(buildDir, ".next", "cache");
+    if (fs.existsSync(nextCachePath)) {
+      const buildTarball = await createTarball(nextCachePath);
+      await saveCache(S3_BUCKET, this.options.projectId, this.options.branch, "build-cache", buildTarball);
+      logger.info("Framework build cache saved to S3");
+    }
+  } catch (err) {
+    // Cache save failures are non-fatal
+    logger.warn({ err }, "Failed to save build cache");
+  }
+}
+```
+
+---
+
+### Build Timeout Enforcement
+
+The entire `run()` method must be wrapped in a timeout:
+
+```typescript
+async run(): Promise<{ imageTag: string; durationMs: number }> {
+  return Promise.race([
+    this.executePipeline(),
+    this.createTimeout(),
+  ]);
+}
+
+private createTimeout(): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Build timed out after ${BUILD_LIMITS.MAX_BUILD_TIME_MS / 1000}s`));
+    }, BUILD_LIMITS.MAX_BUILD_TIME_MS);
+  });
+}
+```
+
+When the timeout fires, the build is marked as FAILED. The `finally` block still runs to clean up the build directory.
+
+**Important:** When a timeout occurs, any running `child_process` (git, npm, docker build) must be killed. Use `AbortController` with `execFile` (Node.js 16+) to propagate the cancellation:
+
+```typescript
+private abortController = new AbortController();
+
+private async execAsync(
+  cmd: string,
+  args: string[],
+  options?: { cwd?: string },
+): Promise<string> {
+  const { stdout } = await execFile(cmd, args, {
+    ...options,
+    signal: this.abortController.signal,
+    timeout: BUILD_LIMITS.MAX_BUILD_TIME_MS,
+  });
+  return stdout;
+}
+```
+
+---
+
+### Helper Methods
+
+#### `updateDeploymentStatus(status: DeploymentStatus)`
+
+Update the deployment record in the database:
+
+```typescript
+private async updateDeploymentStatus(status: DeploymentStatus): Promise<void> {
+  await this.options.db
+    .update(deployments)
+    .set({ status, updatedAt: new Date() })
+    .where(
+      and(
+        eq(deployments.projectId, this.options.projectId),
+        eq(deployments.commitSha, this.options.commitSha),
+      ),
+    );
+}
+```
+
+#### `updateDeploymentRecord(fields)`
+
+Update multiple fields on the deployment record:
+
+```typescript
+private async updateDeploymentRecord(fields: {
+  status: DeploymentStatus;
+  imageTag?: string;
+  errorMessage?: string;
+  durationMs?: number;
+}): Promise<void> {
+  await this.options.db
+    .update(deployments)
+    .set({
+      status: fields.status,
+      dockerImageTag: fields.imageTag,
+      errorMessage: fields.errorMessage,
+      buildDurationMs: fields.durationMs,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(deployments.projectId, this.options.projectId),
+        eq(deployments.commitSha, this.options.commitSha),
+      ),
+    );
+}
+```
+
+#### `getProjectSlug()`
+
+Look up the project slug from the database (used for Docker image naming):
+
+```typescript
+private async getProjectSlug(): Promise<string> {
+  const project = await this.options.db
+    .select({ slug: projects.slug })
+    .from(projects)
+    .where(eq(projects.id, this.options.projectId))
+    .limit(1);
+
+  if (project.length === 0) {
+    throw new Error(`Project not found: ${this.options.projectId}`);
+  }
+  return project[0].slug;
+}
+```
+
+#### `getLockfileHash(buildDir, packageManager)`
+
+Compute a hash of the lockfile for cache keying:
+
+```typescript
+private async getLockfileHash(buildDir: string, packageManager: string): Promise<string> {
+  const lockfileNames: Record<string, string> = {
+    pnpm: "pnpm-lock.yaml",
+    npm: "package-lock.json",
+    yarn: "yarn.lock",
+    bun: "bun.lockb",
+  };
+
+  const lockfilePath = path.join(buildDir, lockfileNames[packageManager] ?? "pnpm-lock.yaml");
+  const content = await fs.promises.readFile(lockfilePath);
+  return crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+```
+
+#### `cleanup(buildDir)`
+
+Remove the temporary build directory:
+
+```typescript
+private async cleanup(buildDir: string): Promise<void> {
+  try {
+    await fs.promises.rm(buildDir, { recursive: true, force: true });
+    logger.info({ buildDir }, "Build directory cleaned up");
+  } catch (err) {
+    logger.warn({ err, buildDir }, "Failed to clean up build directory");
+  }
+}
+```
+
+---
+
+## Extended `BuildRunnerOptions`
+
+The existing options interface may need additional fields:
+
+```typescript
+export interface BuildRunnerOptions {
+  db: Database;
+  projectId: string;
+  deploymentId: string;  // NEW: specific deployment record to update
+  commitSha: string;
+  branch: string;
+  cloneUrl: string;       // e.g., https://github.com/owner/repo.git
+  installationId: number; // GitHub App installation ID (for token)
+  onLog?: (line: string) => void;  // NEW: callback for real-time log streaming (Step 5)
+}
+```
+
+The `deploymentId` is needed to update the specific deployment record (rather than matching on projectId + commitSha, which could be ambiguous for rollbacks). The `onLog` callback enables Step 5's real-time log streaming.
+
+---
+
+## File Dependencies
+
+```
+packages/core/src/build/builder.ts
+  ├── imports: Database from @gblockparty/shared/db
+  ├── imports: createLogger from @gblockparty/shared/backend
+  ├── imports: BUILD_LIMITS from @gblockparty/shared/constants
+  ├── imports: detectFramework, detectPackageManager from ./framework-detector (Step 1)
+  ├── imports: generateDockerfile from ./dockerfile-generator (already implemented)
+  ├── imports: saveCache, restoreCache from ./cache (Step 5)
+  ├── imports: createDockerClient, buildImage, pruneImages from ../providers/docker/client (Step 2)
+  ├── imports: getInstallationToken from ../github/app (Phase 3)
+  ├── imports: deployments, projects from @gblockparty/shared/db/schema (Phase 2)
+  ├── uses: child_process.execFile (for git, pnpm/npm/yarn, etc.)
+  ├── uses: crypto (for lockfile hashing)
+  ├── uses: fs/promises (for file operations)
+  └── used by: packages/core/src/queue/build-queue.ts (the queue calls BuildRunner.run())
+```
+
+---
+
+## Files Affected
+
+| File | Change |
+|------|--------|
+| `packages/core/src/build/builder.ts` | Replace TODO stub with full pipeline implementation |
+
+---
+
+## Error Handling
+
+| Scenario | Handling |
+|----------|---------|
+| Git clone fails (invalid URL, auth failure, repo not found) | Deployment marked `FAILED` with error message. Build directory cleaned up. |
+| No framework detected and no `deploy.yaml` | `detectFramework()` throws; deployment marked `FAILED`. |
+| Dependency install fails (`pnpm install` exits non-zero) | Deployment marked `FAILED` with stderr output. |
+| Build command fails (`pnpm build` exits non-zero) | Deployment marked `FAILED` with stderr output. |
+| Docker image build fails | Deployment marked `FAILED` with Docker error message. |
+| Build timeout (15 minutes) | All child processes killed via AbortController. Deployment marked `FAILED`. |
+| S3 cache restore fails | Non-fatal. Warning logged. Build continues without cache. |
+| S3 cache save fails | Non-fatal. Warning logged. Build result is still valid. |
+| Database update fails | Error logged. The build result is still valid but the deployment record may be stale. |
+| Project not found in database | Throws immediately. Build does not start. |
+
+---
+
+## Verification
+
+- [ ] `BuildRunner.run()` successfully clones a public repo (using installation token)
+- [ ] The clone is shallow (`--depth 1`) and single-branch
+- [ ] `deploy.yaml` is read and parsed if present in the repo root
+- [ ] Framework auto-detection is used as fallback when no `deploy.yaml` exists
+- [ ] Package manager is detected from the lockfile
+- [ ] Dependency cache is restored from S3 when available
+- [ ] Dependencies are installed with the correct package manager command
+- [ ] The build command runs to completion
+- [ ] A Dockerfile is generated for Next.js and static projects
+- [ ] User-provided Dockerfiles are used as-is for `framework: "dockerfile"`
+- [ ] A Docker image is built and tagged as `{projectSlug}:{commitSha}`
+- [ ] Old images are pruned (keeping 10 per project)
+- [ ] Build cache is saved to S3 after successful build
+- [ ] The deployment record is updated to `status: "deploying"` with `imageTag` and `buildDurationMs`
+- [ ] The deployment record is updated to `status: "failed"` with `errorMessage` on failure
+- [ ] The build directory is cleaned up after build (success or failure)
+- [ ] Build timeout (15 min) kills the build and marks it as FAILED
+- [ ] `pnpm typecheck` passes with no errors

@@ -1,0 +1,443 @@
+# Step 4: PR Bot Comment Management
+
+**Phase:** 7 -- Preview Deployments
+**Step:** 4 of 5
+**Status:** Not Started
+**Depends on:** Phase 3 (GitHubAppClient for installation-scoped Octokit), Step 2 (PreviewDeployer triggers PR comment after deploy)
+
+---
+
+## Goal
+
+Implement the `createOrUpdatePRComment()` function in `packages/core/src/github/pr-commenter.ts` so that a single bot comment is maintained on each PR. The comment contains the preview deployment status, URL, and build time. On the first deployment, a new comment is created. On subsequent deployments (new commits pushed), the existing comment is found by its hidden marker and updated in place, avoiding comment spam.
+
+---
+
+## Background
+
+### Current State
+
+**File:** `packages/core/src/github/pr-commenter.ts`
+
+```typescript
+import type { Octokit } from "@octokit/rest";
+
+const BOT_COMMENT_MARKER = "<!-- gblockparty-bot -->";
+
+export async function createOrUpdatePRComment(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  body: string,
+): Promise<void> {
+  // TODO: Search for existing bot comment, update or create
+  // Marker: BOT_COMMENT_MARKER
+  throw new Error("Not implemented");
+}
+
+export function formatDeploymentComment(
+  status: string,
+  url: string | null,
+  buildDurationMs: number | null,
+): string {
+  const statusEmoji =
+    status === "ready" ? "✅" : status === "failed" ? "❌" : "🔄";
+
+  let comment = `${BOT_COMMENT_MARKER}\n`;
+  comment += `## ${statusEmoji} Preview Deployment\n\n`;
+  comment += `**Status:** ${status}\n`;
+  if (url) {
+    comment += `**URL:** ${url}\n`;
+  }
+  if (buildDurationMs) {
+    comment += `**Build time:** ${(buildDurationMs / 1000).toFixed(1)}s\n`;
+  }
+  return comment;
+}
+```
+
+The `formatDeploymentComment()` function is already implemented and returns a markdown string with:
+- The `BOT_COMMENT_MARKER` as a hidden HTML comment on the first line
+- A status emoji header
+- Status, URL, and build time fields
+
+The `createOrUpdatePRComment()` function needs to:
+1. Search all comments on the PR for one containing `BOT_COMMENT_MARKER`
+2. If found, update that comment with the new body
+3. If not found, create a new comment
+
+---
+
+## GitHub API: Issue Comments
+
+PR comments are managed through the Issues API (PRs are a type of issue in GitHub's data model).
+
+### List Comments
+
+**Endpoint:** `GET /repos/{owner}/{repo}/issues/{issue_number}/comments`
+
+**Octokit method:** `octokit.issues.listComments()`
+
+Returns an array of comment objects:
+```typescript
+{
+  id: number;              // Comment ID (needed for update)
+  body: string;            // Comment body (search for marker here)
+  user: {
+    login: string;         // "my-app[bot]" for GitHub App bot
+    type: string;          // "Bot" for GitHub App
+  };
+  created_at: string;
+  updated_at: string;
+}
+```
+
+### Create Comment
+
+**Endpoint:** `POST /repos/{owner}/{repo}/issues/{issue_number}/comments`
+
+**Octokit method:** `octokit.issues.createComment()`
+
+### Update Comment
+
+**Endpoint:** `PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}`
+
+**Octokit method:** `octokit.issues.updateComment()`
+
+---
+
+## Implementation
+
+```typescript
+import type { Octokit } from "@octokit/rest";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("pr-commenter");
+
+const BOT_COMMENT_MARKER = "<!-- gblockparty-bot -->";
+
+export async function createOrUpdatePRComment(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  body: string,
+): Promise<void> {
+  try {
+    // Step 1: Find existing bot comment
+    const existingCommentId = await findBotComment(octokit, owner, repo, prNumber);
+
+    if (existingCommentId) {
+      // Step 2a: Update existing comment
+      logger.info(
+        { owner, repo, prNumber, commentId: existingCommentId },
+        "Updating existing PR comment",
+      );
+
+      await octokit.issues.updateComment({
+        owner,
+        repo,
+        comment_id: existingCommentId,
+        body,
+      });
+    } else {
+      // Step 2b: Create new comment
+      logger.info(
+        { owner, repo, prNumber },
+        "Creating new PR comment",
+      );
+
+      await octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: prNumber,
+        body,
+      });
+    }
+  } catch (error) {
+    // Log but do not throw -- PR comment failure should not fail the deployment
+    logger.error(
+      { error, owner, repo, prNumber },
+      "Failed to create/update PR comment",
+    );
+  }
+}
+```
+
+### Finding the Bot Comment
+
+The `findBotComment` helper searches through all comments on the PR for one containing the marker. Since PRs may have many comments, pagination is handled:
+
+```typescript
+async function findBotComment(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<number | null> {
+  try {
+    // Paginate through all comments to find the bot's comment
+    const iterator = octokit.paginate.iterator(octokit.issues.listComments, {
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+    });
+
+    for await (const { data: comments } of iterator) {
+      for (const comment of comments) {
+        if (comment.body?.includes(BOT_COMMENT_MARKER)) {
+          return comment.id;
+        }
+      }
+    }
+
+    return null;
+  } catch (error) {
+    logger.error(
+      { error, owner, repo, prNumber },
+      "Failed to search for existing bot comment",
+    );
+    return null; // Treat as "not found" -- will create a new comment
+  }
+}
+```
+
+### Pagination Rationale
+
+The `listComments` endpoint returns a paginated list. For most PRs (especially from a single developer), there will be few comments and pagination will not be needed. However, the implementation handles pagination correctly in case a PR has many comments (e.g., from CI tools, code review, etc.).
+
+An alternative approach is to use `per_page: 100` and scan only the first page. This is acceptable for MVP since:
+- Single developer project -- PRs will have few comments
+- Bot comment is typically among the first comments (created on first push)
+- If the bot comment is not found on the first page, creating a duplicate is acceptable
+
+For MVP, the non-paginated approach is also acceptable:
+
+```typescript
+async function findBotComment(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<number | null> {
+  const { data: comments } = await octokit.issues.listComments({
+    owner,
+    repo,
+    issue_number: prNumber,
+    per_page: 100, // Should cover most PRs
+  });
+
+  const botComment = comments.find((c) => c.body?.includes(BOT_COMMENT_MARKER));
+  return botComment?.id ?? null;
+}
+```
+
+---
+
+## Comment Body Format
+
+The comment body is produced by `formatDeploymentComment()` (already implemented). Example output for a successful deployment:
+
+```markdown
+<!-- gblockparty-bot -->
+## ✅ Preview Deployment
+
+**Status:** ready
+**URL:** https://pr-42--myapp.yourdomain.dev
+**Build time:** 34.2s
+```
+
+Example output for a failed deployment:
+
+```markdown
+<!-- gblockparty-bot -->
+## ❌ Preview Deployment
+
+**Status:** failed
+```
+
+The `BOT_COMMENT_MARKER` is an HTML comment that is invisible in the rendered markdown but can be searched for programmatically. This is the standard technique used by GitHub Actions, Vercel, Netlify, and other CI tools.
+
+---
+
+## Call Sites
+
+The `createOrUpdatePRComment` function is called from the `startPreviewBuild` orchestrator:
+
+### On Successful Deployment
+
+```typescript
+const commentBody = formatDeploymentComment('ready', result.url, buildDurationMs);
+await createOrUpdatePRComment(octokit, owner, repo, deployment.prNumber!, commentBody);
+```
+
+### On Failed Deployment
+
+```typescript
+const commentBody = formatDeploymentComment('failed', null, null);
+await createOrUpdatePRComment(octokit, owner, repo, deployment.prNumber!, commentBody);
+```
+
+### On Build Start (Optional)
+
+Optionally, the comment can be created/updated at build start with a "building" status:
+
+```typescript
+const commentBody = formatDeploymentComment('building', null, null);
+await createOrUpdatePRComment(octokit, owner, repo, deployment.prNumber!, commentBody);
+```
+
+This gives immediate feedback on the PR that a build is in progress. The comment will be updated again when the build completes.
+
+---
+
+## GitHub API Permissions
+
+The GitHub App must have the `pull_requests: write` permission (configured in Phase 3). This allows creating and updating comments on pull requests.
+
+From the spec (`__spec.md__` section 3):
+```yaml
+permissions:
+  pull_requests: write  # Comment on PRs
+```
+
+---
+
+## Error Handling
+
+All GitHub API errors are caught and logged. The function never throws, because:
+- PR comment is informational, not critical to the deployment
+- A GitHub API outage should not prevent the preview from deploying
+- If comment creation fails, the commit status check (Step 3) still provides the preview URL
+- If comment update fails, a new comment may be created on the next push (acceptable)
+
+---
+
+## Verification Checklist
+
+- [ ] `createOrUpdatePRComment()` is fully implemented (no longer throws "Not implemented")
+- [ ] Searches for existing comment containing `BOT_COMMENT_MARKER`
+- [ ] If existing comment found: calls `octokit.issues.updateComment()` with correct `comment_id`
+- [ ] If no existing comment: calls `octokit.issues.createComment()` with correct `issue_number`
+- [ ] Comment body is passed through as-is (produced by `formatDeploymentComment`)
+- [ ] Errors are caught and logged (function never throws)
+- [ ] Uses installation-scoped Octokit
+- [ ] Handles pagination (or at least first 100 comments)
+- [ ] Marker is `<!-- gblockparty-bot -->` (matches `BOT_COMMENT_MARKER` constant)
+
+---
+
+## Testing
+
+### Unit Tests
+
+```typescript
+describe("createOrUpdatePRComment", () => {
+  it("creates a new comment when no existing bot comment", async () => {
+    const mockOctokit = {
+      issues: {
+        listComments: vi.fn().mockResolvedValue({ data: [] }),
+        createComment: vi.fn().mockResolvedValue({ data: { id: 1 } }),
+      },
+    };
+
+    await createOrUpdatePRComment(
+      mockOctokit as any, "owner", "repo", 42,
+      "<!-- gblockparty-bot -->\n## Preview",
+    );
+
+    expect(mockOctokit.issues.createComment).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      issue_number: 42,
+      body: "<!-- gblockparty-bot -->\n## Preview",
+    });
+  });
+
+  it("updates existing comment when bot comment found", async () => {
+    const mockOctokit = {
+      issues: {
+        listComments: vi.fn().mockResolvedValue({
+          data: [
+            { id: 100, body: "some other comment" },
+            { id: 200, body: "<!-- gblockparty-bot -->\n## Old Preview" },
+          ],
+        }),
+        updateComment: vi.fn().mockResolvedValue({ data: { id: 200 } }),
+      },
+    };
+
+    await createOrUpdatePRComment(
+      mockOctokit as any, "owner", "repo", 42,
+      "<!-- gblockparty-bot -->\n## Updated Preview",
+    );
+
+    expect(mockOctokit.issues.updateComment).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      comment_id: 200,
+      body: "<!-- gblockparty-bot -->\n## Updated Preview",
+    });
+  });
+
+  it("does not throw on API error", async () => {
+    const mockOctokit = {
+      issues: {
+        listComments: vi.fn().mockRejectedValue(new Error("API error")),
+      },
+    };
+
+    // Should not throw
+    await createOrUpdatePRComment(
+      mockOctokit as any, "owner", "repo", 42, "body",
+    );
+  });
+});
+
+describe("formatDeploymentComment", () => {
+  it("includes bot marker in output", () => {
+    const result = formatDeploymentComment("ready", "https://preview.url", 5000);
+    expect(result).toContain("<!-- gblockparty-bot -->");
+  });
+
+  it("includes URL when provided", () => {
+    const result = formatDeploymentComment("ready", "https://preview.url", 5000);
+    expect(result).toContain("https://preview.url");
+  });
+
+  it("omits URL when null", () => {
+    const result = formatDeploymentComment("failed", null, null);
+    expect(result).not.toContain("URL:");
+  });
+
+  it("formats build time in seconds", () => {
+    const result = formatDeploymentComment("ready", "url", 34200);
+    expect(result).toContain("34.2s");
+  });
+});
+```
+
+### Manual Verification
+
+1. Open a PR on a connected repo
+2. Verify a bot comment appears on the PR with:
+   - Preview status
+   - Preview URL (clickable)
+   - Build time
+3. Push a new commit to the PR
+4. Verify the same comment is updated (not a new comment)
+5. Verify the URL and build time reflect the latest deployment
+6. Trigger a failing build
+7. Verify the comment is updated to show failure status
+
+---
+
+## Output
+
+After this step:
+- `createOrUpdatePRComment()` is fully functional
+- Each PR has exactly one bot comment that is updated on each push
+- The comment shows the preview URL, build status, and build time
+- Comment management errors do not affect the deployment pipeline

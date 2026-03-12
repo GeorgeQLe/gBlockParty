@@ -1,0 +1,467 @@
+# Step 7: Auto-Rollback on Crash-Loop
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 7 of 8
+**Status:** Not Started
+**Depends on:** Step 5 (Rollback Mechanism -- `rollbackDeployment()` must be implemented)
+
+---
+
+## Goal
+
+Monitor deployed containers for crash-loops. If a container crashes 3 or more times within 5 minutes, automatically rollback to the previous production deployment. Log the event and send a Slack/Discord notification. This makes the platform self-healing -- a bad deploy does not leave the site down indefinitely.
+
+---
+
+## Background
+
+From `__spec.md__` Section 11 (Error Handling):
+
+> **Container crashes after deploy:** ECS-style restart via Docker restart policy (max 3). If crash-looping, **auto-rollback** to previous deployment + Slack notification.
+>
+> **Auto-Rollback:** If a newly deployed container crashes 3+ times in 5 minutes:
+> 1. Stop the new container
+> 2. Start the last known healthy container (previous production image)
+> 3. Update Caddy routing
+> 4. Mark deployment as FAILED with reason "crash-loop-detected"
+> 5. Send Slack/Discord notification with details
+
+### Constants
+
+From `packages/shared/src/constants/deployment.ts`:
+
+```typescript
+HEALTH_CHECK.CRASH_THRESHOLD = 3   // Number of crashes before auto-rollback
+HEALTH_CHECK.CRASH_WINDOW_MS = 5 * 60 * 1000  // 5-minute window
+```
+
+---
+
+## Implementation
+
+### Architecture
+
+```
+Docker Engine
+  |
+  | container events (die, start)
+  |
+  v
+CrashLoopDetector (monitors container restarts)
+  |
+  | crash-loop detected (3+ crashes in 5 min)
+  |
+  v
+rollbackDeployment() (from Step 5)
+  +
+sendNotification() (Slack/Discord webhook)
+```
+
+### Component 1: Docker Restart Policy
+
+When starting containers (in the `Deployer` and `rollbackDeployment()`), configure the Docker restart policy:
+
+```typescript
+// In runContainer() - packages/core/src/providers/docker/client.ts
+const container = await docker.createContainer({
+  Image: image,
+  name: name,
+  HostConfig: {
+    PortBindings: {
+      "3000/tcp": [{ HostPort: String(port) }],
+    },
+    RestartPolicy: {
+      Name: "on-failure",
+      MaximumRetryCount: HEALTH_CHECK.CRASH_THRESHOLD, // 3
+    },
+  },
+  Env: Object.entries(envVars).map(([k, v]) => `${k}=${v}`),
+});
+```
+
+The `on-failure` restart policy with `MaximumRetryCount: 3` means Docker will automatically restart the container up to 3 times on non-zero exit codes. After the 3rd restart, Docker stops restarting and the container stays in an exited state.
+
+### Component 2: CrashLoopDetector
+
+Create a new module for crash-loop detection:
+
+**File:** `packages/core/src/deploy/crash-monitor.ts`
+
+```typescript
+import Dockerode from "dockerode";
+import type { Database } from "@gblockparty/shared/db";
+import { createLogger } from "@gblockparty/shared/backend";
+import { deployments, projects } from "@gblockparty/shared/db";
+import { eq, and, desc } from "drizzle-orm";
+import { rollbackDeployment } from "./rollback";
+import { HEALTH_CHECK } from "@gblockparty/shared/constants";
+
+const logger = createLogger("crash-monitor");
+
+interface CrashRecord {
+  containerId: string;
+  deploymentId: string;
+  crashes: number[];  // timestamps of crash events
+}
+
+export class CrashLoopDetector {
+  private crashRecords = new Map<string, CrashRecord>();
+  private docker: Dockerode;
+  private db: Database;
+
+  constructor(docker: Dockerode, db: Database) {
+    this.docker = docker;
+    this.db = db;
+  }
+
+  /**
+   * Start monitoring Docker events for container crashes.
+   * This runs indefinitely and should be started when the platform boots.
+   */
+  async start(): Promise<void> {
+    logger.info("Crash-loop detector started");
+
+    const eventStream = await this.docker.getEvents({
+      filters: {
+        event: ["die"],
+        type: ["container"],
+      },
+    });
+
+    eventStream.on("data", async (chunk: Buffer) => {
+      try {
+        const event = JSON.parse(chunk.toString());
+        await this.handleContainerDeath(event);
+      } catch (error) {
+        logger.error({ error }, "Error processing Docker event");
+      }
+    });
+
+    eventStream.on("error", (error) => {
+      logger.error({ error }, "Docker event stream error");
+      // Reconnect after delay
+      setTimeout(() => this.start(), 5000);
+    });
+  }
+
+  private async handleContainerDeath(event: DockerEvent): Promise<void> {
+    const containerId = event.id;
+    const exitCode = parseInt(event.Actor?.Attributes?.exitCode ?? "0", 10);
+
+    // Ignore graceful shutdowns (exit code 0 or SIGTERM/SIGKILL from us)
+    if (exitCode === 0) {
+      return;
+    }
+
+    // Look up the deployment for this container
+    const deployment = await this.db.query.deployments.findFirst({
+      where: eq(deployments.containerId, containerId),
+    });
+
+    if (!deployment) {
+      return; // Not a platform-managed container
+    }
+
+    // Only monitor production deployments
+    if (deployment.type !== "production" && deployment.type !== "rollback") {
+      return;
+    }
+
+    // Only monitor currently active deployments
+    const project = await this.db.query.projects.findFirst({
+      where: eq(projects.id, deployment.projectId),
+    });
+
+    if (project?.productionDeploymentId !== deployment.id) {
+      return; // Not the active deployment, ignore
+    }
+
+    // Record the crash
+    const record = this.crashRecords.get(containerId) ?? {
+      containerId,
+      deploymentId: deployment.id,
+      crashes: [],
+    };
+
+    record.crashes.push(Date.now());
+
+    // Remove crashes outside the window
+    const windowStart = Date.now() - HEALTH_CHECK.CRASH_WINDOW_MS;
+    record.crashes = record.crashes.filter((t) => t >= windowStart);
+
+    this.crashRecords.set(containerId, record);
+
+    logger.warn(
+      {
+        containerId,
+        deploymentId: deployment.id,
+        exitCode,
+        crashCount: record.crashes.length,
+        threshold: HEALTH_CHECK.CRASH_THRESHOLD,
+      },
+      "Container crash detected",
+    );
+
+    // Check if crash-loop threshold is reached
+    if (record.crashes.length >= HEALTH_CHECK.CRASH_THRESHOLD) {
+      await this.triggerAutoRollback(deployment, project!);
+      this.crashRecords.delete(containerId);
+    }
+  }
+
+  private async triggerAutoRollback(
+    crashedDeployment: Deployment,
+    project: Project,
+  ): Promise<void> {
+    logger.error(
+      {
+        projectId: project.id,
+        deploymentId: crashedDeployment.id,
+        crashCount: HEALTH_CHECK.CRASH_THRESHOLD,
+      },
+      "Crash-loop detected, triggering auto-rollback",
+    );
+
+    // Mark the crashing deployment as failed
+    await this.db
+      .update(deployments)
+      .set({
+        status: "failed",
+        errorMessage: "crash-loop-detected",
+        updatedAt: new Date(),
+      })
+      .where(eq(deployments.id, crashedDeployment.id));
+
+    // Find the previous healthy production deployment
+    const previousDeployment = await this.db.query.deployments.findFirst({
+      where: and(
+        eq(deployments.projectId, project.id),
+        eq(deployments.status, "archived"),
+      ),
+      orderBy: desc(deployments.createdAt),
+    });
+
+    if (!previousDeployment) {
+      logger.error(
+        { projectId: project.id },
+        "No previous deployment to rollback to",
+      );
+      await this.sendNotification(project, crashedDeployment, null);
+      return;
+    }
+
+    try {
+      const newDeploymentId = await rollbackDeployment(
+        this.db,
+        project.id,
+        previousDeployment.id,
+      );
+
+      logger.info(
+        {
+          projectId: project.id,
+          newDeploymentId,
+          previousDeploymentId: previousDeployment.id,
+        },
+        "Auto-rollback complete",
+      );
+
+      await this.sendNotification(project, crashedDeployment, previousDeployment);
+    } catch (error) {
+      logger.error(
+        { projectId: project.id, error },
+        "Auto-rollback failed",
+      );
+      await this.sendNotification(project, crashedDeployment, null);
+    }
+  }
+
+  private async sendNotification(
+    project: Project,
+    crashedDeployment: Deployment,
+    rolledBackTo: Deployment | null,
+  ): Promise<void> {
+    // Fetch notification settings
+    const settings = await this.db.query.notificationSettings.findFirst();
+
+    if (!settings) return;
+
+    const message = rolledBackTo
+      ? `Auto-rollback triggered for ${project.name}: deployment ${crashedDeployment.id.slice(0, 8)} crash-looped. Rolled back to ${rolledBackTo.commitSha?.slice(0, 7) ?? "previous version"}.`
+      : `Crash-loop detected for ${project.name}: deployment ${crashedDeployment.id.slice(0, 8)} crashed ${HEALTH_CHECK.CRASH_THRESHOLD}+ times. No previous deployment available for auto-rollback.`;
+
+    // Send to Slack
+    if (settings.slackWebhookUrl) {
+      await sendSlackNotification(settings.slackWebhookUrl, message);
+    }
+
+    // Send to Discord
+    if (settings.discordWebhookUrl) {
+      await sendDiscordNotification(settings.discordWebhookUrl, message);
+    }
+  }
+}
+```
+
+### Component 3: Notification Sending
+
+Slack and Discord webhook notifications use simple HTTP POST requests:
+
+```typescript
+async function sendSlackNotification(webhookUrl: string, text: string): Promise<void> {
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  } catch (error) {
+    logger.error({ error }, "Failed to send Slack notification");
+  }
+}
+
+async function sendDiscordNotification(webhookUrl: string, content: string): Promise<void> {
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+  } catch (error) {
+    logger.error({ error }, "Failed to send Discord notification");
+  }
+}
+```
+
+### Component 4: Platform Startup Integration
+
+The `CrashLoopDetector` should be started when the platform boots:
+
+```typescript
+// In the main platform initialization (e.g., dashboard startup or a separate process)
+import { createDockerClient } from "@gblockparty/core/providers/docker/client";
+import { CrashLoopDetector } from "@gblockparty/core/deploy/crash-monitor";
+import { getDb } from "@/lib/db";
+
+const docker = createDockerClient();
+const db = getDb();
+const monitor = new CrashLoopDetector(docker, db);
+monitor.start(); // Fire-and-forget, runs indefinitely
+```
+
+This can be started:
+1. As part of the Next.js dashboard's instrumentation hook (`instrumentation.ts`)
+2. As a separate Node.js process managed by systemd or pm2
+3. Within the existing platform control plane startup
+
+Option 1 is simplest for the MVP since the dashboard is the only long-running process.
+
+---
+
+## Crash-Loop Detection Logic
+
+### What Counts as a Crash
+
+A crash is a container `die` event with a non-zero exit code. This excludes:
+
+- **Graceful shutdown (exit code 0)**: Normal container stop via `docker stop` or SIGTERM during deployment swaps.
+- **Manual restarts**: The platform stops and starts containers intentionally during deployments. These produce exit code 0 (SIGTERM handled) or are not from the active deployment.
+- **OOM kills**: Docker sends a `die` event with exit code 137 (SIGKILL). This counts as a crash.
+- **Application errors**: Exit code 1 (uncaught exception), 143 (SIGTERM not handled), etc. These count as crashes.
+
+### Sliding Window
+
+The crash window is a sliding 5-minute window. Crash timestamps outside the window are pruned on each new crash event. This means:
+
+- 3 crashes in 1 minute: auto-rollback triggers
+- 2 crashes in minute 0, 1 crash in minute 6: only 1 crash in window, no trigger
+- 1 crash every 2 minutes: 3 crashes accumulate by minute 4, trigger
+
+### What Triggers Auto-Rollback
+
+Auto-rollback triggers when `crashes.length >= HEALTH_CHECK.CRASH_THRESHOLD` (3) within `HEALTH_CHECK.CRASH_WINDOW_MS` (5 minutes), AND:
+
+1. The container belongs to the currently active production deployment.
+2. There is a previous archived deployment to rollback to.
+
+If there is no previous deployment (first-ever deployment for the project), the monitor logs the crash-loop, marks the deployment as failed, sends a notification, but cannot rollback. The site stays down.
+
+---
+
+## Edge Cases
+
+1. **Container crash during a deployment swap**: During normal deployment, the old container is stopped (exit code 0). The monitor ignores exit code 0. No false positive.
+2. **Multiple projects crash simultaneously**: Each container has its own crash record. Crash detection is per-container.
+3. **Auto-rollback target also crashes**: If the previous deployment also crash-loops after being rolled back to, the monitor will detect it again. This could cause an infinite rollback loop. Mitigation: after auto-rollback, temporarily suppress further auto-rollbacks for the project for 10 minutes.
+4. **Docker event stream disconnects**: The `error` handler reconnects after 5 seconds. Brief gaps in monitoring are acceptable -- Docker's own restart policy handles immediate restarts.
+5. **Platform restart clears in-memory crash records**: The `crashRecords` map is lost on restart. This is acceptable -- if the platform restarts, Docker's restart count is also reset. Fresh monitoring begins.
+6. **Preview deployment crashes**: Preview containers are not monitored for auto-rollback. They do not have a "previous deployment" concept. Crashes are ignored by the `type` check.
+
+### Preventing Infinite Rollback Loops
+
+Add a cooldown mechanism:
+
+```typescript
+private rollbackCooldowns = new Map<string, number>(); // projectId -> cooldown until timestamp
+
+private isInCooldown(projectId: string): boolean {
+  const until = this.rollbackCooldowns.get(projectId);
+  return until ? Date.now() < until : false;
+}
+
+private setCooldown(projectId: string, durationMs: number = 10 * 60 * 1000): void {
+  this.rollbackCooldowns.set(projectId, Date.now() + durationMs);
+}
+```
+
+Before triggering auto-rollback, check:
+
+```typescript
+if (this.isInCooldown(project.id)) {
+  logger.warn({ projectId: project.id }, "Auto-rollback suppressed (cooldown active)");
+  return;
+}
+// ... trigger rollback
+this.setCooldown(project.id);
+```
+
+---
+
+## Testing Approach
+
+1. **Unit test CrashLoopDetector**: Simulate Docker events (mock event stream). Verify crash counting, window pruning, threshold detection.
+2. **Unit test: graceful shutdown ignored**: Emit `die` event with exit code 0. Verify no crash recorded.
+3. **Unit test: crash-loop triggers rollback**: Emit 3 `die` events with exit code 1 within 5 minutes. Verify `rollbackDeployment()` is called.
+4. **Unit test: no previous deployment**: Crash-loop detected but no archived deployment. Verify notification sent but no rollback attempted.
+5. **Integration test**: Deploy a container that exits immediately (e.g., `CMD ["exit", "1"]`). Verify Docker restarts it 3 times, crash-loop is detected, and auto-rollback triggers.
+
+---
+
+## Verification Checklist
+
+- [ ] `CrashLoopDetector` class created in `packages/core/src/deploy/crash-monitor.ts`
+- [ ] Subscribes to Docker `die` events via `docker.getEvents()`
+- [ ] Filters for non-zero exit codes (ignores graceful shutdowns)
+- [ ] Only monitors active production deployments (not preview, not archived)
+- [ ] Counts crashes per container in a sliding 5-minute window
+- [ ] Triggers auto-rollback when crash count reaches `HEALTH_CHECK.CRASH_THRESHOLD` (3)
+- [ ] Marks crashed deployment as `status: 'failed'`, `error_message: 'crash-loop-detected'`
+- [ ] Finds previous archived deployment for rollback target
+- [ ] Calls `rollbackDeployment()` to perform the rollback
+- [ ] Handles case where no previous deployment exists (logs, notifies, no rollback)
+- [ ] Sends Slack/Discord notification on crash-loop detection
+- [ ] Notification message includes project name, deployment ID, and rollback target
+- [ ] Cooldown mechanism prevents infinite rollback loops (10-minute suppression)
+- [ ] Docker event stream reconnects on error
+- [ ] Detector started on platform boot
+
+---
+
+## Output
+
+After this step:
+
+- `packages/core/src/deploy/crash-monitor.ts` monitors Docker containers for crash-loops.
+- Crash-looping containers trigger automatic rollback to the previous production deployment.
+- Crash-loop events generate Slack/Discord notifications.
+- The platform self-heals from bad deployments without manual intervention.

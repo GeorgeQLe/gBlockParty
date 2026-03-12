@@ -1,0 +1,206 @@
+# Step 4: Backend Service Deployment
+
+**Phase:** 11 -- Monorepo & Advanced Configuration
+**Step:** 4 of 4
+**Type:** Backend implementation
+**Depends on:** Step 1 (ConfigParser recognizes `type: dockerfile`), Step 3 (orchestration builds services by type)
+**Blocks:** None
+
+---
+
+## Objective
+
+Support deploying backend services that use user-provided Dockerfiles. When a service has `type: dockerfile`, the platform uses the Dockerfile as-is (no auto-generation), builds the Docker image using `docker build`, and deploys the container with the user-specified port and health check path. This integrates with the existing framework detection as a fallback: if a repo root has a `Dockerfile` but no `deploy.yaml`, it is automatically treated as a `dockerfile` type service.
+
+---
+
+## Context
+
+Currently, the platform auto-generates Dockerfiles for Next.js and static apps (Phase 4). Backend services (Express, Fastify, Go, Python, etc.) bring their own Dockerfiles. The spec (section 4) states: "For backend services with their own Dockerfile, the platform uses the user-provided Dockerfile as-is."
+
+### Example deploy.yaml
+
+```yaml
+name: my-api
+type: dockerfile
+dockerfile: ./Dockerfile
+port: 8080
+healthCheck:
+  path: /health
+```
+
+Or in a monorepo:
+
+```yaml
+name: my-platform
+services:
+  api:
+    type: dockerfile
+    path: services/api
+    dockerfile: Dockerfile
+    port: 8080
+    healthCheck:
+      path: /health
+```
+
+---
+
+## Changes to BuildRunner
+
+### Dockerfile Resolution
+
+When `serviceType` is `dockerfile`, the BuildRunner must:
+
+1. **Resolve the Dockerfile path**: The `dockerfile` field is relative to the service's `path` directory.
+   ```typescript
+   const servicePath = path.join(repoPath, service.path ?? ".");
+   const dockerfilePath = path.join(servicePath, service.dockerfile ?? "Dockerfile");
+   ```
+
+2. **Validate the Dockerfile exists**: Check `fs.existsSync(dockerfilePath)`. If not found, throw a descriptive error:
+   ```
+   Dockerfile not found at services/api/Dockerfile. Specify the correct path in deploy.yaml.
+   ```
+
+3. **Build with the user Dockerfile**: Instead of generating a Dockerfile, use the existing one:
+   ```typescript
+   // For auto-generated types (nextjs, static):
+   const dockerfile = generateDockerfile(framework, config);
+   await docker.buildImage(contextPath, { dockerfile });
+
+   // For user-provided Dockerfiles:
+   await docker.buildImage(servicePath, { dockerfilePath: dockerfilePath });
+   ```
+
+4. **Build context**: The Docker build context is the service directory (`servicePath`), not the repo root. This ensures that `COPY` commands in the Dockerfile reference paths relative to the service directory.
+
+   Exception: If the Dockerfile uses paths outside the service directory (e.g., `COPY ../../packages/shared/` in a monorepo), the build context needs to be the repo root, and the Dockerfile path needs to be relative to the repo root. Handle this with a heuristic:
+   - If `service.path` is `"."`, the build context is the repo root.
+   - If `service.path` is a subdirectory, check if the Dockerfile contains `../` references. If so, use the repo root as context and adjust the Dockerfile path.
+   - For MVP: always use the service directory as context. Document that monorepo Dockerfiles should use multi-stage builds or copy shared packages into the service directory before building.
+
+### Docker Build Command
+
+```typescript
+// Equivalent to:
+// docker build -f {dockerfilePath} -t {imageTag} {contextPath}
+await execAsync(
+  `docker build -f "${dockerfilePath}" -t "${imageTag}" "${contextPath}"`,
+  { timeout: BUILD_LIMITS.MAX_BUILD_TIME_MS },
+);
+```
+
+---
+
+## Changes to Deployer
+
+### Custom Port Mapping
+
+For `dockerfile` type services, the container's internal port is specified in `deploy.yaml` (not always 3000):
+
+```typescript
+// Current (hardcoded 3000):
+docker run -d -p ${hostPort}:3000 ...
+
+// Updated (configurable):
+const containerPort = servicePort ?? 3000;
+docker run -d -p ${hostPort}:${containerPort} ...
+```
+
+This change applies to ALL service types (nextjs defaults to 3000, dockerfile can be anything).
+
+### Custom Health Check Path
+
+The health check path is already configurable in `DeployOptions.healthCheckPath`. For `dockerfile` services, this comes from `deploy.yaml`:
+
+```yaml
+healthCheck:
+  path: /health    # used instead of default "/"
+```
+
+The existing `waitForHealthy()` in `packages/core/src/providers/docker/container.ts` already accepts a `healthCheckPath` parameter.
+
+---
+
+## Framework Detection Fallback
+
+The existing `detectFramework()` function in `packages/core/src/build/framework-detector.ts` already has a comment about Dockerfile detection:
+
+```typescript
+// 2. Check for Dockerfile -> dockerfile
+```
+
+Implement this detection:
+
+```typescript
+// In detectFramework(repoPath):
+if (fileExists(path.join(repoPath, "Dockerfile"))) {
+  return {
+    framework: "dockerfile",
+    buildCommand: "docker build .",
+    outputDir: ".",
+  };
+}
+```
+
+When a repo has a Dockerfile at its root but no `deploy.yaml`, the platform should:
+1. Detect it as `type: dockerfile`
+2. Build using the Dockerfile
+3. Default port: 3000 (can be overridden via dashboard settings)
+4. Default health check path: `/`
+
+---
+
+## Docker HEALTHCHECK
+
+For `dockerfile` services, the user's Dockerfile may include its own `HEALTHCHECK` instruction. The platform's health check (`waitForHealthy()`) runs independently from Docker's built-in `HEALTHCHECK`. Both can coexist:
+
+- **Platform health check**: Runs during deployment to verify the container is ready before routing traffic. Uses HTTP GET.
+- **Docker HEALTHCHECK**: Runs continuously for container runtime monitoring. Used by Docker restart policies.
+
+The platform's health check takes precedence for deployment decisions. Docker's `HEALTHCHECK` is used for crash-loop detection (Phase 8).
+
+---
+
+## Build Cache for Dockerfile Services
+
+Dockerfile services use Docker's layer cache rather than the S3-based cache used by Next.js apps:
+
+- Docker layer cache is local to the VPS (in Docker's image storage).
+- Subsequent builds of the same Dockerfile will use cached layers (if `FROM`, `RUN`, `COPY` instructions haven't changed).
+- S3 dependency cache is NOT used for `dockerfile` type services (the user's Dockerfile handles its own dependency caching).
+
+---
+
+## Resource Limits (Optional)
+
+If `resources.memory` is specified in `deploy.yaml`, pass it to `docker run`:
+
+```typescript
+const memoryFlag = service.resources?.memory
+  ? `--memory=${service.resources.memory}m`
+  : "";
+
+docker run -d ${memoryFlag} -p ${hostPort}:${containerPort} ...
+```
+
+This is a nice-to-have for the MVP. It prevents a single container from consuming all VPS memory.
+
+---
+
+## Verification
+
+- [ ] `type: dockerfile` services use the user-provided Dockerfile (no auto-generation)
+- [ ] Dockerfile path resolved correctly: `{servicePath}/{dockerfile}` (default: `Dockerfile`)
+- [ ] Build context is the service directory (not repo root)
+- [ ] Missing Dockerfile throws descriptive error with the expected path
+- [ ] Custom port from deploy.yaml mapped correctly: `-p {hostPort}:{servicePort}`
+- [ ] Custom health check path used by `waitForHealthy()`
+- [ ] Health check succeeds for a backend service on a custom port and path
+- [ ] Framework detection fallback: Dockerfile at repo root detected as `type: dockerfile`
+- [ ] Auto-detected Dockerfile service uses default port 3000 and health check path `/`
+- [ ] Docker image tagged correctly: `{project}-{service}:{sha}` or `{project}:{sha}`
+- [ ] Docker layer cache utilized for subsequent builds
+- [ ] Service accessible at its hostname after deployment
+- [ ] No regressions for `type: nextjs` or `type: static` services
+- [ ] Optional: memory limit flag applied when `resources.memory` specified

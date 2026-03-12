@@ -1,0 +1,193 @@
+# Phase 5: Deployment Engine
+
+**Phase:** 5 of 12
+**Status:** Not Started
+**Depends on:** Phase 4 (Build System) -- Docker images must be built and tagged before the deployment engine can start containers from them
+**Blocks:** Phase 6 (Core Dashboard & API) -- API routes trigger deployments; Phase 7 (Preview Deployments) -- preview deploys use the same engine with preview port range; Phase 8 (Caching, Streaming & Rollback) -- rollback reuses Deployer orchestration
+
+---
+
+## Goal
+
+After Phase 4 builds a Docker image and tags it with the commit SHA, the deployment engine takes over: allocate a port, inject environment variables, start the container, health-check it, configure Caddy reverse-proxy routing, stop the old container, and mark the deployment as READY. The app is then live at its subdomain URL (`{project}.yourdomain.dev` for production, `pr-{n}--{project}.yourdomain.dev` for previews).
+
+---
+
+## Context
+
+The deployment engine is the core runtime loop of gBlockParty. The build system (Phase 4) produces an immutable Docker image tagged `{project}:{commit-sha}`. This phase implements everything that happens after the image exists: the container lifecycle, networking, environment injection, and health verification.
+
+### Why This Phase Exists
+
+Without the deployment engine, a built Docker image just sits in the local image cache. This phase connects the image to the live network by:
+
+1. Assigning a unique port so containers don't collide
+2. Injecting project-specific environment variables (including decrypted secrets)
+3. Starting the container and verifying it is healthy before routing traffic
+4. Dynamically updating Caddy so the hostname resolves to the new container
+5. Gracefully stopping the old container to avoid downtime
+6. Recording the final state in the database so the dashboard can display it
+
+### Architecture Context
+
+```
+Phase 4 output: Docker image {project}:{sha}
+    |
+    v
+Phase 5: Deployment Engine
+    |
+    +-- 1. PortAllocator.allocate(deploymentId, type)
+    |       -> finds next free port in range, inserts into port_allocations table
+    |
+    +-- 2. Env var injection
+    |       -> query env_vars table, decrypt secrets, write temp .env file
+    |
+    +-- 3. docker run -d -p {port}:3000 --env-file .env {project}:{sha}
+    |       -> start container, get containerId
+    |
+    +-- 4. waitForHealthy(containerId, healthCheckPath, port)
+    |       -> poll HTTP GET localhost:{port}{path}, retry 10x at 2s intervals
+    |
+    +-- 5. CaddyClient.addRoute(hostname, port)
+    |       -> POST to Caddy admin API, route hostname -> localhost:{port}
+    |
+    +-- 6. Stop old container (SIGTERM, 30s timeout, SIGKILL)
+    |
+    +-- 7. Update deployment record: status=READY, url, port, containerId
+    |
+    +-- 8. Cleanup: delete temp .env file
+    |
+    v
+App is live at https://{project}.yourdomain.dev
+```
+
+---
+
+## Key Files
+
+| File | Package | Purpose | Status |
+|------|---------|---------|--------|
+| `packages/core/src/deploy/port-allocator.ts` | core | Port allocation with DB-backed tracking | TODO stub |
+| `packages/core/src/deploy/deployer.ts` | core | Orchestrates the full deploy pipeline | TODO stub |
+| `packages/core/src/deploy/rollback.ts` | core | Rollback to a previous deployment | TODO stub |
+| `packages/core/src/deploy/index.ts` | core | Barrel exports for deploy module | Implemented |
+| `packages/core/src/routing/caddy.ts` | core | Caddy admin API client for dynamic routing | TODO stub |
+| `packages/core/src/routing/url.ts` | core | URL generators (production, preview, platform) | Implemented |
+| `packages/core/src/routing/index.ts` | core | Barrel exports for routing module | Implemented |
+| `packages/core/src/providers/docker/container.ts` | core | Health checks, container status queries | TODO stub |
+| `packages/core/src/providers/docker/client.ts` | core | Docker client, runContainer, stopContainer | TODO stub |
+| `packages/core/src/providers/docker/index.ts` | core | DockerProvider class (DeploymentProvider impl) | TODO stub |
+| `packages/core/src/providers/types.ts` | core | DeploymentProvider interface | Implemented |
+| `packages/shared/src/constants/deployment.ts` | shared | PORT_RANGES, HEALTH_CHECK, BUILD_LIMITS | Implemented |
+| `packages/shared/src/db/schema.ts` | shared | portAllocations, deployments, envVars tables | Implemented |
+| `packages/shared/src/backend/encryption.ts` | shared | AES-256-GCM encrypt/decrypt for secrets | Implemented |
+
+---
+
+## Steps
+
+### Step 1: Port Allocator
+Implement `PortAllocator` with `allocate(deploymentId, type)` to find the next available port in the correct range (production: 3001-3999, preview: 4000-4999), insert into the `port_allocations` table, and return the port. Implement `release(port)` to free a port and `getUsedPorts()` to query all currently allocated ports.
+
+**File:** `packages/core/src/deploy/port-allocator.ts`
+**Spec:** `step-01-port-allocator-__spec.md__`
+
+### Step 2: Caddy Dynamic Routing Client
+Implement `CaddyClient` with `addRoute(hostname, upstreamPort)` to POST a reverse-proxy route to the Caddy admin API, `removeRoute(hostname)` to remove a route, and `reloadConfig()` to reload the full Caddy configuration. Routes are added and removed dynamically without restarting Caddy.
+
+**File:** `packages/core/src/routing/caddy.ts`
+**Spec:** `step-02-caddy-routing-__spec.md__`
+
+### Step 3: Health Check System
+Implement `waitForHealthy()` that polls HTTP GET on the container's health endpoint with configurable retries (default 10) and interval (2s). Implement `isContainerRunning()` to check if a container is in the running state, and `getContainerPort()` to retrieve the mapped host port from a container.
+
+**File:** `packages/core/src/providers/docker/container.ts`
+**Spec:** `step-03-health-checks-__spec.md__`
+
+### Step 4: Environment Variable Injection
+Implement the env var pipeline: query the `env_vars` table for the project and scope, decrypt secret values using `decrypt()` from the encryption module, write a temporary `.env` file, pass it to `docker run --env-file`, and delete the file after the container starts. Handle `NEXT_PUBLIC_*` variables for build-time injection.
+
+**Integration point:** Called from `Deployer.deploy()` before starting the container.
+**Spec:** `step-04-env-var-injection-__spec.md__`
+
+### Step 5: Deployer Orchestration
+Implement the full `deploy()` pipeline in the `Deployer` class: allocate port, write env file, start container, health check, update Caddy, stop old container, update deployment record in the database, cleanup env file. Handle failures at each step with proper rollback (release port, stop new container, restore Caddy route). Also implement the `rollbackDeployment()` function.
+
+**File:** `packages/core/src/deploy/deployer.ts`, `packages/core/src/deploy/rollback.ts`
+**Spec:** `step-05-deployer-orchestration-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+1. `PortAllocator.allocate()` finds the next free port in the correct range and persists it in `port_allocations`.
+2. `PortAllocator.release()` removes the port from `port_allocations`, making it available again.
+3. `PortAllocator.allocate()` throws an error if no ports are available in the range.
+4. `CaddyClient.addRoute()` successfully adds a reverse-proxy route via the Caddy admin API.
+5. `CaddyClient.removeRoute()` removes a route from Caddy without affecting other routes.
+6. `CaddyClient.reloadConfig()` reloads the entire Caddy config from disk/memory.
+7. `waitForHealthy()` returns `true` when the container responds with HTTP 2xx within the retry window.
+8. `waitForHealthy()` returns `false` after exhausting all retries (10 attempts, 2s apart = 20s max).
+9. `isContainerRunning()` correctly reports container state.
+10. Environment variables (including decrypted secrets) are injected into containers via `--env-file`.
+11. The temporary `.env` file is deleted after the container starts, even if a later step fails.
+12. `NEXT_PUBLIC_*` variables are identified and available for build-time injection.
+13. `Deployer.deploy()` executes the full pipeline: port -> env -> container -> health -> caddy -> stop old -> DB update -> cleanup.
+14. If health check fails, the new container is stopped, the port is released, and Caddy is not updated.
+15. If Caddy update fails after health check passes, the new container is stopped and the port is released.
+16. `rollbackDeployment()` re-deploys a previous image by creating a new deployment record with `type: 'rollback'` and `sourceDeploymentId`.
+17. The deployment record in the database is updated with `status`, `containerId`, `port`, and `url` on success.
+18. The deployment record is updated with `status: 'failed'` and `errorMessage` on failure.
+19. The app is accessible at its subdomain URL after a successful deploy.
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On (Phase 4)
+
+- Docker images are built and tagged as `{project}:{commit-sha}` and available in the local Docker image cache on the VPS.
+- The `buildImage()` function in `packages/core/src/providers/docker/client.ts` produces valid images.
+- The `deployments` table row already exists with `status: 'deploying'` and `dockerImageTag` set.
+
+### Depends On (Phase 2)
+
+- All database tables (`port_allocations`, `deployments`, `env_vars`, `projects`) exist and are accessible.
+- The `getDb()` singleton is working and connected to RDS.
+
+### Depends On (Phase 1)
+
+- The VPS has Docker installed and the Docker socket is accessible.
+- Caddy is installed and its admin API is listening on `http://localhost:2019`.
+- Cloudflare wildcard DNS (`*.yourdomain.dev`) is pointing to the VPS IP.
+
+### Enables (Phase 6)
+
+- API routes (`POST /api/projects/:id/deployments`) call `Deployer.deploy()` to trigger deployments.
+- API routes (`POST /api/projects/:id/deployments/:did/rollback`) call `rollbackDeployment()`.
+- Dashboard deployment detail page reads `status`, `url`, `port` from the deployment record.
+
+### Enables (Phase 7)
+
+- Preview deployments use the same `Deployer` class but with `type: 'preview'` (allocates from 4000-4999 range).
+- Preview URL generation uses `generatePreviewUrl()` from `packages/core/src/routing/url.ts`.
+
+### Enables (Phase 8)
+
+- Rollback functionality reuses the deployer pipeline with a previously-built image.
+- Auto-rollback on crash-loop uses `rollbackDeployment()` when crash threshold is exceeded.
+
+---
+
+## Risk & Mitigation
+
+| Risk | Mitigation |
+|------|-----------|
+| Port exhaustion (all ports in range allocated) | Production range has 999 ports; current scale is ~5 apps. Log warning at 80% capacity. |
+| Caddy admin API not responding | Retry with exponential backoff (3 attempts). If all fail, mark deployment as FAILED. |
+| Health check passes but app crashes immediately after | Docker restart policy (`--restart=on-failure:3`) handles transient crashes. Phase 8 adds crash-loop detection. |
+| Temp .env file left on disk after failure | Use try/finally to ensure cleanup. Add a periodic cleanup cron for orphaned files. |
+| Race condition: two deployments allocate the same port | Database unique constraint on `port_allocations.port` prevents duplicates. Use a transaction for allocate. |
+| Container starts but binds to wrong internal port | Validate that the image exposes the expected port (default 3000). Health check catches misconfigurations. |
+| Old container stop fails (zombie process) | Force-kill after 30s timeout. Log the failure but don't block the deployment. |
+| Caddy route conflicts (two routes for same hostname) | Always remove old route before adding new one, or use PUT semantics. |

@@ -1,0 +1,341 @@
+# Step 3: GitHub Commit Status Integration
+
+**Phase:** 7 -- Preview Deployments
+**Step:** 3 of 5
+**Status:** Not Started
+**Depends on:** Phase 3 (GitHubAppClient for installation-scoped Octokit), Step 2 (PreviewDeployer calls setCommitStatus at build start and end)
+
+---
+
+## Goal
+
+Implement the `setCommitStatus()` function in `packages/core/src/github/commit-status.ts` to set commit status checks on GitHub commits via the GitHub API. This function is called at three points during the preview deployment pipeline:
+1. **Build start**: Set status to `pending` with "Preview deployment building..."
+2. **Build success**: Set status to `success` with the preview URL as `target_url`
+3. **Build failure**: Set status to `failure` with an error description
+
+---
+
+## Background
+
+### Current State
+
+**File:** `packages/core/src/github/commit-status.ts`
+
+```typescript
+import type { Octokit } from "@octokit/rest";
+
+export type StatusState = "pending" | "success" | "failure" | "error";
+
+export async function setCommitStatus(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  sha: string,
+  state: StatusState,
+  options: {
+    targetUrl?: string;
+    description?: string;
+    context?: string;
+  } = {},
+): Promise<void> {
+  // TODO: Set commit status via GitHub API
+  throw new Error("Not implemented");
+}
+```
+
+The function signature is already defined with the correct parameters. The `Octokit` instance is provided by the caller (obtained via `GitHubAppClient.getInstallationOctokit()`).
+
+### GitHub API: Create a Commit Status
+
+**Endpoint:** `POST /repos/{owner}/{repo}/statuses/{sha}`
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `state` | string | Yes | `pending`, `success`, `failure`, or `error` |
+| `target_url` | string | No | URL that links from the status check (preview URL) |
+| `description` | string | No | Short description (max 140 chars) |
+| `context` | string | No | Label for the status (default: `default`). Statuses with the same context are grouped. |
+
+**Octokit method:** `octokit.repos.createCommitStatus()`
+
+---
+
+## Implementation
+
+### Complete Function
+
+```typescript
+import type { Octokit } from "@octokit/rest";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("commit-status");
+
+export type StatusState = "pending" | "success" | "failure" | "error";
+
+const DEFAULT_CONTEXT = "gblockparty/preview";
+const MAX_DESCRIPTION_LENGTH = 140;
+
+export async function setCommitStatus(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  sha: string,
+  state: StatusState,
+  options: {
+    targetUrl?: string;
+    description?: string;
+    context?: string;
+  } = {},
+): Promise<void> {
+  const context = options.context ?? DEFAULT_CONTEXT;
+  const description = options.description
+    ? options.description.slice(0, MAX_DESCRIPTION_LENGTH)
+    : getDefaultDescription(state);
+
+  logger.info(
+    { owner, repo, sha: sha.slice(0, 7), state, context },
+    "Setting commit status",
+  );
+
+  try {
+    await octokit.repos.createCommitStatus({
+      owner,
+      repo,
+      sha,
+      state,
+      target_url: options.targetUrl,
+      description,
+      context,
+    });
+
+    logger.info(
+      { owner, repo, sha: sha.slice(0, 7), state },
+      "Commit status set successfully",
+    );
+  } catch (error) {
+    // Log but do not throw -- commit status failure should not fail the deployment
+    logger.error(
+      { error, owner, repo, sha: sha.slice(0, 7), state },
+      "Failed to set commit status",
+    );
+  }
+}
+
+function getDefaultDescription(state: StatusState): string {
+  switch (state) {
+    case "pending":
+      return "Preview deployment building...";
+    case "success":
+      return "Preview deployment ready";
+    case "failure":
+      return "Preview deployment failed";
+    case "error":
+      return "Preview deployment encountered an error";
+  }
+}
+```
+
+---
+
+## Key Design Decisions
+
+### 1. Context String: `gblockparty/preview`
+
+The `context` parameter groups statuses on a commit. Using `gblockparty/preview`:
+- All preview deployment statuses for the same commit are shown as one entry
+- Setting a new status with the same context replaces the previous one
+- If we later add production deployment statuses, they use a different context (e.g., `gblockparty/production`)
+
+### 2. Error Suppression
+
+The function catches all errors and logs them instead of throwing. This is intentional:
+- Commit status is a notification, not a critical deployment step
+- A GitHub API outage or rate limit should not prevent the preview from deploying
+- The caller does not need to handle commit status errors
+
+### 3. Description Truncation
+
+GitHub enforces a 140-character limit on the description field. The implementation truncates descriptions that exceed this limit.
+
+### 4. Target URL
+
+The `target_url` is set only on `success` state, pointing to the preview URL. This creates a clickable link in the GitHub UI:
+
+```
+gblockparty/preview -- Preview deployment ready
+                       Details -> https://pr-42--myapp.yourdomain.dev
+```
+
+---
+
+## Call Sites
+
+The `setCommitStatus` function is called from the `startPreviewBuild` orchestrator in Step 2:
+
+### At Build Start
+
+```typescript
+await setCommitStatus(octokit, owner, repo, deployment.commitSha, 'pending', {
+  description: 'Preview deployment building...',
+  context: 'gblockparty/preview',
+});
+```
+
+### On Build Success
+
+```typescript
+await setCommitStatus(octokit, owner, repo, deployment.commitSha, 'success', {
+  targetUrl: result.url,
+  description: 'Preview deployment ready',
+  context: 'gblockparty/preview',
+});
+```
+
+### On Build Failure
+
+```typescript
+await setCommitStatus(octokit, owner, repo, deployment.commitSha, 'failure', {
+  description: `Preview deployment failed: ${errorMessage.slice(0, 100)}`,
+  context: 'gblockparty/preview',
+});
+```
+
+---
+
+## GitHub API Permissions
+
+The GitHub App must have the `statuses: write` permission (configured in Phase 3). This allows calling `POST /repos/{owner}/{repo}/statuses/{sha}` using an installation token.
+
+From the spec (`__spec.md__` section 3):
+```yaml
+permissions:
+  statuses: write       # Commit status (pending/success/fail)
+```
+
+---
+
+## Status States Reference
+
+| State | When Used | Description | Target URL |
+|-------|----------|-------------|------------|
+| `pending` | Build starts | "Preview deployment building..." | None |
+| `success` | Build + deploy complete | "Preview deployment ready" | Preview URL |
+| `failure` | Build or deploy fails | "Preview deployment failed: {reason}" | None |
+| `error` | Internal platform error | "Preview deployment encountered an error" | None |
+
+The `error` state is distinct from `failure`:
+- `failure`: The build or health check failed (user's code problem)
+- `error`: Platform infrastructure problem (port exhaustion, Docker unavailable)
+
+In practice, both result in the deployment not being available. The distinction helps with debugging.
+
+---
+
+## Verification Checklist
+
+- [ ] `setCommitStatus()` calls `octokit.repos.createCommitStatus()` with correct parameters
+- [ ] Default context is `gblockparty/preview`
+- [ ] Default descriptions provided for each state
+- [ ] `target_url` passed through when provided (for success state)
+- [ ] Description truncated to 140 characters
+- [ ] Errors are caught and logged (not thrown)
+- [ ] Function logs the operation at info level (with short SHA for readability)
+- [ ] Function logs errors at error level with full error context
+- [ ] Works with installation-scoped Octokit (not user token)
+
+---
+
+## Testing
+
+### Unit Tests
+
+```typescript
+describe("setCommitStatus", () => {
+  it("calls createCommitStatus with correct parameters", async () => {
+    const mockOctokit = {
+      repos: {
+        createCommitStatus: vi.fn().mockResolvedValue({}),
+      },
+    };
+
+    await setCommitStatus(
+      mockOctokit as any,
+      "owner", "repo", "abc1234567890",
+      "success",
+      { targetUrl: "https://pr-42--myapp.example.com", context: "gblockparty/preview" },
+    );
+
+    expect(mockOctokit.repos.createCommitStatus).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      sha: "abc1234567890",
+      state: "success",
+      target_url: "https://pr-42--myapp.example.com",
+      description: "Preview deployment ready",
+      context: "gblockparty/preview",
+    });
+  });
+
+  it("does not throw on GitHub API error", async () => {
+    const mockOctokit = {
+      repos: {
+        createCommitStatus: vi.fn().mockRejectedValue(new Error("API error")),
+      },
+    };
+
+    // Should not throw
+    await setCommitStatus(mockOctokit as any, "owner", "repo", "sha", "pending");
+  });
+
+  it("truncates description to 140 characters", async () => {
+    const mockOctokit = {
+      repos: {
+        createCommitStatus: vi.fn().mockResolvedValue({}),
+      },
+    };
+    const longDescription = "A".repeat(200);
+
+    await setCommitStatus(
+      mockOctokit as any, "owner", "repo", "sha", "failure",
+      { description: longDescription },
+    );
+
+    const call = mockOctokit.repos.createCommitStatus.mock.calls[0][0];
+    expect(call.description.length).toBeLessThanOrEqual(140);
+  });
+
+  it("uses default description when none provided", async () => {
+    const mockOctokit = {
+      repos: {
+        createCommitStatus: vi.fn().mockResolvedValue({}),
+      },
+    };
+
+    await setCommitStatus(mockOctokit as any, "owner", "repo", "sha", "pending");
+
+    const call = mockOctokit.repos.createCommitStatus.mock.calls[0][0];
+    expect(call.description).toBe("Preview deployment building...");
+  });
+});
+```
+
+### Manual Verification
+
+1. Push a commit to a PR on a connected repo
+2. Check the commit on GitHub for the status check:
+   - Initially shows as yellow dot (pending)
+   - Changes to green checkmark (success) with "Details" link to preview URL
+3. Trigger a failing build and verify the red X (failure) status appears
+
+---
+
+## Output
+
+After this step:
+- `setCommitStatus()` is fully functional
+- GitHub shows commit status checks on preview deployment commits
+- Status progression: pending -> success (with clickable preview URL) or failure
+- Errors in the GitHub API do not impact the deployment pipeline

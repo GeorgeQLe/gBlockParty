@@ -1,0 +1,206 @@
+# Step 3: Link Command
+
+**Phase:** 9 -- CLI Tool
+**Step:** 3 of 7
+**Status:** Not Started
+**Depends on:** Step 2 (Login -- user must be authenticated to fetch projects)
+**Depends on this step:** Steps 4-7 (deploy, env, logs, rollback all require a linked project)
+
+---
+
+## Goal
+
+Implement `gblockparty link` so the user can associate their current working directory with a gBlockParty project. The command fetches the list of projects from the API, presents an interactive selection list, and saves the chosen project ID to `.gblockparty/config.json` in the current directory.
+
+---
+
+## Background
+
+Every CLI command except `login` requires knowing which project to operate on. The `link` command creates a `.gblockparty/config.json` file in the current directory that stores the project ID. This file is local to the directory and should be gitignored.
+
+The `getProjectConfig()` function in `packages/cli/src/lib/config.ts` reads this file, and `saveProjectConfig()` writes it. Both are already fully implemented.
+
+---
+
+## File to Modify
+
+### `packages/cli/src/commands/link.ts`
+
+**Current state:** Prints "Link not yet implemented".
+
+**Target implementation:**
+
+```typescript
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+import inquirer from "inquirer";
+import { ApiClient } from "../lib/api-client";
+import { getGlobalConfig, getProjectConfig, saveProjectConfig } from "../lib/config";
+
+interface Project {
+  id: string;
+  name: string;
+  slug: string;
+  githubRepoFullName: string | null;
+}
+
+export const linkCommand = new Command("link")
+  .description("Link current directory to a gBlockParty project")
+  .action(async () => {
+    // Check authentication
+    const config = getGlobalConfig();
+    if (!config.token) {
+      console.error(chalk.red("Not authenticated. Run `gblockparty login` first."));
+      process.exit(1);
+    }
+
+    // Check if already linked
+    const existingConfig = getProjectConfig();
+    if (existingConfig) {
+      console.log(
+        chalk.yellow(`This directory is already linked to project ${existingConfig.projectId}.`)
+      );
+      console.log(chalk.yellow("Continuing will overwrite the existing link."));
+    }
+
+    // Fetch projects
+    const spinner = ora("Fetching projects...").start();
+    const client = new ApiClient();
+
+    let projects: Project[];
+    try {
+      projects = await client.get<Project[]>("/api/projects");
+      spinner.stop();
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to fetch projects"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    }
+
+    if (projects.length === 0) {
+      console.log(chalk.yellow("No projects found."));
+      console.log(
+        chalk.dim("Connect a repository in the dashboard first: ") +
+          chalk.cyan(`${config.apiUrl ?? "http://localhost:3000"}`)
+      );
+      process.exit(0);
+    }
+
+    // Present interactive selection
+    const { selectedProjectId } = await inquirer.prompt([
+      {
+        type: "list",
+        name: "selectedProjectId",
+        message: "Select a project to link:",
+        choices: projects.map((p) => ({
+          name: `${p.name} ${chalk.dim(`(${p.githubRepoFullName ?? p.slug})`)}`,
+          value: p.id,
+        })),
+      },
+    ]);
+
+    // Save project config
+    saveProjectConfig({ projectId: selectedProjectId });
+
+    const selectedProject = projects.find((p) => p.id === selectedProjectId);
+    console.log(
+      chalk.green(`Linked to ${chalk.bold(selectedProject?.name ?? selectedProjectId)}`)
+    );
+    console.log(chalk.dim(`Project ID: ${selectedProjectId}`));
+    console.log(chalk.dim(`Config saved to .gblockparty/config.json`));
+  });
+```
+
+---
+
+## API Dependency
+
+This command calls `GET /api/projects`, which is a standard dashboard API route (implemented in Phase 6). It returns an array of project objects:
+
+```typescript
+[
+  {
+    id: "550e8400-e29b-41d4-a716-446655440000",
+    name: "my-app",
+    slug: "my-app",
+    githubRepoFullName: "georgele/my-app",
+    framework: "nextjs",
+    productionBranch: "main",
+    // ... other fields
+  }
+]
+```
+
+The `ApiClient` sends the `Authorization: Bearer {token}` header automatically.
+
+---
+
+## Interactive Selection
+
+The `inquirer` `list` prompt presents projects as an arrow-key-navigable list:
+
+```
+? Select a project to link: (Use arrow keys)
+> my-app (georgele/my-app)
+  my-api (georgele/my-api)
+  portfolio (georgele/portfolio)
+```
+
+Each choice shows the project name with the GitHub repo full name (or slug) dimmed for context.
+
+---
+
+## Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Not authenticated | Print error message with `gblockparty login` instruction, exit with code 1 |
+| Already linked to a project | Print warning, continue with re-selection (overwrites existing link) |
+| No projects exist | Print message directing user to the dashboard, exit with code 0 |
+| API returns 401 (expired token) | Print "Session expired. Run `gblockparty login` to re-authenticate." and exit |
+| API is unreachable | Print connection error message and exit |
+| Single project available | Still show the selection list (user confirms the choice) |
+
+---
+
+## Output Files
+
+After running `gblockparty link`, the following file is created:
+
+```
+.gblockparty/
+  config.json     # { "projectId": "uuid-here" }
+```
+
+The `.gblockparty/` directory is created by `saveProjectConfig()` if it does not exist.
+
+---
+
+## Gitignore Consideration
+
+The `.gblockparty/` directory should be in the project's `.gitignore` file. The `link` command should check if `.gitignore` exists and if `.gblockparty/` is listed. If not, print a warning:
+
+```
+Warning: .gblockparty/ is not in your .gitignore. Consider adding it to prevent
+committing project-specific config.
+```
+
+This is a non-blocking warning -- the command should still complete successfully.
+
+---
+
+## Verification Checklist
+
+- [ ] `gblockparty link` requires authentication (exits if not logged in)
+- [ ] Projects are fetched from `GET /api/projects` with correct auth header
+- [ ] An interactive list of projects is displayed with names and repo info
+- [ ] Selecting a project creates `.gblockparty/config.json` with the correct project ID
+- [ ] The `.gblockparty/` directory is created if it does not exist
+- [ ] Success message shows the project name and ID
+- [ ] Re-running `gblockparty link` allows selecting a different project (overwrites config)
+- [ ] No projects scenario shows a helpful message
+- [ ] API error scenarios are handled gracefully with informative messages
+- [ ] `pnpm typecheck` passes

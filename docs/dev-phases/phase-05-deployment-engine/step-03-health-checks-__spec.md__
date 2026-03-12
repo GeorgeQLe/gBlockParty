@@ -1,0 +1,255 @@
+# Step 3: Health Check System
+
+**Phase:** 5 -- Deployment Engine
+**Step:** 3 of 5
+**Status:** Not Started
+**Depends on:** Phase 4 (Build System) -- containers must be running Docker images; Phase 1 -- Docker installed on VPS
+**Blocks:** Step 5 (Deployer Orchestration) -- `Deployer.deploy()` calls `waitForHealthy()` before routing traffic
+
+---
+
+## Goal
+
+Implement the health check functions so the deployment engine can verify a container is healthy before routing traffic to it. Implement `waitForHealthy()` (retry-based HTTP polling), `isContainerRunning()` (Docker state inspection), and `getContainerPort()` (port mapping retrieval).
+
+---
+
+## Context
+
+After starting a container, the deployment engine must verify the app inside is ready to serve requests before updating Caddy. This prevents routing traffic to a container that is still booting, has crashed, or has a misconfigured port.
+
+The health check constants are defined in `packages/shared/src/constants/deployment.ts`:
+
+```typescript
+export const HEALTH_CHECK = {
+  DEFAULT_PATH: "/",
+  MAX_RETRIES: 10,
+  RETRY_INTERVAL_MS: 2000,
+  RUNNING_INTERVAL_S: 30,
+  CRASH_THRESHOLD: 3,
+  CRASH_WINDOW_MS: 5 * 60 * 1000,
+} as const;
+```
+
+- **Startup health check**: 10 retries at 2-second intervals = 20 seconds max wait
+- **Default path**: `GET /` (configurable per project via `deploy.yaml` `healthCheck.path`)
+- The running interval (30s) and crash detection are used by Phase 8 (auto-rollback), not this step
+
+---
+
+## File
+
+**`packages/core/src/providers/docker/container.ts`**
+
+### Current State (TODO Stub)
+
+```typescript
+import type Dockerode from "dockerode";
+import { HEALTH_CHECK } from "@gblockparty/shared/constants";
+
+export async function waitForHealthy(
+  docker: Dockerode,
+  containerId: string,
+  healthCheckPath: string,
+  port: number,
+): Promise<boolean> {
+  // TODO: Poll health check endpoint with retries
+  // Uses HEALTH_CHECK.MAX_RETRIES and HEALTH_CHECK.RETRY_INTERVAL_MS
+  throw new Error("Not implemented");
+}
+
+export async function isContainerRunning(
+  docker: Dockerode,
+  containerId: string,
+): Promise<boolean> {
+  // TODO: Inspect container and check state
+  throw new Error("Not implemented");
+}
+
+export async function getContainerPort(
+  docker: Dockerode,
+  containerId: string,
+): Promise<number | null> {
+  // TODO: Get mapped host port from container
+  throw new Error("Not implemented");
+}
+```
+
+---
+
+## Implementation Requirements
+
+### `waitForHealthy(docker, containerId, healthCheckPath, port)`
+
+1. Add a logger:
+   ```typescript
+   import { createLogger } from "@gblockparty/shared/backend";
+   const logger = createLogger("health-check");
+   ```
+
+2. First, verify the container is running via `isContainerRunning()`. If not, return `false` immediately.
+
+3. Poll the health endpoint in a retry loop:
+   ```typescript
+   for (let attempt = 1; attempt <= HEALTH_CHECK.MAX_RETRIES; attempt++) {
+     try {
+       const url = `http://localhost:${port}${healthCheckPath}`;
+       const response = await fetch(url, {
+         method: "GET",
+         signal: AbortSignal.timeout(5000), // 5s per-request timeout
+       });
+
+       if (response.ok) { // 2xx status
+         logger.info(
+           { containerId, attempt, port, path: healthCheckPath },
+           "Health check passed"
+         );
+         return true;
+       }
+
+       logger.warn(
+         { containerId, attempt, statusCode: response.status, port },
+         "Health check returned non-2xx"
+       );
+     } catch (error) {
+       // Connection refused, timeout, etc. -- expected during startup
+       logger.debug(
+         { containerId, attempt, error: (error as Error).message, port },
+         "Health check attempt failed"
+       );
+     }
+
+     // Wait before next retry (skip wait on last attempt)
+     if (attempt < HEALTH_CHECK.MAX_RETRIES) {
+       await sleep(HEALTH_CHECK.RETRY_INTERVAL_MS);
+     }
+   }
+
+   logger.error(
+     { containerId, maxRetries: HEALTH_CHECK.MAX_RETRIES, port, path: healthCheckPath },
+     "Health check failed after all retries"
+   );
+   return false;
+   ```
+
+4. The `sleep` utility:
+   ```typescript
+   function sleep(ms: number): Promise<void> {
+     return new Promise((resolve) => setTimeout(resolve, ms));
+   }
+   ```
+
+5. Use Node.js built-in `fetch` with `AbortSignal.timeout(5000)` to prevent a single health check request from hanging indefinitely.
+
+6. Accept any 2xx response (200-299) as healthy. The app can return any 2xx status from its health endpoint.
+
+7. Log each attempt so the deployer logs show the progression:
+   ```
+   [health-check] Health check attempt failed { containerId: "abc123", attempt: 1, error: "ECONNREFUSED" }
+   [health-check] Health check attempt failed { containerId: "abc123", attempt: 2, error: "ECONNREFUSED" }
+   [health-check] Health check passed { containerId: "abc123", attempt: 3, port: 3001 }
+   ```
+
+### `isContainerRunning(docker, containerId)`
+
+1. Use the Dockerode API to inspect the container:
+   ```typescript
+   const container = docker.getContainer(containerId);
+   const info = await container.inspect();
+   return info.State.Running === true;
+   ```
+
+2. If the container does not exist (Dockerode throws a 404 error), return `false`.
+
+3. Handle any Docker API error gracefully -- log and return `false`.
+
+### `getContainerPort(docker, containerId)`
+
+1. Inspect the container and extract the host port mapping:
+   ```typescript
+   const container = docker.getContainer(containerId);
+   const info = await container.inspect();
+
+   // The container exposes port 3000 internally (standard for all apps)
+   // Find the host port mapped to container port 3000/tcp
+   const portBindings = info.NetworkSettings.Ports;
+   const bindings = portBindings["3000/tcp"];
+
+   if (bindings && bindings.length > 0) {
+     return parseInt(bindings[0].HostPort, 10);
+   }
+
+   return null;
+   ```
+
+2. The internal container port is always 3000 (set in the Dockerfile). The host port is the one assigned by `PortAllocator`.
+
+3. If the container has no port mapping or does not exist, return `null`.
+
+---
+
+## Health Check Path Handling
+
+The `healthCheckPath` parameter must start with `/`. Common values:
+
+| Path | When Used |
+|------|-----------|
+| `/` | Default for all apps (spec: `HEALTH_CHECK.DEFAULT_PATH`) |
+| `/api/health` | Next.js apps with a dedicated health endpoint |
+| `/health` | Backend services with a health endpoint |
+
+The path is configured per-project in `deploy.yaml` (`healthCheck.path`) or defaults to `/`. The caller (Deployer) passes the resolved path.
+
+---
+
+## Container Internal Port
+
+All gBlockParty containers expose port 3000 internally:
+
+- Next.js server mode: `CMD ["node", "server.js"]` listens on 3000
+- Next.js static mode: Caddy inside the container serves on 3000
+- Backend services with Dockerfile: port is specified in `deploy.yaml` (default 3000)
+
+The `docker run` command maps `hostPort:3000`, so the health check always targets `localhost:{hostPort}{path}`.
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Container not running | `waitForHealthy` returns `false` immediately |
+| Connection refused (app starting) | Caught, logged as debug, retry continues |
+| HTTP timeout (app slow to respond) | Caught via AbortSignal, retry continues |
+| Non-2xx response (app error) | Logged as warning, retry continues |
+| All retries exhausted | `waitForHealthy` returns `false`, logged as error |
+| Container does not exist | `isContainerRunning` returns `false` |
+| No port mapping found | `getContainerPort` returns `null` |
+| Docker socket not accessible | Error propagates to caller |
+
+---
+
+## Acceptance Criteria
+
+1. `waitForHealthy()` returns `true` when a container responds with HTTP 2xx within the retry window.
+2. `waitForHealthy()` returns `false` after exhausting all 10 retries.
+3. `waitForHealthy()` handles connection refused errors gracefully during retries (expected during container startup).
+4. `waitForHealthy()` has a 5-second per-request timeout to prevent hangs.
+5. `waitForHealthy()` logs each attempt with attempt number and result.
+6. `isContainerRunning()` returns `true` for a running container and `false` for a stopped/non-existent container.
+7. `getContainerPort()` returns the correct host port for a running container.
+8. `getContainerPort()` returns `null` for a container with no port mapping.
+9. Health check constants (`MAX_RETRIES`, `RETRY_INTERVAL_MS`) are used from `@gblockparty/shared/constants`.
+10. `pnpm typecheck` passes with no errors.
+
+---
+
+## Testing Approach
+
+1. **Healthy container**: Start a simple HTTP server in a container, call `waitForHealthy()`. Verify returns `true`.
+2. **Slow start**: Start a container that takes 6 seconds to respond. Verify `waitForHealthy()` retries and eventually returns `true`.
+3. **Unhealthy container**: Start a container that never responds on the health path. Verify returns `false` after 10 retries.
+4. **Container not running**: Pass a stopped container ID. Verify returns `false` immediately.
+5. **isContainerRunning**: Test with running and stopped containers.
+6. **getContainerPort**: Test with a container that has a port mapping and one without.
+7. **Non-existent container**: Test all three functions with an invalid container ID. Verify graceful behavior.

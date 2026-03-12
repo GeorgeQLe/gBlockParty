@@ -1,0 +1,389 @@
+# Step 2: VPS Provisioning
+
+**Phase:** 1 - Infrastructure Provisioning
+**Step:** 2 of 5
+**Dependencies:** Step 1 (IAM credentials for AWS access from VPS)
+**Depends on this step:** Steps 3 (Docker & Caddy installed on VPS), 4 (VPS IP for DNS), 5 (verification)
+
+---
+
+## Objective
+
+Provision a Hetzner CX32 VPS, install Docker Engine and Docker Compose, harden SSH access, configure the UFW firewall, and set up AWS CLI credentials so the VPS can access S3 and Secrets Manager. After this step, the VPS is a secure, Docker-ready host with AWS connectivity.
+
+---
+
+## VPS Specifications
+
+| Setting | Value |
+|---------|-------|
+| Provider | Hetzner Cloud |
+| Plan | CX32 |
+| vCPU | 4 (shared) |
+| RAM | 8 GB |
+| Disk | 80 GB NVMe |
+| OS | Ubuntu 22.04 LTS |
+| Location | Ashburn, VA (us-east) |
+| Monthly Cost | ~$7/mo |
+
+---
+
+## Provisioning Steps
+
+### 1. Create VPS via Hetzner Cloud Console (or CLI)
+
+**Via Hetzner Cloud Console:**
+1. Log in to Hetzner Cloud Console
+2. Create a new server:
+   - Location: Ashburn
+   - Image: Ubuntu 22.04
+   - Type: CX32
+   - SSH Key: Add your public SSH key
+   - Name: `gblockparty`
+3. Note the public IPv4 address (needed for DNS and RDS security group)
+
+**Via Hetzner CLI (`hcloud`):**
+```bash
+# Add SSH key first
+hcloud ssh-key create --name gblockparty --public-key-from-file ~/.ssh/gblockparty.pub
+
+# Create server
+hcloud server create \
+  --name gblockparty \
+  --type cx32 \
+  --image ubuntu-22.04 \
+  --location ash \
+  --ssh-key gblockparty
+```
+
+### 2. Initial SSH Access
+
+```bash
+# First login as root (Hetzner default)
+ssh root@<VPS_IP>
+
+# Update system
+apt update && apt upgrade -y
+```
+
+### 3. Create Non-Root User
+
+```bash
+# Create deploy user
+adduser deploy --disabled-password --gecos ""
+
+# Add to sudo group
+usermod -aG sudo deploy
+
+# Set up SSH for deploy user
+mkdir -p /home/deploy/.ssh
+cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys
+chown -R deploy:deploy /home/deploy/.ssh
+chmod 700 /home/deploy/.ssh
+chmod 600 /home/deploy/.ssh/authorized_keys
+
+# Allow deploy user to sudo without password (for Docker commands)
+echo "deploy ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/deploy
+chmod 440 /etc/sudoers.d/deploy
+```
+
+### 4. SSH Hardening
+
+Edit `/etc/ssh/sshd_config`:
+
+```
+Port 2222                       # Non-default port
+PermitRootLogin no              # Disable root login
+PasswordAuthentication no       # Key-only authentication
+PubkeyAuthentication yes        # Explicitly enable pubkey auth
+ChallengeResponseAuthentication no
+UsePAM no
+MaxAuthTries 3
+LoginGraceTime 30
+AllowUsers deploy               # Only allow the deploy user
+```
+
+```bash
+# Test SSH config before restarting
+sshd -t
+
+# Restart SSH service
+systemctl restart sshd
+
+# IMPORTANT: Test new SSH connection in a SEPARATE terminal before closing current session
+# ssh -p 2222 deploy@<VPS_IP>
+```
+
+### 5. UFW Firewall Configuration
+
+```bash
+# Reset UFW to defaults
+ufw --force reset
+
+# Default policies
+ufw default deny incoming
+ufw default allow outgoing
+
+# Allow SSH on custom port
+ufw allow 2222/tcp comment "SSH"
+
+# Allow HTTP and HTTPS (for Caddy)
+ufw allow 80/tcp comment "HTTP"
+ufw allow 443/tcp comment "HTTPS"
+
+# Enable UFW
+ufw --force enable
+
+# Verify
+ufw status verbose
+```
+
+Expected output:
+```
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), disabled (routed)
+
+To                         Action      From
+--                         ------      ----
+2222/tcp                   ALLOW IN    Anywhere
+80/tcp                     ALLOW IN    Anywhere
+443/tcp                    ALLOW IN    Anywhere
+```
+
+### 6. Install Docker Engine
+
+```bash
+# Install prerequisites
+apt install -y ca-certificates curl gnupg
+
+# Add Docker's official GPG key
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repository
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker Engine + Compose
+apt update
+apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Add deploy user to docker group (no sudo needed for docker commands)
+usermod -aG docker deploy
+
+# Verify installation
+docker --version
+docker compose version
+```
+
+### 7. Configure Docker Daemon
+
+Create `/etc/docker/daemon.json`:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "storage-driver": "overlay2",
+  "live-restore": true
+}
+```
+
+```bash
+# Restart Docker to apply config
+systemctl restart docker
+systemctl enable docker
+```
+
+### 8. Install AWS CLI
+
+```bash
+# Install AWS CLI v2
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+apt install -y unzip
+unzip awscliv2.zip
+./aws/install
+rm -rf awscliv2.zip aws/
+
+# Verify
+aws --version
+```
+
+### 9. Configure AWS Credentials
+
+Use the IAM access key and secret from Step 1 Terraform output.
+
+```bash
+# Switch to deploy user
+su - deploy
+
+# Configure AWS CLI
+mkdir -p ~/.aws
+
+# Create credentials file
+cat > ~/.aws/credentials << 'EOF'
+[default]
+aws_access_key_id = <FROM_TERRAFORM_OUTPUT>
+aws_secret_access_key = <FROM_TERRAFORM_OUTPUT>
+EOF
+
+# Create config file
+cat > ~/.aws/config << 'EOF'
+[default]
+region = us-east-1
+output = json
+EOF
+
+# Secure permissions
+chmod 600 ~/.aws/credentials
+chmod 600 ~/.aws/config
+
+# Verify
+aws sts get-caller-identity
+aws s3 ls s3://gblockparty-builds
+```
+
+### 10. Install Additional Utilities
+
+```bash
+# PostgreSQL client (for RDS connectivity testing)
+apt install -y postgresql-client
+
+# Common utilities
+apt install -y htop curl wget jq git
+```
+
+### 11. System Hardening
+
+```bash
+# Automatic security updates
+apt install -y unattended-upgrades
+dpkg-reconfigure -plow unattended-upgrades
+
+# Set timezone
+timedatectl set-timezone UTC
+
+# Configure system limits for Docker
+cat >> /etc/sysctl.conf << 'EOF'
+# Docker optimizations
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+vm.max_map_count = 262144
+fs.file-max = 65535
+EOF
+
+sysctl -p
+```
+
+---
+
+## Files to Create
+
+### 1. `/infra/scripts/provision-vps.sh`
+
+A runbook script that encapsulates all VPS provisioning steps. This script should be run manually (not via automation) and serves as documentation.
+
+```bash
+#!/usr/bin/env bash
+# VPS Provisioning Runbook for gBlockParty
+# Run this script on a fresh Hetzner CX32 Ubuntu 22.04 VPS
+# Usage: ssh root@<VPS_IP> 'bash -s' < provision-vps.sh
+set -euo pipefail
+# ... all steps above ...
+```
+
+The script should:
+- Be idempotent where possible
+- Print status messages for each step
+- Exit on any error
+- Accept VPS_SSH_PORT, DEPLOY_USER as variables
+- Accept AWS credentials as environment variables (not hardcoded)
+
+### 2. `/infra/scripts/test-vps.sh`
+
+A verification script to run after provisioning:
+
+```bash
+#!/usr/bin/env bash
+# Verify VPS provisioning
+set -euo pipefail
+
+echo "=== Docker ==="
+docker --version
+docker compose version
+
+echo "=== Firewall ==="
+sudo ufw status
+
+echo "=== AWS Access ==="
+aws sts get-caller-identity
+aws s3 ls s3://gblockparty-builds
+
+echo "=== Disk ==="
+df -h /
+
+echo "=== Memory ==="
+free -h
+
+echo "All checks passed."
+```
+
+---
+
+## Files to Modify
+
+### 1. `/infra/terraform/environments/prod/variables.tf` (if not done in Step 1)
+
+After provisioning the VPS, the VPS public IP must be added to `allowed_cidr_blocks` in the Terraform variables, and `terraform apply` must be re-run to update the RDS security group.
+
+### 2. `.gitignore` (project root)
+
+Ensure the following are ignored:
+```
+infra/terraform/environments/prod/terraform.tfvars
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+```
+
+---
+
+## Expected State After Completion
+
+1. VPS is accessible via: `ssh -p 2222 deploy@<VPS_IP>`
+2. Root SSH login is denied
+3. Password SSH login is denied
+4. UFW firewall is active with only ports 2222, 80, 443 open
+5. Docker Engine is installed and running
+6. Docker Compose v2 is available
+7. `deploy` user can run `docker` commands without sudo
+8. AWS CLI is configured and can access S3 and Secrets Manager
+9. PostgreSQL client is installed for RDS testing
+10. System is set to UTC timezone with automatic security updates enabled
+
+---
+
+## Security Considerations
+
+- Never expose the VPS IP publicly (it will be behind Cloudflare proxy after Step 4)
+- AWS credentials on the VPS have minimal permissions (S3 + Secrets Manager only)
+- The `deploy` user has passwordless sudo; this is acceptable for a single-user platform but should be reviewed if multi-user access is added
+- SSH key should be Ed25519 or RSA 4096-bit minimum
+- Consider setting up fail2ban for additional SSH protection (optional for MVP)
+
+---
+
+## Post-Step Action Required
+
+After the VPS is provisioned and its public IP is known:
+
+1. Update `terraform.tfvars` with the VPS IP in `allowed_cidr_blocks`
+2. Run `terraform apply` to update the RDS security group
+3. Test RDS connectivity from VPS: `psql "postgresql://gblockparty:<password>@<rds-endpoint>:5432/gblockparty?sslmode=require"`

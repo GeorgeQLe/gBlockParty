@@ -1,0 +1,382 @@
+# Step 6: VPS Monitoring & Alerts
+
+**Phase:** 12 -- Notifications, Monitoring & Polish
+**Step:** 6 of 6
+**Type:** Backend implementation + API
+**Depends on:** Steps 1-4 (notification system for sending alerts), Phase 1 (VPS with Docker), Phase 5 (port allocations table)
+**Blocks:** None (final step of final phase)
+
+---
+
+## Objective
+
+Implement a VPS resource monitor that tracks disk usage, memory usage, running container count, and port allocations. Expose the stats via an API endpoint for the dashboard settings page. Set up threshold-based alerting that sends notifications when disk or memory usage exceeds safe levels. Provide a `/api/health` endpoint for external monitoring services.
+
+---
+
+## File to Create: `packages/core/src/monitoring/vps-monitor.ts`
+
+### Function: `getDiskUsage(): Promise<DiskUsage>`
+
+Parse the output of `df -h /` to get disk usage stats.
+
+```typescript
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
+
+export interface DiskUsage {
+  totalGb: number;
+  usedGb: number;
+  availableGb: number;
+  usagePercent: number;
+}
+
+export async function getDiskUsage(): Promise<DiskUsage> {
+  const { stdout } = await execAsync("df -BG / | tail -1", { timeout: 5000 });
+  // Example output: "/dev/sda1    80G  34G  43G  45% /"
+  const parts = stdout.trim().split(/\s+/);
+
+  return {
+    totalGb: parseFloat(parts[1]),      // "80G" -> 80
+    usedGb: parseFloat(parts[2]),       // "34G" -> 34
+    availableGb: parseFloat(parts[3]),  // "43G" -> 43
+    usagePercent: parseInt(parts[4]),   // "45%" -> 45
+  };
+}
+```
+
+### Function: `getMemoryUsage(): Promise<MemoryUsage>`
+
+Parse the output of `free -m` to get memory usage stats.
+
+```typescript
+export interface MemoryUsage {
+  totalMb: number;
+  usedMb: number;
+  availableMb: number;
+  usagePercent: number;
+}
+
+export async function getMemoryUsage(): Promise<MemoryUsage> {
+  const { stdout } = await execAsync("free -m | grep Mem:", { timeout: 5000 });
+  // Example output: "Mem:      8192   2560   3072    256   2560   5376"
+  const parts = stdout.trim().split(/\s+/);
+
+  const totalMb = parseInt(parts[1]);
+  const usedMb = parseInt(parts[2]);
+  const availableMb = parseInt(parts[6]);  // "available" column
+
+  return {
+    totalMb,
+    usedMb,
+    availableMb,
+    usagePercent: Math.round((usedMb / totalMb) * 100),
+  };
+}
+```
+
+### Function: `getContainerStats(): Promise<ContainerStats>`
+
+Use Docker CLI to count running and stopped containers.
+
+```typescript
+export interface ContainerStats {
+  running: number;
+  stopped: number;
+  total: number;
+}
+
+export async function getContainerStats(): Promise<ContainerStats> {
+  const { stdout: runningOutput } = await execAsync(
+    'docker ps -q --filter "status=running" | wc -l',
+    { timeout: 5000 },
+  );
+  const { stdout: allOutput } = await execAsync(
+    "docker ps -aq | wc -l",
+    { timeout: 5000 },
+  );
+
+  const running = parseInt(runningOutput.trim());
+  const total = parseInt(allOutput.trim());
+
+  return {
+    running,
+    stopped: total - running,
+    total,
+  };
+}
+```
+
+### Function: `getPortUsage(db: Database): Promise<PortUsage>`
+
+Query the `port_allocations` table for current port allocation stats.
+
+```typescript
+import { portAllocations, deployments } from "@gblockparty/shared/db/schema";
+import { sql, eq } from "drizzle-orm";
+import { PORT_RANGES } from "@gblockparty/shared/constants";
+
+export interface PortUsage {
+  allocated: number;
+  productionUsed: number;
+  previewUsed: number;
+  available: number;
+}
+
+export async function getPortUsage(db: Database): Promise<PortUsage> {
+  const allocations = await db.select().from(portAllocations);
+
+  let productionUsed = 0;
+  let previewUsed = 0;
+
+  for (const alloc of allocations) {
+    if (alloc.port >= PORT_RANGES.PRODUCTION_MIN && alloc.port <= PORT_RANGES.PRODUCTION_MAX) {
+      productionUsed++;
+    } else if (alloc.port >= PORT_RANGES.PREVIEW_MIN && alloc.port <= PORT_RANGES.PREVIEW_MAX) {
+      previewUsed++;
+    }
+  }
+
+  const totalAvailable =
+    (PORT_RANGES.PRODUCTION_MAX - PORT_RANGES.PRODUCTION_MIN + 1) +
+    (PORT_RANGES.PREVIEW_MAX - PORT_RANGES.PREVIEW_MIN + 1);
+
+  return {
+    allocated: allocations.length,
+    productionUsed,
+    previewUsed,
+    available: totalAvailable - allocations.length,
+  };
+}
+```
+
+### Function: `getVpsStats(db: Database): Promise<VpsStats>`
+
+Aggregate all monitoring data into a single response.
+
+```typescript
+export interface VpsStats {
+  disk: DiskUsage;
+  memory: MemoryUsage;
+  containers: ContainerStats;
+  ports: PortUsage;
+}
+
+export async function getVpsStats(db: Database): Promise<VpsStats> {
+  const [disk, memory, containers, ports] = await Promise.all([
+    getDiskUsage().catch(() => ({ totalGb: 0, usedGb: 0, availableGb: 0, usagePercent: 0 })),
+    getMemoryUsage().catch(() => ({ totalMb: 0, usedMb: 0, availableMb: 0, usagePercent: 0 })),
+    getContainerStats().catch(() => ({ running: 0, stopped: 0, total: 0 })),
+    getPortUsage(db),
+  ]);
+
+  return { disk, memory, containers, ports };
+}
+```
+
+Note: Shell command failures (e.g., on macOS during development) return zeroed defaults. This is intentional -- the commands only work on the Linux VPS.
+
+---
+
+## API Route: `apps/dashboard/src/app/api/settings/vps-stats/route.ts`
+
+```typescript
+import { withAuth, jsonResponse } from "@/lib/api-helpers";
+import { getVpsStats } from "@gblockparty/core/monitoring";
+import { getDb } from "@gblockparty/shared/db";
+
+// Simple in-memory cache to avoid running shell commands on every request
+let cachedStats: VpsStats | null = null;
+let lastFetchTime = 0;
+const CACHE_TTL_MS = 10_000; // 10 seconds
+
+export const GET = withAuth(async () => {
+  const now = Date.now();
+  if (cachedStats && now - lastFetchTime < CACHE_TTL_MS) {
+    return jsonResponse(cachedStats);
+  }
+
+  const stats = await getVpsStats(getDb());
+  cachedStats = stats;
+  lastFetchTime = now;
+
+  return jsonResponse(stats);
+});
+```
+
+---
+
+## Alert System
+
+### Threshold Configuration
+
+```typescript
+const ALERT_THRESHOLDS = {
+  DISK_USAGE_PERCENT: 80,
+  MEMORY_USAGE_PERCENT: 90,
+} as const;
+```
+
+### Alert Check Function
+
+```typescript
+export async function checkAndAlert(db: Database): Promise<void> {
+  const stats = await getVpsStats(db);
+  const alerts: string[] = [];
+
+  if (stats.disk.usagePercent > ALERT_THRESHOLDS.DISK_USAGE_PERCENT) {
+    alerts.push(
+      `Disk usage is at ${stats.disk.usagePercent}% (${stats.disk.usedGb}GB / ${stats.disk.totalGb}GB). ` +
+      `Consider running Docker image cleanup.`,
+    );
+  }
+
+  if (stats.memory.usagePercent > ALERT_THRESHOLDS.MEMORY_USAGE_PERCENT) {
+    alerts.push(
+      `Memory usage is at ${stats.memory.usagePercent}% (${stats.memory.usedMb}MB / ${stats.memory.totalMb}MB). ` +
+      `Consider stopping unused containers.`,
+    );
+  }
+
+  if (alerts.length === 0) return;
+
+  // Load notification settings and send alert
+  const settings = await loadNotificationSettings(db);
+  if (!settings) return;
+
+  for (const alertMessage of alerts) {
+    await notify(
+      {
+        slackWebhookUrl: settings.slackWebhookUrl,
+        discordWebhookUrl: settings.discordWebhookUrl,
+      },
+      {
+        projectName: "Platform Alert",
+        deploymentType: "monitoring",
+        status: "failed",
+        errorMessage: alertMessage,
+      },
+    ).catch(err => {
+      logger.error({ error: err }, "Failed to send VPS alert notification");
+    });
+  }
+}
+```
+
+### Scheduling
+
+Run the alert check on a periodic schedule:
+
+```typescript
+// In the platform startup (e.g., dashboard's instrumentation or a background worker)
+const ALERT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let lastAlertTime: Record<string, number> = {};
+const ALERT_DEBOUNCE_MS = 60 * 60 * 1000; // 1 hour
+
+setInterval(async () => {
+  try {
+    await checkAndAlert(getDb());
+  } catch (error) {
+    logger.error({ error }, "VPS alert check failed");
+  }
+}, ALERT_CHECK_INTERVAL_MS);
+```
+
+**Alert debounce:** Don't send the same alert type more than once per hour. Track the last alert timestamp per alert type (disk, memory) and skip if within the debounce window.
+
+---
+
+## Health Endpoint: `/api/health`
+
+Create `apps/dashboard/src/app/api/health/route.ts`:
+
+```typescript
+import { NextResponse } from "next/server";
+
+const startTime = Date.now();
+
+export async function GET() {
+  // No auth required -- this is for external monitoring
+  const uptimeMs = Date.now() - startTime;
+
+  return NextResponse.json({
+    status: "ok",
+    uptime: uptimeMs,
+    uptimeHuman: formatUptime(uptimeMs),
+    timestamp: new Date().toISOString(),
+    version: process.env.COMMIT_SHA ?? "development",
+  });
+}
+
+function formatUptime(ms: number): string {
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+  const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+  return `${hours}h ${minutes}m`;
+}
+```
+
+This endpoint:
+- Does NOT require authentication (for external monitoring tools like UptimeRobot, Pingdom)
+- Returns basic health info
+- Can be extended to include database connectivity check (optional)
+
+---
+
+## Development Environment Handling
+
+Shell commands (`df`, `free`, `docker ps`) only work on Linux. On macOS (local development):
+- The functions return zeroed defaults (caught by `.catch()`)
+- The dashboard displays "0" or "N/A" values
+- This is acceptable since VPS monitoring is only meaningful on the production VPS
+
+Alternatively, check the platform and return mock data:
+
+```typescript
+function isLinux(): boolean {
+  return process.platform === "linux";
+}
+```
+
+---
+
+## File to Create: `packages/core/src/monitoring/index.ts`
+
+```typescript
+export {
+  getDiskUsage,
+  getMemoryUsage,
+  getContainerStats,
+  getPortUsage,
+  getVpsStats,
+  checkAndAlert,
+} from "./vps-monitor";
+
+export type {
+  DiskUsage,
+  MemoryUsage,
+  ContainerStats,
+  PortUsage,
+  VpsStats,
+} from "./vps-monitor";
+```
+
+---
+
+## Verification
+
+- [ ] `getDiskUsage()` returns accurate disk stats on Linux VPS
+- [ ] `getMemoryUsage()` returns accurate memory stats on Linux VPS
+- [ ] `getContainerStats()` returns accurate running/stopped counts
+- [ ] `getPortUsage()` queries `port_allocations` and returns correct counts
+- [ ] `getVpsStats()` aggregates all stats into one response
+- [ ] Shell command failures return zeroed defaults (no crashes)
+- [ ] API route `GET /api/settings/vps-stats` returns VPS stats
+- [ ] API route caches response for 10 seconds
+- [ ] `checkAndAlert()` sends notification when disk > 80%
+- [ ] `checkAndAlert()` sends notification when memory > 90%
+- [ ] Alert debounce: same alert not sent more than once per hour
+- [ ] `/api/health` returns 200 with status, uptime, timestamp
+- [ ] `/api/health` works without authentication
+- [ ] Development environment handles missing Linux commands gracefully

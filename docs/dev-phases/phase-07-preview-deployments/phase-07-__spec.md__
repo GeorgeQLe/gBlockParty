@@ -1,0 +1,270 @@
+# Phase 7: Preview Deployments
+
+**Phase:** 7 of 12
+**Status:** Not Started
+**Depends on:** Phase 3 (GitHub App -- installation tokens, webhook routing), Phase 4 (Build system -- image building pipeline), Phase 5 (Deployment engine -- Deployer, PortAllocator, CaddyClient), Phase 6 (Webhook handler foundation -- signature validation, event parsing)
+**Depended on by:** Phase 8 (may enhance preview deployments with build caching optimizations), Phase 9+ (dashboard preview deployment UI enhancements)
+
+---
+
+## Goal
+
+Every pull request gets a live preview URL at `pr-{N}--{slug}.yourdomain.dev`. Preview containers start when a PR is opened or updated, rebuild on new commits, and clean up automatically when the PR is closed or merged. GitHub shows commit status checks (pending/success/failure) on each commit, and a bot posts or updates a single PR comment with the preview link.
+
+After this phase:
+- Opening a PR triggers an automatic preview build and deployment
+- Pushing new commits to a PR branch rebuilds and re-deploys the preview
+- The preview is accessible at `pr-{N}--{slug}.yourdomain.dev`
+- GitHub shows a commit status check linking to the preview URL
+- A bot comment on the PR contains the live preview link, build status, and build time
+- Closing or merging a PR stops the preview container, releases the port, removes the Caddy route, and deletes preview Docker images
+- Preview deployments use the "preview" scope environment variables
+- Preview images are not counted toward the 10-image retention limit
+
+---
+
+## Architecture Context
+
+```
+GitHub (PR event)               Dashboard                     Core
+  |                                |                            |
+  |-- POST /api/webhooks/github -->|                            |
+  |                                |-- verify HMAC-SHA256       |
+  |                                |-- parse pull_request event |
+  |                                |-- handleWebhook(ctx) ----->|
+  |                                |                            |
+  |                                |              [opened/synchronize/reopened]
+  |                                |                            |-- create deployment record
+  |                                |                            |    (type=preview, prNumber=N)
+  |                                |                            |-- setCommitStatus(pending)
+  |<-- 200 { received: true } ----|<----------------------------|
+  |                                |                            |
+  |                                |              [async build pipeline]
+  |                                |                            |-- clone repo (PR head SHA)
+  |                                |                            |-- build Docker image
+  |                                |                            |    tag: {project}:pr-{N}-{sha}
+  |                                |                            |-- allocate port (4000-4999)
+  |                                |                            |-- start container
+  |                                |                            |-- health check
+  |                                |                            |-- CaddyClient.addRoute()
+  |                                |                            |    pr-{N}--{slug}.domain -> :port
+  |                                |                            |-- update deployment record
+  |                                |                            |-- setCommitStatus(success, previewUrl)
+  |                                |                            |-- createOrUpdatePRComment()
+  |                                |                            |
+  |                                |              [closed/merged]
+  |                                |                            |-- stop preview container
+  |                                |                            |-- PortAllocator.release(port)
+  |                                |                            |-- CaddyClient.removeRoute()
+  |                                |                            |-- delete preview Docker images
+  |                                |                            |-- update deployment status=archived
+```
+
+### URL Routing Detail
+
+```
+Request: https://pr-42--myapp.yourdomain.dev
+         |
+         v
+Cloudflare DNS: *.yourdomain.dev -> VPS IP
+         |
+         v
+Caddy (VPS):
+  pr-42--myapp.yourdomain.dev {
+      reverse_proxy localhost:4001
+  }
+         |
+         v
+Docker container: myapp:pr-42-a1b2c3d (port 4001)
+```
+
+---
+
+## Environment Variables Required
+
+No new environment variables are introduced in this phase. The following must already be available from prior phases:
+
+| Variable | Source | Used By |
+|----------|--------|---------|
+| `GITHUB_APP_ID` | Phase 3 | Obtaining installation tokens for API calls |
+| `GITHUB_APP_PRIVATE_KEY` | Phase 3 | JWT signing for installation auth |
+| `PLATFORM_DOMAIN` | Phase 1 | `generatePreviewUrl()` in `url.ts` |
+| `CADDY_ADMIN_URL` | Phase 5 | CaddyClient for route management |
+| `DATABASE_URL` | Phase 2 | Deployment records, port allocations |
+
+---
+
+## Files Overview
+
+### Already Implemented (no changes needed)
+
+| File | What it does |
+|------|-------------|
+| `packages/core/src/routing/url.ts` | `generatePreviewUrl(slug, prNumber, domain)` returns `https://pr-{N}--{slug}.{domain}` |
+| `packages/core/src/github/pr-commenter.ts` (partial) | `formatDeploymentComment(status, url, buildDurationMs)` builds the markdown PR comment body with status emoji, URL, and build duration |
+| `packages/shared/src/constants/deployment.ts` | `PORT_RANGES.PREVIEW_MIN` (4000) and `PORT_RANGES.PREVIEW_MAX` (4999), `DEPLOYMENT_TYPES` includes `'preview'`, `DEPLOYMENT_STATUSES` includes `'archived'` |
+| `packages/shared/src/db/schema.ts` | `deployments` table has `type` (preview), `pr_number` (integer, nullable), `status` (archived) |
+| `packages/core/src/github/signature.ts` | `verifySignature()` for webhook HMAC-SHA256 validation |
+
+### Partially Implemented (need completion in this phase)
+
+| File | Current State | What This Phase Adds |
+|------|--------------|---------------------|
+| `packages/core/src/github/webhooks.ts` | `handleWebhook()` has `case "pull_request"` with TODO comments | Implement PR event routing: opened/synchronize/reopened trigger preview build, closed triggers cleanup |
+| `packages/core/src/github/pr-commenter.ts` | `createOrUpdatePRComment()` throws "Not implemented" | Search for existing bot comment by `BOT_COMMENT_MARKER`, update it or create new |
+| `packages/core/src/github/commit-status.ts` | `setCommitStatus()` throws "Not implemented" | Call `octokit.repos.createCommitStatus()` with state, target URL, description, context |
+
+### TODO Stubs (need full implementation in this phase)
+
+| File | What Needs to Be Built |
+|------|----------------------|
+| `packages/core/src/deploy/preview-deployer.ts` (new) | `PreviewDeployer` class: builds preview image, allocates preview port, starts container, configures Caddy preview route, updates deployment record |
+| `packages/core/src/deploy/preview-cleanup.ts` (new) | `cleanupPreview()` function: stops container, releases port, removes Caddy route, deletes preview images, archives deployment |
+
+### Existing Infrastructure (used but not modified)
+
+| File | Role in This Phase |
+|------|-------------------|
+| `packages/core/src/deploy/deployer.ts` | `Deployer` class with `DeployOptions` interface -- PreviewDeployer may extend this or reuse its patterns |
+| `packages/core/src/deploy/port-allocator.ts` | `PortAllocator` with `allocate(deploymentId, type)` and `release(port)` -- used by preview pipeline |
+| `packages/core/src/routing/caddy.ts` | `CaddyClient` with `addRoute(hostname, port)` and `removeRoute(hostname)` -- used for preview routing |
+| `packages/core/src/github/app.ts` | `GitHubAppClient` with `getInstallationOctokit()` -- needed for commit status and PR comment API calls |
+
+---
+
+## Database Interactions
+
+### Deployment Record (Preview)
+
+When a PR webhook arrives (opened/synchronize/reopened), create a deployment record:
+
+```typescript
+{
+  project_id: project.id,
+  type: 'preview',
+  status: 'queued',
+  commit_sha: payload.pull_request.head.sha,
+  branch: payload.pull_request.head.ref,
+  pr_number: payload.pull_request.number,
+  docker_image_tag: null,       // set after build
+  container_id: null,            // set after container start
+  port: null,                    // set after port allocation
+  url: null,                     // set after Caddy config
+}
+```
+
+The deployment record progresses through statuses: `queued` -> `building` -> `deploying` -> `ready` (or `failed`).
+
+### Port Allocation (Preview Range)
+
+Preview ports are allocated from 4000-4999 using `PortAllocator.allocate(deploymentId, 'preview')`. The `port_allocations` table tracks which port is assigned to which deployment. On cleanup, `PortAllocator.release(port)` removes the allocation.
+
+### Previous Preview Lookup
+
+When a new commit is pushed to an existing PR, the handler must find the existing preview deployment for that PR:
+
+```sql
+SELECT * FROM deployments
+WHERE project_id = ? AND type = 'preview' AND pr_number = ? AND status = 'ready'
+ORDER BY created_at DESC LIMIT 1;
+```
+
+This old deployment's container and port are cleaned up before (or after) the new preview is started.
+
+---
+
+## Steps
+
+| # | Step | Key Deliverable |
+|---|------|----------------|
+| 1 | PR Webhook Handler | `handleWebhook()` routes pull_request events to preview build or cleanup |
+| 2 | Preview Deployment Pipeline | `PreviewDeployer` class builds, deploys, and routes preview containers |
+| 3 | GitHub Commit Status Integration | `setCommitStatus()` sets pending/success/failure on commits |
+| 4 | PR Bot Comment Management | `createOrUpdatePRComment()` finds and updates bot comment on PR |
+| 5 | Preview Cleanup | `cleanupPreview()` stops container, releases port, removes route, deletes images |
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+- `handleWebhook()` with `pull_request` event: verify correct branch for opened/synchronize/reopened vs. closed
+- `handleWebhook()` with `pull_request` event: verify project lookup by installation ID + repo name
+- `PreviewDeployer` pipeline: mock Docker, PortAllocator, CaddyClient; verify correct sequence of calls
+- `setCommitStatus()`: verify correct API call parameters for each state (pending, success, failure, error)
+- `createOrUpdatePRComment()`: verify search for existing comment, update path, create path
+- `cleanupPreview()`: verify container stop, port release, route removal, image deletion, status update
+
+### Integration Tests
+
+- Webhook endpoint receives pull_request opened event -> deployment record created with type=preview and pr_number set
+- Webhook endpoint receives pull_request closed event -> cleanup triggered for matching PR
+- Preview deployment creates container on port in 4000-4999 range
+- Caddy route is added with correct preview hostname format
+- Caddy route is removed on cleanup
+- Port is released back to pool after cleanup
+- Commit status appears on GitHub commit (mock GitHub API)
+- PR comment is created then updated on subsequent pushes (mock GitHub API)
+
+### Manual Verification
+
+- Create a PR on a connected repo; verify preview URL becomes accessible
+- Push a new commit to the PR; verify preview updates with new content
+- Check GitHub for commit status check (green checkmark with preview URL)
+- Check PR for bot comment with preview link
+- Merge the PR; verify preview container is stopped, preview URL returns 502
+- Verify preview images are deleted (not counted in `docker images` list)
+
+---
+
+## Security Considerations
+
+1. **Preview environment isolation**: Preview containers use "preview" scope env vars, not production secrets
+2. **Port range enforcement**: Preview ports strictly within 4000-4999; never overlap with production (3001-3999)
+3. **Webhook validation**: All PR webhooks validated via HMAC-SHA256 before processing (inherited from Phase 3)
+4. **Installation token scoping**: GitHub API calls use installation-scoped tokens, not user tokens
+5. **Image tag uniqueness**: Preview images tagged with PR number + commit SHA to prevent collisions
+6. **No cross-PR access**: Each preview deployment is isolated in its own container with its own port
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: PR Webhook Handler | 1-2 hours |
+| Step 2: Preview Deployment Pipeline | 3-4 hours |
+| Step 3: Commit Status Integration | 1 hour |
+| Step 4: PR Bot Comments | 1-2 hours |
+| Step 5: Preview Cleanup | 2-3 hours |
+| **Total** | **8-12 hours** |
+
+---
+
+## Risk Assessment
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| Port exhaustion (1000 preview ports for many open PRs) | Low | Medium | Single developer with few repos; monitor port allocation count |
+| Preview container lingers after PR close (webhook missed) | Medium | Low | GitHub retries webhooks on non-2xx; add periodic cleanup sweep as follow-up |
+| Race condition: two pushes to same PR in quick succession | Medium | Medium | Check for in-progress preview builds before starting new one; cancel/queue |
+| Preview build fails but PR comment not updated | Low | Low | Always set commit status on failure; wrap comment update in try/catch with logging |
+| Caddy route conflicts with production hostname | Low | High | Preview URL format `pr-{N}--{slug}` cannot collide with production `{slug}` due to prefix |
+| Docker image accumulation from many PR updates | Medium | Low | Cleanup step deletes all preview images for the PR; not counted toward 10-image retention |
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On
+
+- **Phase 3 (GitHub App)**: Installation tokens via `GitHubAppClient.getInstallationOctokit()`, webhook signature validation, webhook event routing foundation
+- **Phase 4 (Build System)**: Docker image building pipeline (clone, detect framework, build image, tag)
+- **Phase 5 (Deployment Engine)**: `Deployer` class patterns, `PortAllocator`, `CaddyClient`, health check logic
+- **Phase 6 (Webhook Foundation)**: Dashboard webhook API route that validates signatures and calls `handleWebhook()`
+
+### Enables
+
+- **Phase 8**: Build caching for preview builds (reuse dependency cache, framework cache from production builds)
+- **Dashboard UI**: Preview deployment list, preview logs, preview status indicators on project detail page

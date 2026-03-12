@@ -1,0 +1,308 @@
+# Step 1: CLI API Routes
+
+**Phase:** 9 -- CLI Tool
+**Step:** 1 of 7
+**Status:** Not Started
+**Depends on:** Phase 3 (Auth -- `withAuth` middleware, session validation), Phase 6 (Dashboard API -- project/deployment data access patterns)
+**Depends on this step:** Steps 2-7 (all CLI commands depend on these API routes)
+
+---
+
+## Goal
+
+Implement the server-side API routes that the CLI tool calls. These are dedicated CLI endpoints that accept Bearer token authentication (rather than cookie-based sessions used by the dashboard). After this step, the CLI has working server-side endpoints for triggering deployments and managing environment variables.
+
+---
+
+## Background
+
+The dashboard uses cookie-based sessions (JWT in HTTP-only cookies). The CLI cannot use cookies, so it sends an auth token via the `Authorization: Bearer {token}` header. The existing `withAuth` middleware in `apps/dashboard/src/lib/api-helpers.ts` already supports this -- it checks for the Bearer token in the Authorization header as a fallback when no session cookie is present.
+
+Two CLI-specific API routes need implementation:
+- `POST /api/cli/deploy` -- Trigger a deployment from the CLI
+- `GET/POST /api/cli/env/:projectId` -- Pull/push environment variables
+
+---
+
+## Files to Modify
+
+### 1. `apps/dashboard/src/app/api/cli/deploy/route.ts`
+
+**Current state:** Returns `errorResponse("Not implemented", 501)`.
+
+**Target implementation:**
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+import { db } from "@gblockparty/shared/db";
+import { projects, deployments } from "@gblockparty/shared/db/schema";
+import { eq } from "drizzle-orm";
+import { queueDeployment } from "@gblockparty/core/deploy";
+
+export const POST = withAuth(async (request, session) => {
+  const body = await request.json();
+  const { projectId, branch, commitSha, production } = body;
+
+  // Validate required fields
+  if (!projectId) {
+    return errorResponse("projectId is required", 400);
+  }
+
+  // Look up project
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  });
+
+  if (!project) {
+    return errorResponse("Project not found", 404);
+  }
+
+  // Determine deployment type
+  const type = production ? "production" : "preview";
+
+  // Determine branch and commit
+  const deployBranch = branch ?? project.productionBranch ?? "main";
+  const deployCommitSha = commitSha ?? undefined;
+
+  // Create deployment record
+  const [deployment] = await db
+    .insert(deployments)
+    .values({
+      projectId,
+      type,
+      status: "queued",
+      branch: deployBranch,
+      commitSha: deployCommitSha,
+    })
+    .returning();
+
+  // Queue the build (async -- returns immediately)
+  queueDeployment(deployment.id);
+
+  return jsonResponse({
+    deploymentId: deployment.id,
+    type,
+    branch: deployBranch,
+    streamUrl: `/api/projects/${projectId}/deployments/${deployment.id}/logs/stream`,
+  });
+});
+```
+
+**Key behaviors:**
+- Validates `projectId` is present in the request body
+- Looks up the project in the database; returns 404 if not found
+- Creates a deployment record with status `queued`
+- Calls `queueDeployment()` to start the build pipeline asynchronously
+- Returns the deployment ID and a stream URL for the CLI to connect to for build log streaming
+- The `production` flag determines the deployment type (`production` or `preview`)
+- If no `branch` is provided, defaults to the project's `productionBranch` setting
+- If no `commitSha` is provided, the build pipeline will resolve the latest commit on the branch
+
+**Request body schema:**
+
+```typescript
+{
+  projectId: string;       // Required: UUID of the project to deploy
+  branch?: string;         // Optional: git branch (defaults to project's productionBranch)
+  commitSha?: string;      // Optional: specific commit SHA (defaults to latest on branch)
+  production?: boolean;    // Optional: true for production deploy, false for preview (default: false)
+}
+```
+
+**Response schema:**
+
+```typescript
+{
+  deploymentId: string;    // UUID of the created deployment
+  type: string;            // "production" or "preview"
+  branch: string;          // Branch being deployed
+  streamUrl: string;       // WebSocket/SSE URL for build log streaming
+}
+```
+
+---
+
+### 2. `apps/dashboard/src/app/api/cli/env/[projectId]/route.ts`
+
+**Current state:** GET returns empty `{}`, POST returns 501.
+
+**Target implementation:**
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+import { db } from "@gblockparty/shared/db";
+import { envVars, projects } from "@gblockparty/shared/db/schema";
+import { eq, and } from "drizzle-orm";
+
+// GET: Download env vars for CLI (env pull)
+export const GET = withAuth(async (request, _session, context) => {
+  const { projectId } = await context.params;
+  const { searchParams } = new URL(request.url);
+  const scope = searchParams.get("scope") ?? "production";
+
+  // Validate scope
+  if (scope !== "production" && scope !== "preview") {
+    return errorResponse('scope must be "production" or "preview"', 400);
+  }
+
+  // Verify project exists
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  });
+
+  if (!project) {
+    return errorResponse("Project not found", 404);
+  }
+
+  // Fetch env vars for project and scope
+  const vars = await db.query.envVars.findMany({
+    where: and(
+      eq(envVars.projectId, projectId),
+      eq(envVars.scope, scope)
+    ),
+  });
+
+  // Mask secret values
+  const maskedVars = vars.map((v) => ({
+    key: v.key,
+    value: v.isSecret ? "***" : v.value,
+    isSecret: v.isSecret,
+  }));
+
+  return jsonResponse({
+    projectId,
+    scope,
+    vars: maskedVars,
+  });
+});
+
+// POST: Upload env vars from CLI (env push)
+export const POST = withAuth(async (request, _session, context) => {
+  const { projectId } = await context.params;
+  const body = await request.json();
+  const { scope, vars } = body;
+
+  // Validate inputs
+  if (!scope || (scope !== "production" && scope !== "preview")) {
+    return errorResponse('scope must be "production" or "preview"', 400);
+  }
+
+  if (!Array.isArray(vars) || vars.length === 0) {
+    return errorResponse("vars must be a non-empty array of { key, value } objects", 400);
+  }
+
+  // Verify project exists
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  });
+
+  if (!project) {
+    return errorResponse("Project not found", 404);
+  }
+
+  // Upsert each env var
+  let updated = 0;
+  for (const { key, value } of vars) {
+    if (!key || typeof key !== "string") continue;
+
+    await db
+      .insert(envVars)
+      .values({
+        projectId,
+        scope,
+        key,
+        value: value ?? "",
+        isSecret: false,
+      })
+      .onConflictDoUpdate({
+        target: [envVars.projectId, envVars.scope, envVars.key],
+        set: {
+          value: value ?? "",
+          updatedAt: new Date(),
+        },
+      });
+
+    updated++;
+  }
+
+  return jsonResponse({
+    projectId,
+    scope,
+    updated,
+  });
+});
+```
+
+**GET `/api/cli/env/:projectId`**
+
+Query parameters:
+- `scope` (optional, default `"production"`): `"production"` or `"preview"`
+
+Response:
+```typescript
+{
+  projectId: string;
+  scope: string;
+  vars: Array<{
+    key: string;
+    value: string;        // "***" for secrets
+    isSecret: boolean;
+  }>;
+}
+```
+
+**POST `/api/cli/env/:projectId`**
+
+Request body:
+```typescript
+{
+  scope: string;           // "production" or "preview"
+  vars: Array<{
+    key: string;
+    value: string;
+  }>;
+}
+```
+
+Response:
+```typescript
+{
+  projectId: string;
+  scope: string;
+  updated: number;         // Count of vars upserted
+}
+```
+
+---
+
+## Auth Token Validation
+
+The `withAuth` middleware already handles Bearer token extraction from the `Authorization` header. The flow is:
+
+1. Check for `Authorization: Bearer {token}` header
+2. If present, validate the token (verify JWT signature or validate against stored token)
+3. If valid, attach the session to the request and continue
+4. If invalid or missing, return `errorResponse("Unauthorized", 401)`
+
+No changes to `withAuth` are needed. The CLI API routes simply wrap their handlers with `withAuth()` like all other protected routes.
+
+---
+
+## Verification Checklist
+
+After implementation, verify:
+
+- [ ] `POST /api/cli/deploy` with valid token and valid projectId returns 200 with deploymentId
+- [ ] `POST /api/cli/deploy` with valid token and invalid projectId returns 404
+- [ ] `POST /api/cli/deploy` without Authorization header returns 401
+- [ ] `POST /api/cli/deploy` with invalid token returns 401
+- [ ] `POST /api/cli/deploy` without projectId in body returns 400
+- [ ] `GET /api/cli/env/:projectId?scope=production` returns env vars with secrets masked
+- [ ] `GET /api/cli/env/:projectId?scope=preview` returns preview env vars
+- [ ] `GET /api/cli/env/:projectId?scope=invalid` returns 400
+- [ ] `POST /api/cli/env/:projectId` upserts vars and returns count
+- [ ] `POST /api/cli/env/:projectId` with empty vars array returns 400
+- [ ] Both routes return 404 for non-existent project IDs
+- [ ] `pnpm typecheck` passes with no errors in the dashboard package

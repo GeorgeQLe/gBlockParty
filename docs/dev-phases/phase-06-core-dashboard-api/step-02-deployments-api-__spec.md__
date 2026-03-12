@@ -1,0 +1,345 @@
+# Step 2: Deployments API Routes
+
+**Phase:** 6, Step 2
+**Status:** Not Started
+**Depends on:** Step 1 (projects API must exist for project lookup), Phase 4 (BuildQueue for enqueueing builds)
+**Blocks:** Step 7 (deployment UI pages need these endpoints)
+
+---
+
+## Goal
+
+Implement the deployments API endpoints: list deployments with pagination, trigger a manual deployment that enqueues a build, and retrieve deployment details including the build log S3 key. After this step, manual deployments can be triggered via the API and their status can be tracked.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/api/projects/[id]/deployments/route.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (_request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: List deployments for project, ordered by created_at DESC
+  return jsonResponse([]);
+});
+
+export const POST = withAuth(async (request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Validate body with triggerDeploymentSchema
+  // TODO: Create deployment record
+  // TODO: Enqueue build
+  return errorResponse("Not implemented", 501);
+});
+```
+
+### `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/route.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (_request, _session, context) => {
+  const { id, deploymentId } = await context.params;
+  // TODO: Get deployment details
+  return errorResponse("Not implemented", 501);
+});
+```
+
+---
+
+## Implementation Details
+
+### File: `apps/dashboard/src/app/api/projects/[id]/deployments/route.ts`
+
+#### GET /api/projects/:id/deployments -- List Deployments (Paginated)
+
+1. Extract `id` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Extract pagination params from the query string:
+   ```typescript
+   const page = Math.max(1, parseInt(request.nextUrl.searchParams.get("page") ?? "1", 10));
+   const limit = Math.min(100, Math.max(1, parseInt(request.nextUrl.searchParams.get("limit") ?? "20", 10)));
+   const offset = (page - 1) * limit;
+   ```
+4. Query deployments with pagination:
+   ```typescript
+   const db = getDb();
+
+   const [{ count: total }] = await db
+     .select({ count: sql<number>`count(*)::int` })
+     .from(deployments)
+     .where(eq(deployments.projectId, id));
+
+   const data = await db
+     .select()
+     .from(deployments)
+     .where(eq(deployments.projectId, id))
+     .orderBy(desc(deployments.createdAt))
+     .limit(limit)
+     .offset(offset);
+   ```
+5. Return paginated response:
+   ```json
+   {
+     "data": [...],
+     "total": 42,
+     "page": 1,
+     "limit": 20
+   }
+   ```
+
+**Optional type filter:** Support `?type=production` query param to filter by deployment type (production, preview, rollback):
+
+```typescript
+const typeFilter = request.nextUrl.searchParams.get("type");
+// Add to where clause if provided:
+// and(eq(deployments.projectId, id), typeFilter ? eq(deployments.type, typeFilter) : undefined)
+```
+
+#### POST /api/projects/:id/deployments -- Trigger Manual Deployment
+
+1. Extract `id` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Parse and validate the request body with `triggerDeploymentSchema.safeParse()`. Return 400 on failure.
+4. Resolve the branch and commit SHA:
+   - If `branch` is not provided, use the project's `productionBranch`.
+   - If `commitSha` is not provided, set it to `null` (the build pipeline will resolve to HEAD of the branch).
+   - The `type` field defaults to `"production"` per the schema.
+5. Create the deployment record:
+   ```typescript
+   const [deployment] = await db
+     .insert(deployments)
+     .values({
+       projectId: id,
+       type: validated.type,
+       status: "queued",
+       branch: branch,
+       commitSha: validated.commitSha ?? null,
+     })
+     .returning();
+   ```
+6. Enqueue the build via `BuildQueue`:
+   ```typescript
+   import { BuildQueue } from "@gblockparty/core/queue";
+
+   // Get or create a singleton BuildQueue instance
+   const queue = getBuildQueue();
+   await queue.enqueue({
+     id: deployment.id,
+     projectId: id,
+     execute: async () => {
+       // The build+deploy pipeline will:
+       // 1. Update deployment status to "building"
+       // 2. Clone repo, build, create Docker image
+       // 3. Update deployment status to "deploying"
+       // 4. Start container, health check, update Caddy
+       // 5. Update deployment status to "ready" with URL
+       // On failure: update status to "failed" with error message
+     },
+   });
+   ```
+7. Return `jsonResponse(deployment, 201)`.
+
+**Build queue singleton:** Create a module-level singleton for the BuildQueue so it persists across API requests in the same server process:
+
+```typescript
+// apps/dashboard/src/lib/build-queue.ts
+import { BuildQueue } from "@gblockparty/core/queue";
+
+let queue: BuildQueue | null = null;
+
+export function getBuildQueue(): BuildQueue {
+  if (!queue) {
+    queue = new BuildQueue();
+  }
+  return queue;
+}
+```
+
+**Important:** The POST endpoint must return quickly (within a few hundred milliseconds). The build runs asynchronously in the queue. The client polls the deployment status via GET to track progress.
+
+### File: `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/route.ts`
+
+#### GET /api/projects/:id/deployments/:did -- Get Deployment Detail
+
+1. Extract `id` and `deploymentId` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Query the deployment:
+   ```typescript
+   const [deployment] = await db
+     .select()
+     .from(deployments)
+     .where(
+       and(
+         eq(deployments.id, deploymentId),
+         eq(deployments.projectId, id),
+       ),
+     );
+   ```
+4. If not found, return `errorResponse("Deployment not found", 404)`.
+5. If `deployment.buildLogS3Key` is set, construct the S3 URL for the build logs. The UI will use this to fetch logs directly or through an API proxy:
+   ```typescript
+   const buildLogUrl = deployment.buildLogS3Key
+     ? `/api/projects/${id}/deployments/${deploymentId}/logs`
+     : null;
+   ```
+6. Return the deployment with the log URL:
+   ```json
+   {
+     "id": "uuid",
+     "projectId": "uuid",
+     "type": "production",
+     "status": "ready",
+     "commitSha": "a1b2c3d4",
+     "branch": "main",
+     "prNumber": null,
+     "dockerImageTag": "my-app:a1b2c3d4",
+     "containerId": "abc123",
+     "port": 3001,
+     "url": "https://my-app.yourdomain.dev",
+     "buildDurationMs": 34000,
+     "buildLogS3Key": "builds/uuid/logs.txt",
+     "buildLogUrl": "/api/projects/uuid/deployments/uuid/logs",
+     "errorMessage": null,
+     "sourceDeploymentId": null,
+     "createdAt": "2026-02-15T12:00:00Z",
+     "updatedAt": "2026-02-15T12:01:00Z"
+   }
+   ```
+
+---
+
+## New Files
+
+### `apps/dashboard/src/lib/build-queue.ts`
+
+Singleton wrapper for the BuildQueue from `@gblockparty/core`:
+
+```typescript
+import { BuildQueue } from "@gblockparty/core/queue";
+
+let queue: BuildQueue | null = null;
+
+export function getBuildQueue(): BuildQueue {
+  if (!queue) {
+    queue = new BuildQueue();
+  }
+  return queue;
+}
+```
+
+---
+
+## Dependencies
+
+### Imports Required
+
+```typescript
+// Both route files
+import { getDb } from "@/lib/db";
+import { projects, deployments } from "@gblockparty/shared/db";
+import { eq, desc, and, sql } from "drizzle-orm";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+// POST /api/projects/:id/deployments
+import { triggerDeploymentSchema } from "@gblockparty/shared/validation";
+import { getBuildQueue } from "@/lib/build-queue";
+```
+
+---
+
+## Validation Schema Reference
+
+### `triggerDeploymentSchema`
+
+```typescript
+z.object({
+  branch: z.string().optional(),
+  commitSha: z.string().optional(),
+  type: z.enum(["production", "preview"]).default("production"),
+});
+```
+
+All fields are optional. Defaults: `type = "production"`, `branch` falls back to project's `productionBranch`, `commitSha` defaults to `null` (resolved during build).
+
+---
+
+## Pagination Behavior
+
+| Parameter | Default | Min | Max | Description |
+|-----------|---------|-----|-----|-------------|
+| `page` | 1 | 1 | -- | Page number (1-indexed) |
+| `limit` | 20 | 1 | 100 | Items per page |
+
+Response format:
+
+```json
+{
+  "data": [...],
+  "total": 42,
+  "page": 1,
+  "limit": 20
+}
+```
+
+The `total` field is the total number of deployments for the project (not just the current page). The client can calculate total pages as `Math.ceil(total / limit)`.
+
+---
+
+## Error Handling Matrix
+
+| Scenario | Endpoint | Status | Response |
+|----------|----------|--------|----------|
+| Not authenticated | All | 401 | `{ error: "Unauthorized" }` |
+| Project not found | All | 404 | `{ error: "Project not found" }` |
+| Deployment not found | GET /:did | 404 | `{ error: "Deployment not found" }` |
+| Invalid JSON body | POST | 400 | `{ error: "Invalid JSON" }` |
+| Zod validation failure | POST | 400 | `{ error: "Validation failed", details: [...] }` |
+| Invalid page/limit params | GET list | -- | Clamped to valid range (no error) |
+| Build queue failure | POST | 500 | `{ error: "Failed to enqueue build" }` |
+
+---
+
+## Build Queue Integration Notes
+
+The `BuildQueue` from `@gblockparty/core/queue` is an in-memory sequential queue. Key behaviors:
+
+1. **Sequential execution:** Only one build runs at a time. Others wait in the queue.
+2. **Cancel-and-replace:** If a new build is enqueued for the same project while one is already queued (not running), the old queued item is cancelled and replaced.
+3. **The `execute` callback** is where the full build+deploy pipeline runs. For this step, the callback can be a placeholder that just updates the deployment status. The full pipeline integration is part of the overall Phase 6 completion.
+
+```typescript
+await queue.enqueue({
+  id: deployment.id,
+  projectId: id,
+  execute: async () => {
+    // Full pipeline: clone → build → docker → deploy → health check → update status
+    // For initial implementation, this can update status to simulate the flow:
+    await db
+      .update(deployments)
+      .set({ status: "building", updatedAt: new Date() })
+      .where(eq(deployments.id, deployment.id));
+    // ... actual build pipeline integration ...
+  },
+});
+```
+
+---
+
+## Testing
+
+### Manual Tests
+
+1. **List deployments (empty):** GET returns `{ data: [], total: 0, page: 1, limit: 20 }`.
+2. **Trigger deployment:** POST with `{}` (all defaults) creates deployment with status `queued`, returns 201.
+3. **Trigger deployment (with branch):** POST with `{ branch: "develop" }` creates deployment for specified branch.
+4. **List deployments (with data):** After triggering, GET returns the deployment in the list.
+5. **Pagination:** Create 25 deployments. GET with `?page=2&limit=10` returns items 11-20 with `total: 25`.
+6. **Get deployment detail:** GET by deployment ID returns full deployment object.
+7. **Get deployment (not found):** GET with random UUID returns 404.
+8. **Project not found:** All endpoints with invalid project ID return 404.
+9. **Auth check:** All endpoints return 401 without valid session cookie.

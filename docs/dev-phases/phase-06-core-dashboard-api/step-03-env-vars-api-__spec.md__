@@ -1,0 +1,412 @@
+# Step 3: Environment Variables API Routes
+
+**Phase:** 6, Step 3
+**Status:** Not Started
+**Depends on:** Step 1 (projects API for project lookup), Phase 2 (database -- `env_vars` table)
+**Blocks:** Step 8 (environment variables UI page)
+
+---
+
+## Goal
+
+Implement full CRUD for environment variables with scope filtering (production/preview), secret encryption via AES-256-GCM, and value masking in API responses. After this step, environment variables can be managed programmatically for any project, with secrets encrypted at rest and never exposed through the API.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/api/projects/[id]/env/route.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (request, _session, context) => {
+  const { id } = await context.params;
+  const scope = request.nextUrl.searchParams.get("scope") ?? "production";
+  // TODO: List env vars for project + scope (mask secret values)
+  return jsonResponse([]);
+});
+
+export const POST = withAuth(async (request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Validate body with createEnvVarSchema
+  // TODO: Encrypt if is_secret, insert into database
+  return errorResponse("Not implemented", 501);
+});
+```
+
+### `apps/dashboard/src/app/api/projects/[id]/env/[varId]/route.ts`
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const PATCH = withAuth(async (request, _session, context) => {
+  const { id, varId } = await context.params;
+  // TODO: Validate body with updateEnvVarSchema
+  // TODO: Update env var in database
+  return errorResponse("Not implemented", 501);
+});
+
+export const DELETE = withAuth(async (_request, _session, context) => {
+  const { id, varId } = await context.params;
+  // TODO: Delete env var
+  return errorResponse("Not implemented", 501);
+});
+```
+
+---
+
+## Implementation Details
+
+### Encryption Functions
+
+The encryption utilities are already implemented in `packages/shared/src/backend/encryption.ts`:
+
+```typescript
+import { encrypt, decrypt } from "@gblockparty/shared/backend";
+```
+
+- `encrypt(plaintext: string): string` -- Returns `iv:tag:ciphertext` (hex-encoded, AES-256-GCM)
+- `decrypt(ciphertext: string): string` -- Decrypts `iv:tag:ciphertext` back to plaintext
+- Both require `ENCRYPTION_KEY` environment variable (32-byte hex key)
+
+**Rule:** Only call `encrypt()` when `isSecret` is `true`. Non-secret values are stored in plaintext in the database.
+
+### File: `apps/dashboard/src/app/api/projects/[id]/env/route.ts`
+
+#### GET /api/projects/:id/env -- List Environment Variables
+
+1. Extract `id` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Extract and validate the `scope` query parameter:
+   ```typescript
+   const scope = request.nextUrl.searchParams.get("scope") ?? "production";
+   if (scope !== "production" && scope !== "preview") {
+     return errorResponse("Invalid scope. Must be 'production' or 'preview'.", 400);
+   }
+   ```
+4. Query env vars for the project and scope:
+   ```typescript
+   const vars = await db
+     .select()
+     .from(envVars)
+     .where(
+       and(
+         eq(envVars.projectId, id),
+         eq(envVars.scope, scope),
+       ),
+     )
+     .orderBy(asc(envVars.key));
+   ```
+5. Mask secret values before returning:
+   ```typescript
+   const masked = vars.map((v) => ({
+     ...v,
+     value: v.isSecret ? "***" : v.value,
+   }));
+   ```
+6. Return `jsonResponse(masked)`.
+
+**Response format:**
+
+```json
+[
+  {
+    "id": "uuid",
+    "projectId": "uuid",
+    "scope": "production",
+    "key": "DATABASE_URL",
+    "value": "***",
+    "isSecret": true,
+    "createdAt": "2026-02-15T10:00:00Z",
+    "updatedAt": "2026-02-15T10:00:00Z"
+  },
+  {
+    "id": "uuid",
+    "projectId": "uuid",
+    "scope": "production",
+    "key": "NEXT_PUBLIC_API_URL",
+    "value": "https://api.example.com",
+    "isSecret": false,
+    "createdAt": "2026-02-15T10:00:00Z",
+    "updatedAt": "2026-02-15T10:00:00Z"
+  }
+]
+```
+
+**Important:** Secret values are NEVER returned through the API. The `"***"` mask is always applied for `isSecret: true` variables. Even the PATCH endpoint does not return the actual secret value.
+
+#### POST /api/projects/:id/env -- Create Environment Variable
+
+1. Extract `id` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Parse and validate the request body with `createEnvVarSchema.safeParse()`. Return 400 on failure.
+4. Encrypt the value if `isSecret` is true:
+   ```typescript
+   const storedValue = validated.isSecret
+     ? encrypt(validated.value)
+     : validated.value;
+   ```
+5. Insert the env var, handling uniqueness constraint violations:
+   ```typescript
+   try {
+     const [created] = await db
+       .insert(envVars)
+       .values({
+         projectId: id,
+         scope: validated.scope,
+         key: validated.key,
+         value: storedValue,
+         isSecret: validated.isSecret,
+       })
+       .returning();
+
+     return jsonResponse(
+       {
+         ...created,
+         value: created.isSecret ? "***" : validated.value,
+       },
+       201,
+     );
+   } catch (err) {
+     // Check for unique constraint violation (project_id, scope, key)
+     if (isUniqueViolation(err)) {
+       return errorResponse(
+         `Environment variable '${validated.key}' already exists for scope '${validated.scope}'`,
+         409,
+       );
+     }
+     throw err;
+   }
+   ```
+6. Return the created env var with masked secret value.
+
+**Unique constraint handling:** PostgreSQL throws error code `23505` for unique constraint violations. Detect this:
+
+```typescript
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    "code" in err &&
+    (err as { code: string }).code === "23505"
+  );
+}
+```
+
+### File: `apps/dashboard/src/app/api/projects/[id]/env/[varId]/route.ts`
+
+#### PATCH /api/projects/:id/env/:varId -- Update Environment Variable
+
+1. Extract `id` and `varId` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Parse and validate the request body with `updateEnvVarSchema.safeParse()`. Return 400 on failure.
+4. Query the existing env var to confirm it exists and belongs to this project:
+   ```typescript
+   const [existing] = await db
+     .select()
+     .from(envVars)
+     .where(
+       and(
+         eq(envVars.id, varId),
+         eq(envVars.projectId, id),
+       ),
+     );
+
+   if (!existing) {
+     return errorResponse("Environment variable not found", 404);
+   }
+   ```
+5. Determine the new stored value with encryption logic:
+   ```typescript
+   const isSecret = validated.isSecret ?? existing.isSecret;
+   let storedValue = existing.value; // keep existing if not updating value
+
+   if (validated.value !== undefined) {
+     storedValue = isSecret ? encrypt(validated.value) : validated.value;
+   } else if (validated.isSecret !== undefined && validated.isSecret !== existing.isSecret) {
+     // isSecret flag changed but value not provided
+     // If changing to secret: re-encrypt the existing plaintext value
+     // If changing to non-secret: decrypt the existing encrypted value
+     if (validated.isSecret && !existing.isSecret) {
+       storedValue = encrypt(existing.value);
+     } else if (!validated.isSecret && existing.isSecret) {
+       storedValue = decrypt(existing.value);
+     }
+   }
+   ```
+6. Update the env var:
+   ```typescript
+   const [updated] = await db
+     .update(envVars)
+     .set({
+       value: storedValue,
+       isSecret: isSecret,
+       updatedAt: new Date(),
+     })
+     .where(eq(envVars.id, varId))
+     .returning();
+   ```
+7. Return with masked value:
+   ```typescript
+   return jsonResponse({
+     ...updated,
+     value: updated.isSecret ? "***" : (validated.value ?? decrypt(existing.value)),
+   });
+   ```
+
+**Edge cases for isSecret transitions:**
+
+| Current isSecret | New isSecret | Value Provided | Action |
+|-----------------|-------------|----------------|--------|
+| false | true | yes | Encrypt new value, store |
+| false | true | no | Encrypt existing plaintext value, store |
+| true | false | yes | Store new value as plaintext |
+| true | false | no | Decrypt existing value, store as plaintext |
+| true | true | yes | Encrypt new value, store |
+| true | true | no | Keep existing encrypted value |
+| false | false | yes | Store new value as plaintext |
+| false | false | no | Keep existing plaintext value |
+
+#### DELETE /api/projects/:id/env/:varId -- Delete Environment Variable
+
+1. Extract `id` and `varId` from route params.
+2. Verify the project exists. Return 404 if not.
+3. Verify the env var exists and belongs to this project:
+   ```typescript
+   const [existing] = await db
+     .select({ id: envVars.id })
+     .from(envVars)
+     .where(
+       and(
+         eq(envVars.id, varId),
+         eq(envVars.projectId, id),
+       ),
+     );
+
+   if (!existing) {
+     return errorResponse("Environment variable not found", 404);
+   }
+   ```
+4. Delete the env var:
+   ```typescript
+   await db.delete(envVars).where(eq(envVars.id, varId));
+   ```
+5. Return `jsonResponse({ deleted: true })`.
+
+---
+
+## Dependencies
+
+### Imports Required
+
+```typescript
+// Both route files
+import { getDb } from "@/lib/db";
+import { projects, envVars } from "@gblockparty/shared/db";
+import { eq, and, asc } from "drizzle-orm";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+// POST /api/projects/:id/env
+import { createEnvVarSchema } from "@gblockparty/shared/validation";
+import { encrypt } from "@gblockparty/shared/backend";
+
+// PATCH /api/projects/:id/env/:varId
+import { updateEnvVarSchema } from "@gblockparty/shared/validation";
+import { encrypt, decrypt } from "@gblockparty/shared/backend";
+```
+
+---
+
+## Validation Schema Reference
+
+### `createEnvVarSchema`
+
+```typescript
+z.object({
+  key: z.string().min(1).max(256).regex(/^[A-Z_][A-Z0-9_]*$/, "Must be uppercase with underscores"),
+  value: z.string().max(65536),
+  scope: z.enum(["production", "preview"]),
+  isSecret: z.boolean().default(false),
+});
+```
+
+### `updateEnvVarSchema`
+
+```typescript
+z.object({
+  value: z.string().max(65536).optional(),
+  isSecret: z.boolean().optional(),
+});
+```
+
+The key and scope cannot be changed via PATCH. To change a key, delete and re-create the env var.
+
+---
+
+## Security Considerations
+
+1. **Secret values are write-only.** Once a value is marked as `isSecret: true`, the actual value is never returned through the API. The response always shows `"***"`.
+2. **Encryption key.** The `ENCRYPTION_KEY` env var must be set on the server. If missing, `encrypt()` throws an error. This should be validated at server startup.
+3. **No key enumeration attack surface.** The API requires authentication via `withAuth`. There is no public endpoint that reveals env var names.
+4. **Build log scrubbing.** When env vars are injected into builds (future step), the build pipeline must scrub log output for known secret values.
+
+---
+
+## Error Handling Matrix
+
+| Scenario | Endpoint | Status | Response |
+|----------|----------|--------|----------|
+| Not authenticated | All | 401 | `{ error: "Unauthorized" }` |
+| Project not found | All | 404 | `{ error: "Project not found" }` |
+| Env var not found | PATCH, DELETE | 404 | `{ error: "Environment variable not found" }` |
+| Invalid scope param | GET | 400 | `{ error: "Invalid scope. Must be 'production' or 'preview'." }` |
+| Zod validation failure | POST, PATCH | 400 | `{ error: "Validation failed", details: [...] }` |
+| Duplicate key+scope | POST | 409 | `{ error: "Environment variable 'KEY' already exists for scope 'production'" }` |
+| Invalid key format | POST | 400 | Zod error: `"Must be uppercase with underscores"` |
+| ENCRYPTION_KEY missing | POST (secret), PATCH (secret) | 500 | `{ error: "Internal server error" }` (logged) |
+
+---
+
+## Database Schema Reference
+
+```sql
+CREATE TABLE env_vars (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL,                    -- 'production' or 'preview'
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,                    -- encrypted if isSecret
+  is_secret BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (project_id, scope, key)
+);
+
+CREATE INDEX idx_env_vars_project_scope ON env_vars(project_id, scope);
+```
+
+---
+
+## Testing
+
+### Manual Tests
+
+1. **List env vars (empty):** GET returns `[]` for a project with no env vars.
+2. **Create env var (non-secret):** POST with `{ key: "API_URL", value: "https://api.example.com", scope: "production", isSecret: false }` returns 201, value visible.
+3. **Create env var (secret):** POST with `{ key: "DB_PASSWORD", value: "super-secret", scope: "production", isSecret: true }` returns 201, value shows `"***"`.
+4. **Create duplicate:** POST with same key+scope returns 409.
+5. **Create invalid key:** POST with `{ key: "lowercase" }` returns 400.
+6. **List env vars:** GET returns both variables, secret value masked.
+7. **List by scope:** GET with `?scope=preview` returns only preview-scoped vars.
+8. **Update value:** PATCH with `{ value: "new-value" }` returns updated var.
+9. **Toggle secret on:** PATCH with `{ isSecret: true }` on a non-secret var, subsequent GET shows `"***"`.
+10. **Toggle secret off:** PATCH with `{ isSecret: false }` on a secret var, subsequent GET shows the plaintext value.
+11. **Delete env var:** DELETE returns `{ deleted: true }`, subsequent GET list no longer includes it.
+12. **Env var not found:** PATCH/DELETE with random UUID returns 404.
+13. **Auth check:** All endpoints return 401 without valid session cookie.
+
+### Encryption Verification
+
+After creating a secret env var, query the database directly to verify the `value` column contains encrypted data (format: `iv:tag:ciphertext`, all hex-encoded), not the plaintext value.

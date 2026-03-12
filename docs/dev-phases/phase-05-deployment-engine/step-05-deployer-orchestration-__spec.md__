@@ -1,0 +1,558 @@
+# Step 5: Deployer Orchestration
+
+**Phase:** 5 -- Deployment Engine
+**Step:** 5 of 5
+**Status:** Not Started
+**Depends on:** Step 1 (Port Allocator), Step 2 (Caddy Routing), Step 3 (Health Checks), Step 4 (Env Var Injection)
+**Blocks:** Phase 6 (Core Dashboard & API) -- API routes call `Deployer.deploy()` and `rollbackDeployment()`
+
+---
+
+## Goal
+
+Implement the full deployment pipeline in `Deployer.deploy()`: allocate port, write env file, start container, health check, update Caddy routing, stop old container, update deployment record in the database, and cleanup the env file. Implement proper rollback on failure at each step. Also implement `rollbackDeployment()` for rolling back to a previous deployment.
+
+---
+
+## Context
+
+The `Deployer` class is the top-level orchestrator that ties together all the components built in Steps 1-4. It handles the complete lifecycle from "Docker image exists" to "app is live at its URL." Every step in the pipeline must handle failure gracefully, rolling back any changes made by previous steps.
+
+### Pipeline Overview
+
+```
+deploy() pipeline:
+
+  1. Allocate port          [PortAllocator.allocate()]
+       |
+       | failure? -> update deployment to FAILED, done
+       |
+  2. Get env vars           [getEnvVars()]
+  3. Write temp .env file   [writeEnvFile()]
+       |
+       | failure? -> release port, update deployment to FAILED, done
+       |
+  4. Start container        [runContainer()]
+       |
+       | failure? -> cleanup env file, release port, update deployment to FAILED, done
+       |
+  5. Health check           [waitForHealthy()]
+       |
+       | failure? -> stop new container, cleanup env file, release port, update deployment to FAILED, done
+       |
+  6. Update Caddy           [CaddyClient.addRoute()]
+       |
+       | failure? -> stop new container, cleanup env file, release port, update deployment to FAILED, done
+       |
+  7. Stop old container     [stopContainer()] -- best effort, don't fail deploy
+  8. Release old port       [PortAllocator.release()] -- best effort
+       |
+  9. Update deployment      [DB: status=READY, containerId, port, url]
+ 10. Update project         [DB: productionDeploymentId = this deployment]
+       |
+ 11. Cleanup env file       [cleanupEnvFile()] -- always, in finally block
+       |
+       v
+  Return { containerId, port, url }
+```
+
+---
+
+## Files
+
+### `packages/core/src/deploy/deployer.ts`
+
+#### Current State (TODO Stub)
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("deployer");
+
+export interface DeployOptions {
+  db: Database;
+  projectId: string;
+  deploymentId: string;
+  imageTag: string;
+  envVars: Record<string, string>;
+  healthCheckPath: string;
+}
+
+export class Deployer {
+  constructor(private options: DeployOptions) {}
+
+  async deploy(): Promise<{ containerId: string; port: number; url: string }> {
+    // TODO: Full deploy pipeline
+    logger.info(
+      {
+        projectId: this.options.projectId,
+        deploymentId: this.options.deploymentId,
+      },
+      "Deployment started",
+    );
+    throw new Error("Not implemented");
+  }
+}
+```
+
+### `packages/core/src/deploy/rollback.ts`
+
+#### Current State (TODO Stub)
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("rollback");
+
+export async function rollbackDeployment(
+  db: Database,
+  projectId: string,
+  targetDeploymentId: string,
+): Promise<string> {
+  // TODO: Rollback flow
+  logger.info(
+    { projectId, targetDeploymentId },
+    "Rollback initiated",
+  );
+  throw new Error("Not implemented");
+}
+```
+
+---
+
+## Implementation Requirements
+
+### `DeployOptions` Interface Update
+
+Expand the `DeployOptions` interface to include all necessary context:
+
+```typescript
+export interface DeployOptions {
+  db: Database;
+  projectId: string;
+  deploymentId: string;
+  imageTag: string;
+  healthCheckPath: string;
+  type: "production" | "preview";       // determines port range
+  projectSlug: string;                  // for URL generation
+  prNumber?: number;                    // for preview URL generation
+  previousContainerId?: string;         // container to stop after successful deploy
+  previousPort?: number;                // port to release after successful deploy
+  domain?: string;                      // platform domain for URL generation
+}
+```
+
+Note: `envVars` is removed from the options. The Deployer retrieves env vars itself using `getEnvVars()` from Step 4, based on the `projectId` and deployment `type` (which maps to scope).
+
+### `Deployer.deploy()` Implementation
+
+```typescript
+async deploy(): Promise<{ containerId: string; port: number; url: string }> {
+  const {
+    db, projectId, deploymentId, imageTag, healthCheckPath,
+    type, projectSlug, prNumber, previousContainerId, previousPort, domain,
+  } = this.options;
+
+  const portAllocator = new PortAllocator(db);
+  const caddy = new CaddyClient();
+  const docker = createDockerClient();
+
+  let allocatedPort: number | null = null;
+  let envFilePath = "";
+  let newContainerId: string | null = null;
+
+  try {
+    // --- Step 1: Allocate port ---
+    logger.info({ deploymentId, type }, "Allocating port");
+    allocatedPort = await portAllocator.allocate(deploymentId, type);
+    logger.info({ deploymentId, port: allocatedPort }, "Port allocated");
+
+    // --- Step 2: Get env vars ---
+    const scope = type === "preview" ? "preview" : "production";
+    const envVars = await getEnvVars(db, projectId, scope);
+    logger.info(
+      { deploymentId, envVarCount: Object.keys(envVars).length },
+      "Environment variables retrieved"
+    );
+
+    // --- Step 3: Write temp env file ---
+    envFilePath = await writeEnvFile(envVars, deploymentId);
+
+    // --- Step 4: Start container ---
+    const containerName = `${projectSlug}-${deploymentId.slice(0, 8)}`;
+    logger.info(
+      { deploymentId, imageTag, port: allocatedPort, containerName },
+      "Starting container"
+    );
+    newContainerId = await runContainer(
+      docker, imageTag, containerName, allocatedPort, envVars,
+    );
+    logger.info(
+      { deploymentId, containerId: newContainerId },
+      "Container started"
+    );
+
+    // --- Step 5: Health check ---
+    logger.info(
+      { deploymentId, containerId: newContainerId, healthCheckPath },
+      "Running health check"
+    );
+    const healthy = await waitForHealthy(
+      docker, newContainerId, healthCheckPath, allocatedPort,
+    );
+
+    if (!healthy) {
+      throw new Error(
+        `Health check failed for container ${newContainerId} on port ${allocatedPort}`
+      );
+    }
+    logger.info({ deploymentId }, "Health check passed");
+
+    // --- Step 6: Update Caddy routing ---
+    const hostname = type === "preview" && prNumber
+      ? `pr-${prNumber}--${projectSlug}.${domain ?? process.env.PLATFORM_DOMAIN}`
+      : `${projectSlug}.${domain ?? process.env.PLATFORM_DOMAIN}`;
+
+    logger.info(
+      { deploymentId, hostname, port: allocatedPort },
+      "Updating Caddy routing"
+    );
+    await caddy.addRoute(hostname, allocatedPort);
+
+    // --- Step 7: Stop old container (best effort) ---
+    if (previousContainerId) {
+      try {
+        logger.info(
+          { deploymentId, previousContainerId },
+          "Stopping old container"
+        );
+        await stopContainer(docker, previousContainerId, 30);
+      } catch (error) {
+        logger.warn(
+          { previousContainerId, error: (error as Error).message },
+          "Failed to stop old container (continuing)"
+        );
+      }
+    }
+
+    // --- Step 8: Release old port (best effort) ---
+    if (previousPort) {
+      try {
+        await portAllocator.release(previousPort);
+      } catch (error) {
+        logger.warn(
+          { previousPort, error: (error as Error).message },
+          "Failed to release old port (continuing)"
+        );
+      }
+    }
+
+    // --- Step 9: Generate URL ---
+    const url = type === "preview" && prNumber
+      ? generatePreviewUrl(projectSlug, prNumber, domain)
+      : generateUrl(projectSlug, domain);
+
+    // --- Step 10: Update deployment record ---
+    await db.update(deployments)
+      .set({
+        status: "ready",
+        containerId: newContainerId,
+        port: allocatedPort,
+        url,
+        updatedAt: new Date(),
+      })
+      .where(eq(deployments.id, deploymentId));
+
+    // --- Step 11: Update project's production deployment ---
+    if (type === "production") {
+      await db.update(projects)
+        .set({
+          productionDeploymentId: deploymentId,
+          updatedAt: new Date(),
+        })
+        .where(eq(projects.id, projectId));
+    }
+
+    logger.info(
+      { deploymentId, containerId: newContainerId, port: allocatedPort, url },
+      "Deployment successful"
+    );
+
+    return { containerId: newContainerId, port: allocatedPort, url };
+
+  } catch (error) {
+    // --- Rollback on failure ---
+    logger.error(
+      { deploymentId, error: (error as Error).message },
+      "Deployment failed, rolling back"
+    );
+
+    // Stop new container if started
+    if (newContainerId) {
+      try {
+        await stopContainer(docker, newContainerId, 10);
+      } catch (e) {
+        logger.warn({ containerId: newContainerId }, "Failed to stop new container during rollback");
+      }
+    }
+
+    // Release allocated port
+    if (allocatedPort) {
+      try {
+        await portAllocator.release(allocatedPort);
+      } catch (e) {
+        logger.warn({ port: allocatedPort }, "Failed to release port during rollback");
+      }
+    }
+
+    // Update deployment record to failed
+    await db.update(deployments)
+      .set({
+        status: "failed",
+        errorMessage: (error as Error).message,
+        updatedAt: new Date(),
+      })
+      .where(eq(deployments.id, deploymentId));
+
+    throw error;
+
+  } finally {
+    // --- Cleanup env file (always) ---
+    await cleanupEnvFile(envFilePath);
+  }
+}
+```
+
+### `rollbackDeployment()` Implementation
+
+```typescript
+export async function rollbackDeployment(
+  db: Database,
+  projectId: string,
+  targetDeploymentId: string,
+): Promise<string> {
+  logger.info({ projectId, targetDeploymentId }, "Rollback initiated");
+
+  // 1. Get the target deployment's image tag
+  const [targetDeployment] = await db.select()
+    .from(deployments)
+    .where(eq(deployments.id, targetDeploymentId));
+
+  if (!targetDeployment) {
+    throw new Error(`Target deployment ${targetDeploymentId} not found`);
+  }
+
+  if (!targetDeployment.dockerImageTag) {
+    throw new Error(`Target deployment ${targetDeploymentId} has no Docker image tag`);
+  }
+
+  // 2. Get the project (for slug and current deployment)
+  const [project] = await db.select()
+    .from(projects)
+    .where(eq(projects.id, projectId));
+
+  if (!project) {
+    throw new Error(`Project ${projectId} not found`);
+  }
+
+  // 3. Get current production deployment (to stop its container)
+  let previousContainerId: string | undefined;
+  let previousPort: number | undefined;
+  if (project.productionDeploymentId) {
+    const [currentDeployment] = await db.select()
+      .from(deployments)
+      .where(eq(deployments.id, project.productionDeploymentId));
+
+    if (currentDeployment) {
+      previousContainerId = currentDeployment.containerId ?? undefined;
+      previousPort = currentDeployment.port ?? undefined;
+    }
+  }
+
+  // 4. Create new deployment record
+  const [newDeployment] = await db.insert(deployments)
+    .values({
+      projectId,
+      type: "rollback",
+      status: "deploying",
+      commitSha: targetDeployment.commitSha,
+      branch: targetDeployment.branch,
+      dockerImageTag: targetDeployment.dockerImageTag,
+      sourceDeploymentId: targetDeploymentId,
+    })
+    .returning();
+
+  // 5. Run the deploy pipeline with the old image
+  const deployer = new Deployer({
+    db,
+    projectId,
+    deploymentId: newDeployment.id,
+    imageTag: targetDeployment.dockerImageTag,
+    healthCheckPath: HEALTH_CHECK.DEFAULT_PATH,
+    type: "production",
+    projectSlug: project.slug,
+    previousContainerId,
+    previousPort,
+  });
+
+  await deployer.deploy();
+
+  logger.info(
+    { projectId, targetDeploymentId, newDeploymentId: newDeployment.id },
+    "Rollback completed"
+  );
+
+  return newDeployment.id;
+}
+```
+
+---
+
+## Container Naming Convention
+
+Container names follow the pattern `{projectSlug}-{deploymentIdPrefix}`:
+
+| Deployment | Container Name |
+|------------|---------------|
+| Production `myapp`, deployment `a1b2c3d4-...` | `myapp-a1b2c3d4` |
+| Preview `myapp` PR #42, deployment `e5f6g7h8-...` | `myapp-e5f6g7h8` |
+| Rollback `myapp`, deployment `i9j0k1l2-...` | `myapp-i9j0k1l2` |
+
+The 8-character prefix of the deployment UUID is sufficient for uniqueness within the platform's scale.
+
+---
+
+## Failure Rollback Matrix
+
+| Failed Step | Port | Container | Caddy | Env File | Deployment Record |
+|-------------|------|-----------|-------|----------|-------------------|
+| 1. Port allocation | N/A | N/A | N/A | N/A | Set FAILED |
+| 2. Get env vars | Release | N/A | N/A | N/A | Set FAILED |
+| 3. Write env file | Release | N/A | N/A | Cleanup | Set FAILED |
+| 4. Start container | Release | N/A | N/A | Cleanup | Set FAILED |
+| 5. Health check | Release | Stop new | N/A | Cleanup | Set FAILED |
+| 6. Caddy update | Release | Stop new | N/A | Cleanup | Set FAILED |
+| 7. Stop old container | Keep new | Keep new | Keep new | Cleanup | Set READY (best effort) |
+| 8. Release old port | Keep new | Keep new | Keep new | Cleanup | Set READY (best effort) |
+| 9. DB update | Keep new | Keep new | Keep new | Cleanup | Orphaned (log error) |
+
+Steps 7 and 8 (stop old container, release old port) are "best effort" -- failures here do not roll back the new deployment because it is already healthy and routing traffic.
+
+---
+
+## Dependencies Between Steps
+
+```
+runContainer()        from packages/core/src/providers/docker/client.ts
+stopContainer()       from packages/core/src/providers/docker/client.ts
+waitForHealthy()      from packages/core/src/providers/docker/container.ts
+PortAllocator         from packages/core/src/deploy/port-allocator.ts
+CaddyClient           from packages/core/src/routing/caddy.ts
+getEnvVars()          from packages/core/src/deploy/env.ts
+writeEnvFile()        from packages/core/src/deploy/env.ts
+cleanupEnvFile()      from packages/core/src/deploy/env.ts
+generateUrl()         from packages/core/src/routing/url.ts
+generatePreviewUrl()  from packages/core/src/routing/url.ts
+deployments schema    from packages/shared/src/db/schema.ts
+projects schema       from packages/shared/src/db/schema.ts
+HEALTH_CHECK          from packages/shared/src/constants/deployment.ts
+```
+
+---
+
+## Status Transitions
+
+The deployment record goes through these status transitions:
+
+```
+Before deploy():  status = "deploying"  (set by the caller -- webhook handler or API route)
+                       |
+                       v
+deploy() starts   status = "deploying"  (no change)
+                       |
+      success:         |         failure:
+         |             |            |
+         v             |            v
+    status = "ready"   |     status = "failed"
+                       |     errorMessage = "..."
+```
+
+The Deployer does NOT set the initial status. The caller (webhook handler in Phase 6) creates the deployment record with `status: "deploying"` and then calls `Deployer.deploy()`. The Deployer updates it to either `"ready"` or `"failed"`.
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Port allocation fails (range exhausted) | Deploy fails, no rollback needed |
+| Env var decryption fails | Deploy fails, port released |
+| Container fails to start | Deploy fails, port released, env file cleaned |
+| Health check times out (20s) | Deploy fails, new container stopped, port released |
+| Caddy API error (after retries) | Deploy fails, new container stopped, port released |
+| Old container stop fails | Deploy succeeds (best effort), warning logged |
+| DB update fails | Deploy state is inconsistent -- container running but DB not updated. Log error. |
+| Env file cleanup fails | Warning logged, deploy result not affected |
+| Rollback target not found | Throw immediately, no deployment record created |
+| Rollback target has no image | Throw immediately, no deployment record created |
+
+---
+
+## Logging
+
+| Level | Event | Fields |
+|-------|-------|--------|
+| `info` | Deployment started | `deploymentId`, `projectId`, `imageTag`, `type` |
+| `info` | Port allocated | `deploymentId`, `port` |
+| `info` | Env vars retrieved | `deploymentId`, `envVarCount` |
+| `info` | Container started | `deploymentId`, `containerId`, `port`, `containerName` |
+| `info` | Health check passed | `deploymentId` |
+| `info` | Caddy route updated | `deploymentId`, `hostname`, `port` |
+| `info` | Old container stopped | `deploymentId`, `previousContainerId` |
+| `info` | Deployment successful | `deploymentId`, `containerId`, `port`, `url` |
+| `error` | Deployment failed | `deploymentId`, `error` |
+| `warn` | Best-effort step failed | step name, error details |
+| `info` | Rollback initiated | `projectId`, `targetDeploymentId` |
+| `info` | Rollback completed | `projectId`, `targetDeploymentId`, `newDeploymentId` |
+
+---
+
+## Acceptance Criteria
+
+1. `Deployer.deploy()` executes the full pipeline: port -> env -> container -> health -> caddy -> stop old -> DB update -> cleanup.
+2. On success, the deployment record has `status: "ready"`, `containerId`, `port`, and `url` set.
+3. On success, the project's `productionDeploymentId` is updated (for production deployments).
+4. On success, the app is accessible at its subdomain URL via Caddy.
+5. If health check fails, the new container is stopped and the port is released.
+6. If Caddy update fails, the new container is stopped and the port is released.
+7. If the old container stop fails, the deploy still succeeds (best effort).
+8. The deployment record is set to `status: "failed"` with `errorMessage` on any failure.
+9. The temp env file is always cleaned up (even on failure).
+10. `rollbackDeployment()` creates a new deployment record with `type: "rollback"` and `sourceDeploymentId`.
+11. `rollbackDeployment()` re-deploys the target deployment's Docker image.
+12. `rollbackDeployment()` stops the current production container and releases its port.
+13. `rollbackDeployment()` throws if the target deployment is not found or has no image.
+14. Container names follow the convention `{projectSlug}-{deploymentIdPrefix}`.
+15. `pnpm typecheck` passes with no errors.
+
+---
+
+## Testing Approach
+
+### Unit Tests (Mocked Dependencies)
+
+1. **Successful deploy**: Mock all dependencies to succeed. Verify all steps called in order. Verify DB updated to READY.
+2. **Port allocation failure**: Mock PortAllocator.allocate to throw. Verify deployment set to FAILED. Verify no container started.
+3. **Container start failure**: Mock runContainer to throw. Verify port released. Verify deployment set to FAILED.
+4. **Health check failure**: Mock waitForHealthy to return false. Verify new container stopped. Verify port released. Verify deployment FAILED.
+5. **Caddy failure**: Mock CaddyClient.addRoute to throw. Verify new container stopped. Verify port released. Verify deployment FAILED.
+6. **Old container stop failure**: Mock stopContainer for old container to throw. Verify deploy still succeeds. Verify warning logged.
+7. **Env file cleanup**: Verify cleanupEnvFile called in finally block for both success and failure paths.
+
+### Integration Tests (Require Docker + Caddy)
+
+8. **End-to-end deploy**: Build a simple image, deploy it, verify accessible at hostname.
+9. **End-to-end rollback**: Deploy v1, deploy v2, rollback to v1. Verify v1 image is running.
+10. **Deploy with env vars**: Set env vars in DB, deploy, verify container has the vars.

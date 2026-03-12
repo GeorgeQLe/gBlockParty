@@ -1,0 +1,462 @@
+# Step 7: Deployment Detail & Build Logs Page UI
+
+**Phase:** 6, Step 7
+**Status:** Not Started
+**Depends on:** Step 2 (deployments API), Step 5 (StatusBadge component), Step 6 (deployment-row component, layout with tabs)
+**Blocks:** None directly (Phase 7 will add preview deployment UI using these components)
+
+---
+
+## Goal
+
+Build the deployment history page showing all deployments with filtering and pagination, and the individual deployment detail page with build log rendering, ANSI color support, deployment metadata, and a status timeline. After this step, users can browse deployment history and inspect build logs for any deployment.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/projects/[id]/deployments/page.tsx`
+
+```typescript
+import { Placeholder } from "@/components/ui/placeholder";
+
+export default function DeploymentsPage() {
+  return <Placeholder title="Deployment History" />;
+}
+```
+
+### Deployment Detail Page
+
+Does not exist yet. Must be created at:
+`apps/dashboard/src/app/projects/[id]/deployments/[deploymentId]/page.tsx`
+
+---
+
+## Implementation Details
+
+### Page: `apps/dashboard/src/app/projects/[id]/deployments/page.tsx`
+
+The deployments list page. Shows all deployments for the project with pagination and optional type filtering.
+
+#### Data Fetching
+
+```typescript
+"use client";
+
+import { useParams, useSearchParams, useRouter } from "next/navigation";
+import useSWR from "swr";
+import { fetcher } from "@/lib/swr";
+
+export default function DeploymentsPage() {
+  const params = useParams();
+  const searchParams = useSearchParams();
+  const projectId = params.id as string;
+
+  const page = parseInt(searchParams.get("page") ?? "1", 10);
+  const type = searchParams.get("type"); // "production" | "preview" | "rollback" | null
+
+  const queryString = new URLSearchParams({
+    page: String(page),
+    limit: "20",
+    ...(type ? { type } : {}),
+  }).toString();
+
+  const { data, error, isLoading } = useSWR(
+    `/api/projects/${projectId}/deployments?${queryString}`,
+    fetcher,
+  );
+
+  // data shape: { data: Deployment[], total: number, page: number, limit: number }
+}
+```
+
+#### Layout
+
+```
++------------------------------------------------------------------+
+| Deployments                                                        |
+|                                                                    |
+| Filter: [All] [Production] [Preview] [Rollback]                  |
++------------------------------------------------------------------+
+|                                                                    |
+| [ready]  a1b2c3d  main     production   2h ago   34s    active   |
+| [failed] e5f6g7h  main     production   5h ago   12s             |
+| [ready]  i9j0k1l  main     production   1d ago   45s             |
+| [ready]  m3n4o5p  main     production   2d ago   38s             |
+| [ready]  q7r8s9t  main     production   3d ago   41s             |
+| ...                                                               |
+|                                                                    |
+| < Previous  Page 1 of 3  Next >                                  |
++------------------------------------------------------------------+
+```
+
+#### Type Filter
+
+A segmented control or button group to filter deployments by type:
+- **All** -- no filter
+- **Production** -- `?type=production`
+- **Preview** -- `?type=preview`
+- **Rollback** -- `?type=rollback`
+
+Clicking a filter updates the URL search params (which triggers a SWR re-fetch).
+
+#### Active Deployment Indicator
+
+The deployment that matches the project's `productionDeploymentId` gets an "Active" badge or highlighted row to indicate it is the current production deployment.
+
+#### Pagination Controls
+
+Show pagination at the bottom of the list:
+- "Previous" button (disabled on page 1)
+- "Page X of Y" text
+- "Next" button (disabled on last page)
+- Clicking updates the `page` search param
+
+### Page: `apps/dashboard/src/app/projects/[id]/deployments/[deploymentId]/page.tsx`
+
+The deployment detail page. Shows comprehensive deployment info and build logs.
+
+#### Data Fetching
+
+```typescript
+"use client";
+
+import { useParams } from "next/navigation";
+import useSWR from "swr";
+import { fetcher } from "@/lib/swr";
+
+export default function DeploymentDetailPage() {
+  const params = useParams();
+  const projectId = params.id as string;
+  const deploymentId = params.deploymentId as string;
+
+  const { data: deployment, error, isLoading } = useSWR(
+    `/api/projects/${projectId}/deployments/${deploymentId}`,
+    fetcher,
+  );
+
+  // Fetch build logs if available
+  const { data: logs } = useSWR(
+    deployment?.buildLogUrl ? deployment.buildLogUrl : null,
+    (url) => fetch(url).then((res) => res.text()),
+  );
+}
+```
+
+#### Layout
+
+```
++------------------------------------------------------------------+
+| Deployment Detail                                                  |
+|                                                                    |
+| Status: [ready]                                                   |
+| Type: Production                                                   |
+| Commit: a1b2c3d (link to GitHub)                                  |
+| Branch: main                                                       |
+| Duration: 34s                                                      |
+| Created: Feb 15, 2026 at 12:00 PM                                |
+| URL: https://my-app.yourdomain.dev                               |
+|                                                                    |
++------------------------------------------------------------------+
+| Build Logs                                                         |
+|                                                                    |
+| ┌────────────────────────────────────────────────────────────────┐|
+| │ $ pnpm install                                                  │|
+| │ Packages: +342                                                  │|
+| │ ++++++++++++++++++++++++++++++++++++++++++++++++                │|
+| │ Progress: resolved 342, reused 340, downloaded 2, added 342    │|
+| │                                                                  │|
+| │ $ pnpm build                                                    │|
+| │ ▲ Next.js 15.1.0                                               │|
+| │ - Environments: .env.local                                      │|
+| │ Creating an optimized production build...                       │|
+| │ ✓ Compiled successfully                                        │|
+| │ ✓ Collecting page data                                         │|
+| │ ✓ Generating static pages (5/5)                                │|
+| │ ✓ Finalizing page optimization                                 │|
+| │                                                                  │|
+| │ Route (app)              Size  First Load JS                    │|
+| │ ┌ ○ /                    5.1 kB  89.2 kB                       │|
+| │ └ ○ /about               3.2 kB  87.3 kB                       │|
+| │                                                                  │|
+| │ ○ (Static) prerendered as static content                       │|
+| └────────────────────────────────────────────────────────────────┘|
++------------------------------------------------------------------+
+```
+
+---
+
+## New Components
+
+### 1. `apps/dashboard/src/components/deployments/deployment-list.tsx`
+
+Full deployment list with pagination and filtering.
+
+**Props:**
+```typescript
+interface DeploymentListProps {
+  projectId: string;
+  productionDeploymentId: string | null;
+}
+```
+
+### 2. `apps/dashboard/src/components/deployments/deployment-type-filter.tsx`
+
+Type filter segmented control.
+
+**Props:**
+```typescript
+interface DeploymentTypeFilterProps {
+  activeType: string | null;
+  onTypeChange: (type: string | null) => void;
+}
+```
+
+**Visual:** Button group with subtle active state (background color change):
+```
+[All] [Production] [Preview] [Rollback]
+```
+
+### 3. `apps/dashboard/src/components/deployments/pagination.tsx`
+
+Reusable pagination component.
+
+**Props:**
+```typescript
+interface PaginationProps {
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+}
+```
+
+### 4. `apps/dashboard/src/components/deployments/deployment-metadata.tsx`
+
+Metadata section for the deployment detail page.
+
+**Props:**
+```typescript
+interface DeploymentMetadataProps {
+  deployment: {
+    status: string;
+    type: string;
+    commitSha: string | null;
+    branch: string | null;
+    buildDurationMs: number | null;
+    url: string | null;
+    prNumber: number | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  githubRepoFullName: string | null;
+}
+```
+
+**Metadata fields displayed:**
+| Field | Format | Notes |
+|-------|--------|-------|
+| Status | StatusBadge component | |
+| Type | Capitalized string | "Production", "Preview", "Rollback" |
+| Commit | First 7 chars, monospace, link to GitHub commit | `https://github.com/{repo}/commit/{sha}` |
+| Branch | Plain text | |
+| PR | `#42` (link to GitHub PR) | Only shown for preview deployments |
+| Duration | Formatted duration | "34s" or "2m 15s" |
+| URL | Clickable link | Opens in new tab |
+| Created | Full date/time | "Feb 15, 2026 at 12:00 PM" |
+
+### 5. `apps/dashboard/src/components/deployments/build-log-viewer.tsx`
+
+Build log viewer with ANSI color support.
+
+**Props:**
+```typescript
+interface BuildLogViewerProps {
+  logs: string | null;
+  isLoading: boolean;
+  status: string; // deployment status
+}
+```
+
+**Visual details:**
+- Container: `rounded-lg bg-gray-900 p-4 overflow-auto max-h-[600px]`
+- Font: `font-mono text-sm text-gray-100 leading-relaxed`
+- ANSI colors rendered as inline `<span>` elements with color styles
+- Auto-scroll to bottom when new content appears (during active builds)
+- Loading state: "Loading build logs..." with spinner
+- Empty state (queued deployment): "Build has not started yet."
+- Error state: "Failed to load build logs."
+
+**ANSI-to-HTML rendering:**
+
+Install the `ansi-to-html` package:
+```bash
+pnpm add ansi-to-html --filter dashboard
+```
+
+Usage:
+```typescript
+import AnsiToHtml from "ansi-to-html";
+
+const converter = new AnsiToHtml({
+  fg: "#e5e7eb",      // gray-200
+  bg: "#111827",      // gray-900
+  newline: true,
+  escapeXML: true,     // XSS prevention
+  stream: false,
+});
+
+const html = converter.toHtml(logContent);
+```
+
+Render with `dangerouslySetInnerHTML`:
+```typescript
+<pre
+  className="font-mono text-sm leading-relaxed whitespace-pre-wrap"
+  dangerouslySetInnerHTML={{ __html: html }}
+/>
+```
+
+**Security:** The `escapeXML: true` option in ansi-to-html ensures that any HTML in the build log output is escaped before rendering. This prevents XSS attacks from malicious build output.
+
+### 6. `apps/dashboard/src/components/deployments/deployment-status-timeline.tsx`
+
+A visual timeline showing the deployment status progression.
+
+**Props:**
+```typescript
+interface StatusTimelineProps {
+  status: string;
+}
+```
+
+**Visual:**
+```
+[x] Queued  -->  [x] Building  -->  [x] Deploying  -->  [x] Ready
+```
+
+Each step is a circle with a connecting line. Completed steps are filled (green). The current step has a pulse animation. Failed state colors the current step red.
+
+| Deployment Status | Timeline |
+|------------------|----------|
+| `queued` | Queued (active, pulsing), rest gray |
+| `building` | Queued (done), Building (active), rest gray |
+| `deploying` | Queued (done), Building (done), Deploying (active), rest gray |
+| `ready` | All green/done |
+| `failed` | Last reached step is red |
+| `archived` | All gray |
+
+---
+
+## Build Log Fetching
+
+Build logs are stored in S3 and accessed via the `buildLogS3Key` field on the deployment record. The deployment detail API returns a `buildLogUrl` field that the UI uses to fetch the logs.
+
+**Two approaches for log fetching:**
+
+1. **API proxy (recommended for Phase 6):** Create a simple API route that reads the log from S3 and returns it as text:
+   ```
+   GET /api/projects/:id/deployments/:did/logs
+   ```
+   This keeps S3 credentials server-side and adds auth checking.
+
+2. **Pre-signed S3 URL (future):** Generate a time-limited S3 URL and return it to the client. More efficient for large logs but adds complexity.
+
+For Phase 6, use the API proxy approach. Create a new route file:
+
+**File: `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/logs/route.ts`**
+
+```typescript
+import { withAuth, errorResponse } from "@/lib/api-helpers";
+import { getDb } from "@/lib/db";
+import { deployments } from "@gblockparty/shared/db";
+import { eq, and } from "drizzle-orm";
+// import S3 client for fetching logs
+
+export const GET = withAuth(async (_request, _session, context) => {
+  const { id, deploymentId } = await context.params;
+  const db = getDb();
+
+  const [deployment] = await db
+    .select({ buildLogS3Key: deployments.buildLogS3Key })
+    .from(deployments)
+    .where(
+      and(
+        eq(deployments.id, deploymentId),
+        eq(deployments.projectId, id),
+      ),
+    );
+
+  if (!deployment) {
+    return errorResponse("Deployment not found", 404);
+  }
+
+  if (!deployment.buildLogS3Key) {
+    return new Response("Build logs not yet available", {
+      status: 404,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+
+  // Fetch from S3 and return as text
+  // const logContent = await s3.getObject(deployment.buildLogS3Key);
+  // return new Response(logContent, { headers: { "Content-Type": "text/plain" } });
+
+  return new Response("Log fetching not yet implemented", {
+    status: 501,
+    headers: { "Content-Type": "text/plain" },
+  });
+});
+```
+
+---
+
+## New Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `ansi-to-html` | Convert ANSI escape codes in build logs to HTML with color styling |
+
+Install: `pnpm add ansi-to-html --filter dashboard`
+
+---
+
+## File Summary
+
+| File | Action | Description |
+|------|--------|-------------|
+| `apps/dashboard/src/app/projects/[id]/deployments/page.tsx` | Modify | Deployments list with pagination and type filter |
+| `apps/dashboard/src/app/projects/[id]/deployments/[deploymentId]/page.tsx` | Create | Deployment detail with metadata and logs |
+| `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/logs/route.ts` | Create | API proxy for fetching build logs from S3 |
+| `apps/dashboard/src/components/deployments/deployment-list.tsx` | Create | Full deployment list component |
+| `apps/dashboard/src/components/deployments/deployment-type-filter.tsx` | Create | Type filter segmented control |
+| `apps/dashboard/src/components/deployments/pagination.tsx` | Create | Reusable pagination component |
+| `apps/dashboard/src/components/deployments/deployment-metadata.tsx` | Create | Deployment metadata display |
+| `apps/dashboard/src/components/deployments/build-log-viewer.tsx` | Create | Build log viewer with ANSI support |
+| `apps/dashboard/src/components/deployments/deployment-status-timeline.tsx` | Create | Status progression timeline |
+
+---
+
+## Testing
+
+### Deployments List Page
+
+1. **Empty state:** Project with no deployments shows "No deployments yet" message.
+2. **List rendering:** Deployments displayed with correct status, commit, branch, type, time, and duration.
+3. **Active indicator:** Current production deployment shows "Active" badge.
+4. **Type filter:** Clicking "Production" shows only production deployments. Clicking "All" clears the filter.
+5. **Pagination:** With 25 deployments and limit 20, page 1 shows first 20, page 2 shows remaining 5.
+6. **Pagination controls:** Previous disabled on page 1, Next disabled on last page.
+7. **Row click:** Clicking a deployment navigates to the detail page.
+
+### Deployment Detail Page
+
+8. **Metadata display:** All fields shown correctly (status, type, commit, branch, duration, URL, timestamp).
+9. **Commit link:** Clicking the commit SHA opens the GitHub commit page in a new tab.
+10. **PR link:** For preview deployments, the PR number links to the GitHub PR page.
+11. **URL link:** Production/preview URL is clickable and opens in a new tab.
+12. **Status timeline:** Correctly reflects the current deployment status.
+13. **Build logs (when available):** Logs rendered with ANSI colors (bold, red errors, green success).
+14. **Build logs (not available):** "Build has not started yet" shown for queued deployments.
+15. **Build logs (loading):** Loading spinner shown while logs are being fetched.
+16. **Log viewer scroll:** Long logs are scrollable within the viewer container.
+17. **XSS prevention:** HTML tags in build logs are escaped (not executed).

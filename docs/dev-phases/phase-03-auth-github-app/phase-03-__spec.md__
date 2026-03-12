@@ -1,0 +1,158 @@
+# Phase 3: Authentication & GitHub App Integration
+
+**Status:** Not Started
+**Depends on:** Phase 1 (VPS provisioned with public IP for webhook URL), Phase 2 (Database with `github_installations` table for storing install records)
+**Depended on by:** Phase 6 (Dashboard API routes require `withAuth`), Phase 4 (Build system uses installation tokens to clone repos), Phase 5 (Deployment engine uses commit status API), Phase 7 (Preview deployments need webhook routing + PR comments)
+
+---
+
+## Goal
+
+Users can authenticate via GitHub OAuth. The GitHub App is registered and can receive webhooks. Installation tokens can be obtained for API calls. Webhook events are validated and routed to handlers.
+
+After this phase:
+- The platform owner can log in via GitHub OAuth and receive a JWT session cookie
+- All dashboard API routes are protected behind session-based auth
+- A GitHub App is registered with correct permissions and webhook configuration
+- The webhook endpoint validates signatures and routes events to typed handlers
+- The platform can obtain installation-scoped Octokit clients for GitHub API calls
+- Commit status updates can be posted on any commit in an installed repository
+
+---
+
+## Architecture Context
+
+```
+Browser                    Dashboard (Next.js 15)            GitHub
+  |                              |                              |
+  |-- GET /api/auth/github ----->|                              |
+  |<-- 302 redirect ------------|                              |
+  |-- OAuth authorize ----------------------------------------->|
+  |<-- redirect with ?code= ------------------------------------|
+  |-- GET /api/auth/github/callback?code=xxx -->|               |
+  |                              |-- POST github.com/login/oauth/access_token
+  |                              |<-- { access_token } ---------|
+  |                              |-- GET api.github.com/user ---|
+  |                              |<-- { id, login } ------------|
+  |                              |-- verify allowed_user_id     |
+  |                              |-- create JWT session         |
+  |<-- Set-Cookie: session ------|                              |
+  |                              |                              |
+  |-- GET /api/auth/me -------->|                              |
+  |<-- { userId, githubLogin }--|                              |
+
+GitHub (Webhook)           Dashboard                    Core (handlers)
+  |                              |                              |
+  |-- POST /api/webhooks/github ->|                             |
+  |                              |-- verify HMAC-SHA256         |
+  |                              |-- parse event type           |
+  |                              |-- handleWebhook(ctx) ------->|
+  |                              |                              |-- switch(event)
+  |                              |                              |   push -> queue deploy
+  |                              |                              |   pull_request -> queue preview
+  |                              |                              |   installation -> track install
+  |<-- 200 { received: true } --|<-----------------------------|
+```
+
+---
+
+## Environment Variables Required
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `GITHUB_APP_ID` | GitHub App settings page | Numeric App ID |
+| `GITHUB_APP_PRIVATE_KEY` | GitHub App settings (PEM download) | RSA private key for JWT signing |
+| `GITHUB_APP_WEBHOOK_SECRET` | Set during App registration | HMAC secret for webhook validation |
+| `GITHUB_CLIENT_ID` | GitHub App settings (OAuth section) | OAuth client ID |
+| `GITHUB_CLIENT_SECRET` | GitHub App settings (OAuth section) | OAuth client secret |
+| `JWT_SECRET` | Generated, stored in AWS Secrets Manager | Secret for signing session JWTs |
+| `ALLOWED_GITHUB_USER_ID` | Hardcoded or env var | Owner's GitHub numeric user ID |
+| `NEXT_PUBLIC_DASHBOARD_URL` | Deployment config | Base URL for OAuth redirect_uri |
+
+All secrets stored in AWS Secrets Manager (provisioned in Phase 1). Loaded into the dashboard container as environment variables at runtime.
+
+---
+
+## Files Overview
+
+### Already Implemented (no changes needed)
+
+| File | What it does |
+|------|-------------|
+| `packages/core/src/github/signature.ts` | `verifySignature(payload, signature, secret)` -- HMAC-SHA256 validation using `crypto.createHmac` with timing-safe comparison |
+| `apps/dashboard/src/lib/auth.ts` | Full session management: `createSession()`, `getSession()`, `setSessionCookie()`, `clearSessionCookie()` using `jose` JWTs with HS256, 7-day expiry, HTTP-only secure cookies |
+| `apps/dashboard/src/lib/api-helpers.ts` | `withAuth(handler)` middleware that checks session and returns 401 if missing; `jsonResponse()` and `errorResponse()` helpers |
+| `packages/core/src/github/pr-commenter.ts` | `formatDeploymentComment()` builds the markdown PR comment body with status emoji, URL, and build duration (posting function is a TODO) |
+| `packages/shared/src/types/github.ts` | `WebhookPayload` interface, `GitHubInstallation` interface, `GitHubAccountType` type |
+| `packages/shared/src/db/schema.ts` | Drizzle schema with `githubInstallations` table (id, githubAccountLogin, githubAccountType, createdAt) |
+
+### Partially Implemented (need completion)
+
+| File | Current state | What needs to happen |
+|------|--------------|---------------------|
+| `apps/dashboard/src/app/api/auth/github/route.ts` | Redirects to GitHub OAuth with `client_id` and `scope=read:user` | Add `redirect_uri` parameter, add `state` parameter for CSRF protection |
+| `apps/dashboard/src/app/api/webhooks/github/route.ts` | Reads body, validates signature, returns 200 | Parse JSON payload, call `handleWebhook()`, add delivery ID deduplication |
+
+### TODO Stubs (need full implementation)
+
+| File | Current state | What needs to be built |
+|------|--------------|----------------------|
+| `apps/dashboard/src/app/api/auth/github/callback/route.ts` | Extracts `code` param, returns 501 | Exchange code for token, fetch user, verify allowed user, create session, set cookie, redirect to dashboard |
+| `apps/dashboard/src/app/api/auth/me/route.ts` | Calls `getSession()`, returns user data | Already functional -- verify it handles edge cases |
+| `apps/dashboard/src/app/api/auth/logout/route.ts` | Calls `clearSessionCookie()`, returns `{ ok: true }` | Already functional -- verify it works end-to-end |
+| `packages/core/src/github/app.ts` | `GitHubAppClient` class with constructor using `@octokit/app`, both methods throw "Not implemented" | Implement `getInstallationOctokit()` with token caching, implement `getInstallationToken()` with 1-hour expiry refresh |
+| `packages/core/src/github/webhooks.ts` | `handleWebhook()` with switch cases as TODO comments | Implement push handler (production deploy trigger), PR handler (preview trigger + cleanup), installation handler (DB insert/delete) |
+| `packages/core/src/github/commit-status.ts` | `setCommitStatus()` function signature defined, throws "Not implemented" | Call `octokit.repos.createCommitStatus()` with proper parameters |
+| `packages/core/src/github/pr-commenter.ts` | `createOrUpdatePRComment()` throws "Not implemented" | Search for existing bot comment by marker, update or create new |
+
+---
+
+## Steps
+
+| # | Step | Key Deliverable |
+|---|------|----------------|
+| 1 | GitHub App Registration & Configuration | GitHub App created with correct permissions, credentials stored in Secrets Manager |
+| 2 | OAuth Callback Handler | `callback/route.ts` exchanges code for token, validates user, creates session |
+| 3 | Auth API Routes | `/api/auth/me` and `/api/auth/logout` verified working end-to-end |
+| 4 | GitHub App Client Implementation | `GitHubAppClient` with cached installation tokens and Octokit instances |
+| 5 | Webhook Event Router | `handleWebhook` routes push/PR/installation events, commit status updates work |
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+- `verifySignature()` with valid/invalid/tampered payloads (already implemented, verify tests exist)
+- `createSession()` / `getSession()` round-trip with mock cookies
+- `GitHubAppClient.getInstallationToken()` caching behavior (token reuse within expiry, refresh after expiry)
+- `handleWebhook()` routing: verify correct handler called for each event type
+- `setCommitStatus()` builds correct API call
+- `createOrUpdatePRComment()` finds existing comment, creates when none exists
+- `formatDeploymentComment()` output matches expected markdown
+
+### Integration Tests
+
+- OAuth callback flow with mocked GitHub API responses
+- Webhook endpoint: valid signature accepted, invalid rejected
+- Webhook endpoint: delivery ID deduplication (same ID twice returns 200 but only processes once)
+- Full webhook-to-handler flow for push, pull_request, installation events
+
+### Manual Verification
+
+- Register GitHub App on github.com, install on a test repo
+- Complete OAuth login flow in browser, verify cookie is set
+- Push to test repo, verify webhook arrives at `/api/webhooks/github`
+- Verify commit status appears on GitHub commit
+- Verify installation tracking in database
+
+---
+
+## Security Considerations
+
+1. **CSRF protection on OAuth**: Use `state` parameter with a random nonce, verify on callback
+2. **Single-user restriction**: Reject any GitHub user whose numeric ID does not match `ALLOWED_GITHUB_USER_ID`
+3. **JWT security**: HS256 with strong secret, HTTP-only + Secure + SameSite=Lax cookies, 7-day expiry
+4. **Webhook validation**: Always verify HMAC-SHA256 before processing; timing-safe comparison to prevent timing attacks
+5. **Installation tokens**: Never log or expose; cache in memory only (not in DB); 1-hour TTL
+6. **Webhook secret**: 32+ character random string stored in AWS Secrets Manager, never in code

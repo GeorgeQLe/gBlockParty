@@ -1,0 +1,495 @@
+# Step 2: Run Migrations & Verify Schema
+
+**Phase:** 2 -- Database & Migrations
+**Step:** 2 of 3
+**Status:** Not Started
+**Depends on:** Step 1 (migration files must exist in `packages/shared/src/db/migrations/`)
+
+---
+
+## Goal
+
+Execute the generated Drizzle migrations against the RDS PostgreSQL instance. Verify that all 7 tables exist with correct columns, types, constraints, and indexes. Test basic CRUD operations on each table to confirm the schema is functional.
+
+---
+
+## Prerequisites
+
+1. **Step 1 complete**: Migration SQL files exist in `packages/shared/src/db/migrations/`.
+2. **RDS instance running**: The `db.t4g.micro` PostgreSQL instance is provisioned and accepting connections (Phase 1).
+3. **Database created**: The `gblockparty` database exists on the RDS instance.
+4. **Network access**: The machine running the migration can reach the RDS endpoint on port 5432 (security group allows the IP).
+5. **`DATABASE_URL` set**: Environment variable contains the RDS connection string.
+
+### DATABASE_URL Format
+
+```
+DATABASE_URL=postgresql://<username>:<password>@<rds-endpoint>:5432/gblockparty?sslmode=require
+```
+
+Example:
+```
+DATABASE_URL=postgresql://gblockparty_admin:SecurePassword123@gblockparty-db.abc123.us-east-1.rds.amazonaws.com:5432/gblockparty?sslmode=require
+```
+
+The `?sslmode=require` parameter is mandatory -- RDS requires SSL connections.
+
+---
+
+## Procedure
+
+### 1. Set the DATABASE_URL
+
+Export the connection string for the current shell session:
+
+```bash
+export DATABASE_URL="postgresql://..."
+```
+
+Or create a `.env` file in `packages/shared/` (this file must be gitignored):
+
+```bash
+# packages/shared/.env
+DATABASE_URL=postgresql://...
+```
+
+Verify the variable is set:
+
+```bash
+echo $DATABASE_URL
+```
+
+### 2. Run the Migration
+
+From the workspace root:
+
+```bash
+pnpm db:migrate
+```
+
+This executes the following chain:
+- Root `package.json` script: `turbo run db:migrate --filter=@gblockparty/shared`
+- Shared `package.json` script: `tsx src/db/migrate.ts`
+- `migrate.ts` creates a `pg.Pool`, calls `drizzle-orm/node-postgres/migrator`'s `migrate()` function
+- The migrator reads SQL files from `packages/shared/src/db/migrations/`
+- Each migration file is executed inside a transaction
+- The migrator records applied migrations in a `__drizzle_migrations` journal table
+
+### Expected Output
+
+```
+Running migrations...
+Migrations complete.
+```
+
+If the migration has already been applied, the migrator will skip it silently and still print "Migrations complete."
+
+### 3. Verify Tables Exist
+
+Connect to the RDS instance:
+
+```bash
+psql "$DATABASE_URL"
+```
+
+List all tables:
+
+```sql
+\dt
+```
+
+Expected output (order may vary):
+
+```
+               List of relations
+ Schema |          Name           | Type  |  Owner
+--------+-------------------------+-------+---------
+ public | __drizzle_migrations    | table | gblockparty_admin
+ public | deployments             | table | gblockparty_admin
+ public | env_vars                | table | gblockparty_admin
+ public | github_installations    | table | gblockparty_admin
+ public | managed_databases       | table | gblockparty_admin
+ public | notification_settings   | table | gblockparty_admin
+ public | port_allocations        | table | gblockparty_admin
+ public | projects                | table | gblockparty_admin
+(8 rows)
+```
+
+8 tables total: 7 application tables + 1 Drizzle journal table.
+
+### 4. Verify Column Structure
+
+Run `\d <table>` for each table to verify columns, types, and constraints.
+
+#### projects
+
+```sql
+\d projects
+```
+
+Verify:
+- 13 columns with correct types
+- `id` is `uuid` with default `gen_random_uuid()`
+- `slug` has UNIQUE constraint
+- `github_repo_full_name` has UNIQUE constraint
+- `production_branch` defaults to `'main'`
+- `created_at` and `updated_at` default to `now()` with timezone
+
+#### deployments
+
+```sql
+\d deployments
+```
+
+Verify:
+- 17 columns with correct types
+- `project_id` FK to `projects(id)` with ON DELETE CASCADE
+- `status` defaults to `'queued'`
+- Two indexes visible: `idx_deployments_project_created`, `idx_deployments_status`
+
+#### env_vars
+
+```sql
+\d env_vars
+```
+
+Verify:
+- 8 columns
+- `project_id` FK to `projects(id)` with ON DELETE CASCADE
+- `is_secret` defaults to `false`
+- Index: `idx_env_vars_project_scope`
+- Unique constraint: `env_vars_project_scope_key` on `(project_id, scope, key)`
+
+#### managed_databases
+
+```sql
+\d managed_databases
+```
+
+Verify:
+- 7 columns
+- `project_id` FK to `projects(id)` with ON DELETE CASCADE
+- `db_name` has UNIQUE constraint
+- `size_bytes` is `bigint` defaulting to `0`
+
+#### github_installations
+
+```sql
+\d github_installations
+```
+
+Verify:
+- 4 columns
+- `id` is `bigint` (primary key, no default)
+- No foreign keys
+
+#### port_allocations
+
+```sql
+\d port_allocations
+```
+
+Verify:
+- 3 columns
+- `port` is `integer` (primary key)
+- `deployment_id` FK to `deployments(id)` with ON DELETE CASCADE
+- Index: `idx_port_allocations_deployment`
+
+#### notification_settings
+
+```sql
+\d notification_settings
+```
+
+Verify:
+- 6 columns
+- `notify_on_failure` defaults to `true`
+- `notify_on_rollback` defaults to `true`
+- No foreign keys
+
+### 5. Verify Indexes
+
+Query the `pg_indexes` system catalog:
+
+```sql
+SELECT indexname, tablename, indexdef
+FROM pg_indexes
+WHERE schemaname = 'public'
+  AND tablename IN ('projects', 'deployments', 'env_vars', 'managed_databases',
+                     'github_installations', 'port_allocations', 'notification_settings')
+ORDER BY tablename, indexname;
+```
+
+Expected indexes (beyond primary keys):
+- `idx_deployments_project_created` on `deployments(project_id, created_at)`
+- `idx_deployments_status` on `deployments(status)`
+- `idx_env_vars_project_scope` on `env_vars(project_id, scope)`
+- `idx_port_allocations_deployment` on `port_allocations(deployment_id)`
+
+Plus unique indexes for:
+- `projects_slug_unique`
+- `projects_github_repo_full_name_unique`
+- `managed_databases_db_name_unique`
+- `env_vars_project_scope_key`
+
+### 6. Verify Foreign Key Constraints
+
+```sql
+SELECT
+  tc.constraint_name,
+  tc.table_name,
+  kcu.column_name,
+  ccu.table_name AS foreign_table_name,
+  ccu.column_name AS foreign_column_name,
+  rc.delete_rule
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage AS kcu
+  ON tc.constraint_name = kcu.constraint_name
+JOIN information_schema.constraint_column_usage AS ccu
+  ON ccu.constraint_name = tc.constraint_name
+JOIN information_schema.referential_constraints AS rc
+  ON rc.constraint_name = tc.constraint_name
+WHERE tc.constraint_type = 'FOREIGN KEY'
+  AND tc.table_schema = 'public'
+ORDER BY tc.table_name;
+```
+
+Expected results (4 FKs, all CASCADE):
+
+| Table | Column | References | On Delete |
+|-------|--------|-----------|-----------|
+| `deployments` | `project_id` | `projects.id` | CASCADE |
+| `env_vars` | `project_id` | `projects.id` | CASCADE |
+| `managed_databases` | `project_id` | `projects.id` | CASCADE |
+| `port_allocations` | `deployment_id` | `deployments.id` | CASCADE |
+
+---
+
+## CRUD Verification Tests
+
+Run these SQL statements to verify each table accepts and returns data correctly.
+
+### Test 1: `projects` table
+
+```sql
+-- INSERT
+INSERT INTO projects (name, slug, production_branch)
+VALUES ('Test App', 'test-app', 'main')
+RETURNING id, name, slug, created_at;
+
+-- SELECT
+SELECT * FROM projects WHERE slug = 'test-app';
+
+-- UPDATE
+UPDATE projects SET framework = 'nextjs', next_mode = 'server'
+WHERE slug = 'test-app'
+RETURNING id, framework, next_mode, updated_at;
+
+-- Verify UNIQUE constraint (should fail)
+INSERT INTO projects (name, slug) VALUES ('Duplicate', 'test-app');
+-- Expected: ERROR: duplicate key value violates unique constraint "projects_slug_unique"
+```
+
+### Test 2: `deployments` table with FK cascade
+
+```sql
+-- INSERT (using the project id from Test 1)
+INSERT INTO deployments (project_id, type, status, commit_sha, branch)
+VALUES (
+  (SELECT id FROM projects WHERE slug = 'test-app'),
+  'production', 'queued', 'abc1234', 'main'
+)
+RETURNING id, project_id, type, status;
+
+-- SELECT
+SELECT d.id, d.type, d.status, p.name AS project_name
+FROM deployments d
+JOIN projects p ON p.id = d.project_id
+WHERE p.slug = 'test-app';
+
+-- UPDATE
+UPDATE deployments SET status = 'building'
+WHERE project_id = (SELECT id FROM projects WHERE slug = 'test-app')
+RETURNING id, status, updated_at;
+```
+
+### Test 3: `env_vars` with unique composite constraint
+
+```sql
+-- INSERT
+INSERT INTO env_vars (project_id, scope, key, value, is_secret)
+VALUES (
+  (SELECT id FROM projects WHERE slug = 'test-app'),
+  'production', 'API_KEY', 'test-value', true
+)
+RETURNING id, scope, key, is_secret;
+
+-- Verify composite unique constraint (should fail)
+INSERT INTO env_vars (project_id, scope, key, value)
+VALUES (
+  (SELECT id FROM projects WHERE slug = 'test-app'),
+  'production', 'API_KEY', 'different-value'
+);
+-- Expected: ERROR: duplicate key value violates unique constraint "env_vars_project_scope_key"
+
+-- Same key in different scope should succeed
+INSERT INTO env_vars (project_id, scope, key, value)
+VALUES (
+  (SELECT id FROM projects WHERE slug = 'test-app'),
+  'preview', 'API_KEY', 'preview-value'
+)
+RETURNING id, scope, key;
+```
+
+### Test 4: `managed_databases`
+
+```sql
+INSERT INTO managed_databases (project_id, db_name, db_user, db_password_encrypted)
+VALUES (
+  (SELECT id FROM projects WHERE slug = 'test-app'),
+  'app_test_app', 'app_test_app_user', 'encrypted_password_here'
+)
+RETURNING id, db_name, size_bytes;
+
+-- Verify size_bytes default is 0
+SELECT size_bytes FROM managed_databases WHERE db_name = 'app_test_app';
+```
+
+### Test 5: `github_installations`
+
+```sql
+INSERT INTO github_installations (id, github_account_login, github_account_type)
+VALUES (12345678, 'george-dev', 'User')
+RETURNING id, github_account_login, created_at;
+```
+
+### Test 6: `port_allocations`
+
+```sql
+INSERT INTO port_allocations (port, deployment_id)
+VALUES (
+  3001,
+  (SELECT id FROM deployments LIMIT 1)
+)
+RETURNING port, deployment_id, allocated_at;
+```
+
+### Test 7: `notification_settings`
+
+```sql
+INSERT INTO notification_settings (slack_webhook_url, notify_on_failure)
+VALUES ('https://hooks.slack.com/services/T00/B00/xxx', true)
+RETURNING id, notify_on_failure, notify_on_rollback;
+
+-- Verify defaults
+SELECT notify_on_failure, notify_on_rollback FROM notification_settings;
+-- Expected: true, true
+```
+
+### Test 8: CASCADE delete
+
+```sql
+-- Verify cascade: deleting a project should delete its deployments, env_vars, managed_databases
+-- Count before delete
+SELECT
+  (SELECT COUNT(*) FROM deployments WHERE project_id = (SELECT id FROM projects WHERE slug = 'test-app')) AS deployments_count,
+  (SELECT COUNT(*) FROM env_vars WHERE project_id = (SELECT id FROM projects WHERE slug = 'test-app')) AS env_vars_count,
+  (SELECT COUNT(*) FROM managed_databases WHERE project_id = (SELECT id FROM projects WHERE slug = 'test-app')) AS databases_count;
+
+-- Delete project
+DELETE FROM projects WHERE slug = 'test-app';
+
+-- Count after delete (all should be 0)
+SELECT
+  (SELECT COUNT(*) FROM deployments) AS deployments_count,
+  (SELECT COUNT(*) FROM env_vars) AS env_vars_count,
+  (SELECT COUNT(*) FROM managed_databases) AS databases_count;
+```
+
+### Cleanup
+
+After all tests, clean up any remaining test data:
+
+```sql
+DELETE FROM notification_settings;
+DELETE FROM github_installations WHERE id = 12345678;
+-- port_allocations cascade-deleted with deployment, which cascade-deleted with project
+```
+
+---
+
+## Migration Runner Implementation
+
+**File:** `packages/shared/src/db/migrate.ts`
+
+```typescript
+import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import pg from "pg";
+
+async function main() {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL environment variable is required");
+  }
+
+  const pool = new pg.Pool({ connectionString });
+  const db = drizzle(pool);
+
+  console.log("Running migrations...");
+  await migrate(db, { migrationsFolder: "./src/db/migrations" });
+  console.log("Migrations complete.");
+
+  await pool.end();
+}
+
+main().catch((err) => {
+  console.error("Migration failed:", err);
+  process.exit(1);
+});
+```
+
+Key behaviors:
+- Creates a temporary `pg.Pool` just for the migration run
+- Calls `migrate()` which reads the journal and applies any unapplied migration files
+- Each migration file runs inside a transaction (atomic per file)
+- Calls `pool.end()` to close all connections after completion
+- Exits with code 1 on failure
+
+The `migrationsFolder` path (`./src/db/migrations`) is relative to the working directory when the script runs, which is `packages/shared/` (since Turborepo runs the script from that package's root).
+
+---
+
+## Troubleshooting
+
+### Connection refused
+- Verify RDS instance is running: `aws rds describe-db-instances`
+- Verify security group allows your IP on port 5432
+- Verify the endpoint hostname is correct
+- Test raw connectivity: `pg_isready -h <endpoint> -p 5432`
+
+### SSL error: `no pg_hba.conf entry for host`
+- Ensure `?sslmode=require` is in the DATABASE_URL
+- RDS enforces SSL by default; connections without SSL are rejected
+
+### Permission denied for relation
+- Verify the database user has CREATE privileges on the `public` schema
+- If using the master user created by Terraform, this should not be an issue
+
+### Migration already applied (no changes)
+- This is normal for re-runs. The migrator is idempotent -- it checks the `__drizzle_migrations` table and skips already-applied migrations.
+
+### Transaction deadlock or timeout
+- If another process is connected to the database and holding locks, the migration may block. Ensure no other active sessions.
+
+---
+
+## Output
+
+After this step completes:
+
+1. All 7 application tables exist in the `gblockparty` database on RDS.
+2. The `__drizzle_migrations` journal table records the applied migration.
+3. All indexes, foreign keys, and unique constraints are in place.
+4. CRUD operations verified on every table.
+5. CASCADE delete behavior verified.

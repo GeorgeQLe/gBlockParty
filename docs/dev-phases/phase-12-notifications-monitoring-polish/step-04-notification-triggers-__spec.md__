@@ -1,0 +1,262 @@
+# Step 4: Notification Trigger Integration
+
+**Phase:** 12 -- Notifications, Monitoring & Polish
+**Step:** 4 of 6
+**Type:** Backend integration
+**Depends on:** Steps 1-2 (Slack/Discord implementations), Step 3 (settings stored in DB), Phase 4 (BuildRunner), Phase 5 (Deployer), Phase 8 (auto-rollback)
+**Blocks:** None
+
+---
+
+## Objective
+
+Wire the `notify()` aggregator function into the build and deployment failure paths. When a build fails, a deployment fails, or an auto-rollback triggers, the system loads notification settings from the database, checks the event toggles, and calls `notify()` to send messages to configured Slack/Discord webhooks. Notifications are fire-and-forget: they do not block the pipeline or cause failures if the webhook call fails.
+
+---
+
+## Integration Points
+
+### 1. Build Failure (BuildRunner)
+
+**File:** `packages/core/src/build/builder.ts`
+
+**Where:** In the `catch` block of `BuildRunner.run()`, after marking the deployment as `FAILED`:
+
+```typescript
+// In BuildRunner.run():
+try {
+  // ... build pipeline steps ...
+} catch (error) {
+  // Update deployment status to FAILED
+  await updateDeploymentStatus(this.options.deploymentId, "failed", error.message);
+
+  // Send notification (fire-and-forget)
+  await sendFailureNotification({
+    db: this.options.db,
+    projectName: project.name,
+    deploymentType: deployment.type,  // "production" or "preview"
+    errorMessage: error.message,
+    url: `${dashboardUrl}/projects/${this.options.projectId}/deployments/${this.options.deploymentId}`,
+  }).catch(notifyError => {
+    logger.error({ error: notifyError }, "Failed to send failure notification");
+  });
+
+  throw error;  // re-throw for the caller
+}
+```
+
+### 2. Deployment Failure (Deployer)
+
+**File:** `packages/core/src/deploy/deployer.ts`
+
+**Where:** In the `catch` block of `Deployer.deploy()`, after marking the deployment as `FAILED`:
+
+```typescript
+// In Deployer.deploy():
+try {
+  // ... deploy pipeline steps ...
+} catch (error) {
+  // Cleanup: release port, stop container, etc.
+  // Update deployment status to FAILED
+
+  // Send notification
+  await sendFailureNotification({
+    db: this.options.db,
+    projectName: project.name,
+    deploymentType: deployment.type,
+    errorMessage: error.message,
+    url: `${dashboardUrl}/projects/${this.options.projectId}/deployments/${this.options.deploymentId}`,
+  }).catch(notifyError => {
+    logger.error({ error: notifyError }, "Failed to send failure notification");
+  });
+
+  throw error;
+}
+```
+
+### 3. Auto-Rollback (Rollback Monitor)
+
+**File:** `packages/core/src/deploy/rollback.ts`
+
+**Where:** After an auto-rollback is triggered (crash-loop detection):
+
+```typescript
+// In auto-rollback handler:
+async function handleCrashLoop(projectId: string, failedDeploymentId: string) {
+  // 1. Find the previous healthy deployment
+  // 2. Rollback to it
+  const result = await rollbackDeployment(projectId, previousDeploymentId);
+
+  // 3. Send rollback notification
+  await sendRollbackNotification({
+    db,
+    projectName: project.name,
+    reason: "crash-loop-detected",
+    rolledBackTo: previousDeployment.commitSha,
+    url: `${dashboardUrl}/projects/${projectId}/deployments/${result.deploymentId}`,
+  }).catch(notifyError => {
+    logger.error({ error: notifyError }, "Failed to send rollback notification");
+  });
+}
+```
+
+---
+
+## Helper Functions
+
+Create helper functions in `packages/core/src/notifications/notifier.ts` (or a new file `packages/core/src/notifications/triggers.ts`) to load settings and check toggles:
+
+### `sendFailureNotification()`
+
+```typescript
+import { eq } from "drizzle-orm";
+import { notificationSettings } from "@gblockparty/shared/db/schema";
+
+interface FailureNotificationOptions {
+  db: Database;
+  projectName: string;
+  deploymentType: string;
+  errorMessage: string;
+  url: string;
+}
+
+export async function sendFailureNotification(
+  options: FailureNotificationOptions,
+): Promise<void> {
+  const settings = await loadNotificationSettings(options.db);
+  if (!settings) return;
+  if (!settings.notifyOnFailure) return;
+
+  await notify(
+    {
+      slackWebhookUrl: settings.slackWebhookUrl,
+      discordWebhookUrl: settings.discordWebhookUrl,
+    },
+    {
+      projectName: options.projectName,
+      deploymentType: options.deploymentType,
+      status: "failed",
+      errorMessage: options.errorMessage,
+      url: options.url,
+    },
+  );
+}
+```
+
+### `sendRollbackNotification()`
+
+```typescript
+interface RollbackNotificationOptions {
+  db: Database;
+  projectName: string;
+  reason: string;
+  rolledBackTo: string;  // commit SHA
+  url: string;
+}
+
+export async function sendRollbackNotification(
+  options: RollbackNotificationOptions,
+): Promise<void> {
+  const settings = await loadNotificationSettings(options.db);
+  if (!settings) return;
+  if (!settings.notifyOnRollback) return;
+
+  await notify(
+    {
+      slackWebhookUrl: settings.slackWebhookUrl,
+      discordWebhookUrl: settings.discordWebhookUrl,
+    },
+    {
+      projectName: options.projectName,
+      deploymentType: "rollback",
+      status: "rollback",
+      errorMessage: `${options.reason}. Rolled back to ${options.rolledBackTo.slice(0, 7)}.`,
+      url: options.url,
+    },
+  );
+}
+```
+
+### `loadNotificationSettings()`
+
+```typescript
+async function loadNotificationSettings(db: Database) {
+  const rows = await db
+    .select()
+    .from(notificationSettings)
+    .limit(1);
+
+  return rows[0] ?? null;
+}
+```
+
+---
+
+## Fire-and-Forget Pattern
+
+Notifications must not block or fail the build/deploy pipeline. The pattern is:
+
+```typescript
+// Good: fire-and-forget with error logging
+await sendFailureNotification(options).catch(err => {
+  logger.error({ error: err }, "Notification failed");
+});
+
+// BAD: would block pipeline on notification failure
+await sendFailureNotification(options); // throws on failure
+```
+
+Alternatively, the notification helper can internally catch all errors:
+
+```typescript
+export async function sendFailureNotification(options): Promise<void> {
+  try {
+    const settings = await loadNotificationSettings(options.db);
+    if (!settings || !settings.notifyOnFailure) return;
+    await notify({ ... }, { ... });
+  } catch (error) {
+    logger.error({ error }, "Failed to send failure notification");
+    // Swallow the error -- notifications are best-effort
+  }
+}
+```
+
+This approach is simpler for callers since they don't need `.catch()`.
+
+---
+
+## Event Toggle Logic
+
+| Event | Toggle Field | When to Notify |
+|-------|-------------|---------------|
+| Build failure | `notifyOnFailure` | BuildRunner catch block |
+| Deploy failure (health check, container) | `notifyOnFailure` | Deployer catch block |
+| Auto-rollback | `notifyOnRollback` | After rollback completes |
+
+If the toggle is `false`, the notification is silently skipped. If no notification settings row exists (user hasn't configured anything), notifications are silently skipped (no defaults webhook URLs).
+
+---
+
+## Deduplication
+
+To prevent notification spam during rapid failures (e.g., multiple builds failing quickly):
+
+- **Simple approach (MVP)**: No deduplication. Each failure sends a notification. At the current scale (few deploys per day), this is acceptable.
+- **Future optimization**: Track the last notification timestamp per project and event type. Skip if within 5 minutes of the last notification.
+
+---
+
+## Verification
+
+- [ ] Build failure in BuildRunner triggers `sendFailureNotification()`
+- [ ] Deployment failure in Deployer triggers `sendFailureNotification()`
+- [ ] Auto-rollback triggers `sendRollbackNotification()`
+- [ ] `notifyOnFailure: false` skips failure notifications
+- [ ] `notifyOnRollback: false` skips rollback notifications
+- [ ] Missing notification settings (no row) silently skips notifications
+- [ ] Notification errors do not block the build/deploy pipeline
+- [ ] Notification errors are logged
+- [ ] Correct payload sent: project name, event type, error message, dashboard URL
+- [ ] Both Slack and Discord notified when both URLs configured
+- [ ] Only configured channels notified (e.g., Slack only if Discord URL is null)
+- [ ] `loadNotificationSettings()` queries the `notification_settings` table correctly

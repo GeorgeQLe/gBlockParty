@@ -1,0 +1,337 @@
+# Step 1: Terraform AWS Resources
+
+**Phase:** 1 - Infrastructure Provisioning
+**Step:** 1 of 5
+**Dependencies:** None
+**Depends on this step:** Steps 2 (VPS needs RDS SG rules), 3 (Caddy needs domain), 5 (verification)
+
+---
+
+## Objective
+
+Complete and apply the Terraform configuration to provision all AWS resources required by gBlockParty: RDS PostgreSQL, S3 bucket, Secrets Manager secrets, security groups, and IAM policies. After this step, all AWS resources exist and are accessible with the correct credentials.
+
+---
+
+## Current State of Scaffolding
+
+The following Terraform files already exist at `/infra/terraform/`:
+
+```
+infra/terraform/
+  environments/prod/
+    main.tf                  # Calls rds, s3, secrets modules
+    variables.tf             # All input variables defined
+    providers.tf             # AWS provider, us-east-1
+    outputs.tf               # database_url, bucket_name, secret_arns
+    terraform.tfvars.example # Example values
+  modules/
+    rds/
+      main.tf                # aws_db_instance resource
+      variables.tf           # identifier, db_name, credentials, SG, subnet
+      outputs.tf             # endpoint, database_url, arn
+    s3/
+      main.tf                # bucket + lifecycle (7d) + encryption + public block
+      variables.tf           # bucket_name
+      outputs.tf             # bucket_name, bucket_arn
+    secrets/
+      main.tf                # 5 secrets: database-url, github-app-private-key,
+                             #   github-webhook-secret, jwt-secret, encryption-key
+      variables.tf           # prefix
+      outputs.tf             # secret_arns map
+```
+
+**What is already implemented and correct:**
+- RDS instance: PostgreSQL 16, db.t4g.micro, 20 GB gp3, auto-scale to 100 GB, 7-day backup retention
+- S3 bucket: lifecycle expiration (7 days), AES-256 SSE, public access fully blocked
+- Secrets Manager: all 5 required secrets created with correct naming
+
+**What is missing or needs modification:**
+- Security group for RDS (currently `var.security_group_ids` passed from outside, no SG module)
+- IAM user/role for VPS to access S3 and Secrets Manager
+- RDS `publicly_accessible` is `false` but VPS is outside AWS VPC -- needs to be `true` with SG restrictions
+- No Terraform backend configured (state is local, no locking)
+- No VPC/subnet data sources or references
+- RDS parameter group to enforce SSL connections
+- S3 bucket versioning (optional but recommended for state)
+
+---
+
+## Files to Create
+
+### 1. `/infra/terraform/modules/security-group/main.tf`
+
+Security group for RDS access control.
+
+```hcl
+resource "aws_security_group" "rds" {
+  name        = "${var.name_prefix}-rds"
+  description = "Security group for gBlockParty RDS instance"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description = "PostgreSQL from VPS"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name    = "${var.name_prefix}-rds"
+    Project = "gblockparty"
+  }
+}
+```
+
+**Required variables:** `vpc_id`, `name_prefix`, `allowed_cidr_blocks` (list of strings: VPS IP/32, dev IP/32)
+**Outputs:** `security_group_id`
+
+### 2. `/infra/terraform/modules/security-group/variables.tf`
+
+```hcl
+variable "vpc_id" { type = string }
+variable "name_prefix" { type = string; default = "gblockparty" }
+variable "allowed_cidr_blocks" { type = list(string); description = "CIDRs allowed to connect (VPS IP, dev IP)" }
+```
+
+### 3. `/infra/terraform/modules/security-group/outputs.tf`
+
+```hcl
+output "security_group_id" { value = aws_security_group.rds.id }
+```
+
+### 4. `/infra/terraform/modules/iam/main.tf`
+
+IAM user for VPS with scoped policies for S3 and Secrets Manager access.
+
+```hcl
+resource "aws_iam_user" "vps" {
+  name = "${var.name_prefix}-vps"
+  tags = { Project = "gblockparty" }
+}
+
+resource "aws_iam_access_key" "vps" {
+  user = aws_iam_user.vps.name
+}
+
+resource "aws_iam_user_policy" "s3_access" {
+  name   = "${var.name_prefix}-s3-access"
+  user   = aws_iam_user.vps.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+        Resource = [var.s3_bucket_arn, "${var.s3_bucket_arn}/*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_user_policy" "secrets_access" {
+  name   = "${var.name_prefix}-secrets-access"
+  user   = aws_iam_user.vps.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
+        Resource = var.secret_arns
+      }
+    ]
+  })
+}
+```
+
+**Required variables:** `name_prefix`, `s3_bucket_arn`, `secret_arns` (list of ARNs)
+**Outputs:** `access_key_id` (sensitive), `secret_access_key` (sensitive)
+
+### 5. `/infra/terraform/modules/iam/variables.tf`
+
+### 6. `/infra/terraform/modules/iam/outputs.tf`
+
+---
+
+## Files to Modify
+
+### 1. `/infra/terraform/modules/rds/main.tf`
+
+**Changes required:**
+- Set `publicly_accessible = true` (VPS is outside AWS VPC; access is controlled by security group)
+- Add `storage_encrypted = true`
+- Add `parameter_group_name` reference to enforce SSL
+- Add `apply_immediately = false` for safety
+
+Add a parameter group resource:
+```hcl
+resource "aws_db_parameter_group" "gblockparty" {
+  family = "postgres16"
+  name   = "${var.identifier}-params"
+
+  parameter {
+    name  = "rds.force_ssl"
+    value = "1"
+  }
+
+  tags = {
+    Project = "gblockparty"
+  }
+}
+```
+
+Update the `aws_db_instance` to reference:
+```hcl
+parameter_group_name   = aws_db_parameter_group.gblockparty.name
+publicly_accessible    = true
+storage_encrypted      = true
+```
+
+### 2. `/infra/terraform/environments/prod/main.tf`
+
+**Changes required:**
+- Add `security_group` module call
+- Add `iam` module call
+- Wire security group output to RDS module input
+- Wire S3 bucket ARN and secret ARNs to IAM module
+
+```hcl
+module "security_group" {
+  source = "../../modules/security-group"
+
+  vpc_id              = var.vpc_id
+  name_prefix         = "gblockparty"
+  allowed_cidr_blocks = var.allowed_cidr_blocks
+}
+
+module "iam" {
+  source = "../../modules/iam"
+
+  name_prefix    = "gblockparty"
+  s3_bucket_arn  = module.s3.bucket_arn
+  secret_arns    = values(module.secrets.secret_arns)
+}
+```
+
+Update the RDS module call to use the security group:
+```hcl
+module "rds" {
+  source = "../../modules/rds"
+  ...
+  security_group_ids = [module.security_group.security_group_id]
+  ...
+}
+```
+
+### 3. `/infra/terraform/environments/prod/variables.tf`
+
+**Add:**
+```hcl
+variable "vpc_id" {
+  type        = string
+  description = "VPC ID where the RDS security group will be created"
+}
+
+variable "allowed_cidr_blocks" {
+  type        = list(string)
+  description = "CIDR blocks allowed to access RDS (VPS IP/32, dev IP/32)"
+}
+```
+
+### 4. `/infra/terraform/environments/prod/outputs.tf`
+
+**Add:**
+```hcl
+output "vps_iam_access_key_id" {
+  value     = module.iam.access_key_id
+  sensitive = true
+}
+
+output "vps_iam_secret_access_key" {
+  value     = module.iam.secret_access_key
+  sensitive = true
+}
+
+output "rds_security_group_id" {
+  value = module.security_group.security_group_id
+}
+```
+
+### 5. `/infra/terraform/environments/prod/terraform.tfvars.example`
+
+**Update to include new variables:**
+```hcl
+db_password           = "change-me"
+vpc_id                = "vpc-xxxxxxxx"
+db_subnet_group_name  = "my-subnet-group"
+allowed_cidr_blocks   = ["VPS.IP.HERE/32", "DEV.IP.HERE/32"]
+s3_bucket_name        = "gblockparty-builds"
+```
+
+---
+
+## Terraform Workflow
+
+### First-Time Setup
+
+```bash
+cd infra/terraform/environments/prod
+
+# Copy and edit variables
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with actual values
+
+# Initialize Terraform
+terraform init
+
+# Review plan
+terraform plan -out=plan.tfplan
+
+# Apply (requires confirmation)
+terraform apply plan.tfplan
+
+# Retrieve sensitive outputs
+terraform output -json > /dev/null  # verify outputs exist
+terraform output database_url       # for configuring VPS
+terraform output vps_iam_access_key_id
+terraform output vps_iam_secret_access_key
+```
+
+### Ongoing Changes
+
+```bash
+terraform plan -out=plan.tfplan
+terraform apply plan.tfplan
+```
+
+---
+
+## Expected Behavior After Completion
+
+1. `terraform plan` shows "No changes. Your infrastructure matches the configuration."
+2. AWS Console shows:
+   - RDS instance `gblockparty` in `us-east-1`, status "available"
+   - S3 bucket `gblockparty-builds` with lifecycle and encryption configured
+   - 5 Secrets Manager secrets under `gblockparty/` prefix
+   - Security group `gblockparty-rds` with ingress rules for VPS + dev IPs
+   - IAM user `gblockparty-vps` with S3 and Secrets Manager policies
+3. Terraform outputs provide all values needed to configure the VPS
+
+---
+
+## Security Considerations
+
+- `terraform.tfvars` must be in `.gitignore` (contains the RDS password and IP addresses)
+- IAM access keys are sensitive outputs; store them securely on the VPS
+- The RDS password should be a strong, randomly generated string (32+ characters)
+- After initial setup, consider rotating the IAM access key periodically
+- Security group changes take effect immediately; verify before applying

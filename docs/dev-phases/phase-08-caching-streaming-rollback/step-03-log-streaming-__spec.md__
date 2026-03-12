@@ -1,0 +1,432 @@
+# Step 3: WebSocket Log Streaming
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 3 of 8
+**Status:** Not Started
+**Depends on:** Phase 4 (BuildRunner), Phase 6 (Dashboard API route infrastructure)
+
+---
+
+## Goal
+
+Implement real-time build log streaming via Server-Sent Events (SSE). When a build is in progress, the dashboard can connect to an SSE endpoint and receive build output line-by-line as it happens. After the build completes, the full log is uploaded to S3 for permanent storage.
+
+---
+
+## Background
+
+Currently, build logs are only available after the build finishes. This means developers cannot see build progress, diagnose hanging builds, or watch dependency installation output in real-time. The dashboard's deployment detail page needs live streaming to be useful during active builds.
+
+### Why SSE Instead of WebSocket
+
+The existing stub at `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/logs/stream/route.ts` already uses the SSE pattern (`text/event-stream`). SSE is the right choice because:
+
+1. **Unidirectional**: Log streaming is server-to-client only. WebSocket's bidirectional capability is unnecessary overhead.
+2. **Next.js App Router support**: Next.js App Router supports SSE natively via `ReadableStream` responses. WebSocket requires a custom server or middleware.
+3. **Auto-reconnect**: The browser's `EventSource` API automatically reconnects on disconnection, which is important for long builds.
+4. **Simpler infrastructure**: No WebSocket upgrade handling, no connection state management.
+
+### Architecture
+
+```
+BuildRunner (build pipeline)
+    |
+    | emits log lines via EventEmitter / in-memory channel
+    |
+    v
+LogBroadcaster (singleton, in-memory)
+    |
+    | multiplexes to connected SSE clients
+    |
+    v
+SSE Endpoint (/api/.../logs/stream)
+    |
+    | text/event-stream response
+    |
+    v
+Dashboard Browser (EventSource API)
+```
+
+The platform runs as a single process on one VPS, so an in-memory event system is sufficient. No Redis pub/sub or external message broker is needed.
+
+---
+
+## Implementation
+
+### Component 1: LogBroadcaster
+
+Create a new module for managing log event subscriptions:
+
+**File:** `packages/core/src/build/log-broadcaster.ts`
+
+```typescript
+import { EventEmitter } from "node:events";
+
+export interface LogEvent {
+  deploymentId: string;
+  line: string;
+  timestamp: number;
+  sequence: number;
+}
+
+class LogBroadcaster {
+  private emitter = new EventEmitter();
+  private logs = new Map<string, LogEvent[]>(); // in-memory buffer per deployment
+
+  /** Called by BuildRunner to emit a log line */
+  emit(deploymentId: string, line: string): void {
+    const events = this.logs.get(deploymentId) ?? [];
+    const event: LogEvent = {
+      deploymentId,
+      line,
+      timestamp: Date.now(),
+      sequence: events.length,
+    };
+    events.push(event);
+    this.logs.set(deploymentId, events);
+    this.emitter.emit(`log:${deploymentId}`, event);
+  }
+
+  /** Called by BuildRunner when build completes */
+  complete(deploymentId: string): void {
+    this.emitter.emit(`complete:${deploymentId}`);
+  }
+
+  /** Subscribe to log events for a deployment */
+  subscribe(
+    deploymentId: string,
+    onLog: (event: LogEvent) => void,
+    onComplete: () => void,
+  ): () => void {
+    this.emitter.on(`log:${deploymentId}`, onLog);
+    this.emitter.once(`complete:${deploymentId}`, onComplete);
+
+    // Return unsubscribe function
+    return () => {
+      this.emitter.off(`log:${deploymentId}`, onLog);
+      this.emitter.off(`complete:${deploymentId}`, onComplete);
+    };
+  }
+
+  /** Get buffered logs (for clients that connect mid-build) */
+  getBufferedLogs(deploymentId: string): LogEvent[] {
+    return this.logs.get(deploymentId) ?? [];
+  }
+
+  /** Get full log text (for S3 upload after build) */
+  getFullLog(deploymentId: string): string {
+    const events = this.logs.get(deploymentId) ?? [];
+    return events.map((e) => e.line).join("\n");
+  }
+
+  /** Clear buffered logs after S3 upload */
+  clear(deploymentId: string): void {
+    this.logs.delete(deploymentId);
+    this.emitter.removeAllListeners(`log:${deploymentId}`);
+    this.emitter.removeAllListeners(`complete:${deploymentId}`);
+  }
+}
+
+// Singleton
+export const logBroadcaster = new LogBroadcaster();
+```
+
+### Component 2: BuildRunner Integration
+
+In `packages/core/src/build/builder.ts`, the `BuildRunner` should emit log lines through the `LogBroadcaster` during the build process:
+
+```typescript
+import { logBroadcaster } from "./log-broadcaster";
+
+class BuildRunner {
+  async run(): Promise<{ imageTag: string; durationMs: number }> {
+    const { projectId, commitSha } = this.options;
+    const deploymentId = this.options.deploymentId; // add to BuildRunnerOptions
+
+    try {
+      this.log(deploymentId, "=== Build started ===");
+      this.log(deploymentId, `Project: ${projectId}`);
+      this.log(deploymentId, `Commit: ${commitSha}`);
+
+      // Clone step
+      this.log(deploymentId, "Cloning repository...");
+      // ... clone logic, capture stdout/stderr and emit lines
+
+      // Install step
+      this.log(deploymentId, "Installing dependencies...");
+      // ... pnpm install, pipe stdout/stderr to log
+
+      // Build step
+      this.log(deploymentId, "Running build...");
+      // ... build command, pipe output to log
+
+      // Docker image step
+      this.log(deploymentId, "Building Docker image...");
+      // ... docker build, pipe output to log
+
+      this.log(deploymentId, "=== Build complete ===");
+      logBroadcaster.complete(deploymentId);
+
+      // Upload full log to S3
+      await this.persistLogs(deploymentId);
+
+      return { imageTag, durationMs };
+    } catch (error) {
+      this.log(deploymentId, `=== Build failed: ${error.message} ===`);
+      logBroadcaster.complete(deploymentId);
+      await this.persistLogs(deploymentId);
+      throw error;
+    }
+  }
+
+  private log(deploymentId: string, line: string): void {
+    logBroadcaster.emit(deploymentId, line);
+  }
+
+  private async persistLogs(deploymentId: string): Promise<void> {
+    const fullLog = logBroadcaster.getFullLog(deploymentId);
+    const s3Key = `logs/${deploymentId}.txt`;
+    await uploadToS3(process.env.S3_CACHE_BUCKET!, s3Key, fullLog);
+    // Update deployment record with build_log_s3_key
+    // ... db update
+    logBroadcaster.clear(deploymentId);
+  }
+}
+```
+
+For child process output (git clone, pnpm install, pnpm build, docker build), pipe `stdout` and `stderr` line-by-line:
+
+```typescript
+import { spawn } from "node:child_process";
+
+async function runCommand(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  deploymentId: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, { cwd });
+
+    const handleLine = (stream: NodeJS.ReadableStream, prefix?: string) => {
+      let buffer = "";
+      stream.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop()!; // keep incomplete line
+        for (const line of lines) {
+          logBroadcaster.emit(deploymentId, prefix ? `${prefix} ${line}` : line);
+        }
+      });
+      stream.on("end", () => {
+        if (buffer) {
+          logBroadcaster.emit(deploymentId, prefix ? `${prefix} ${buffer}` : buffer);
+        }
+      });
+    };
+
+    handleLine(proc.stdout);
+    handleLine(proc.stderr);
+    proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`Exit code ${code}`))));
+  });
+}
+```
+
+### Component 3: SSE Endpoint
+
+**File:** `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/logs/stream/route.ts`
+
+Replace the TODO stub with a working SSE implementation:
+
+```typescript
+import { NextRequest } from "next/server";
+import { getSession } from "@/lib/auth";
+import { logBroadcaster } from "@gblockparty/core/build/log-broadcaster";
+
+export async function GET(
+  request: NextRequest,
+  context: { params: Promise<{ id: string; deploymentId: string }> },
+) {
+  const session = await getSession();
+  if (!session) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  const { deploymentId } = await context.params;
+  const encoder = new TextEncoder();
+
+  // Support resume via Last-Event-ID
+  const lastEventId = request.headers.get("Last-Event-ID");
+  const startSequence = lastEventId ? parseInt(lastEventId, 10) + 1 : 0;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      // Send buffered logs first (for clients connecting mid-build)
+      const buffered = logBroadcaster.getBufferedLogs(deploymentId);
+      for (const event of buffered) {
+        if (event.sequence >= startSequence) {
+          controller.enqueue(
+            encoder.encode(
+              `id: ${event.sequence}\ndata: ${JSON.stringify({ line: event.line, timestamp: event.timestamp })}\n\n`,
+            ),
+          );
+        }
+      }
+
+      // Subscribe to live events
+      const unsubscribe = logBroadcaster.subscribe(
+        deploymentId,
+        (event) => {
+          try {
+            controller.enqueue(
+              encoder.encode(
+                `id: ${event.sequence}\ndata: ${JSON.stringify({ line: event.line, timestamp: event.timestamp })}\n\n`,
+              ),
+            );
+          } catch {
+            // Client disconnected
+            unsubscribe();
+          }
+        },
+        () => {
+          // Build complete
+          try {
+            controller.enqueue(encoder.encode("event: complete\ndata: {}\n\n"));
+            controller.close();
+          } catch {
+            // Already closed
+          }
+        },
+      );
+
+      // Handle client disconnect
+      request.signal.addEventListener("abort", () => {
+        unsubscribe();
+        try {
+          controller.close();
+        } catch {
+          // Already closed
+        }
+      });
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+```
+
+### Component 4: Log Persistence to S3
+
+After a build completes (success or failure), the full log text is uploaded to S3:
+
+- **S3 key**: `logs/{deploymentId}.txt`
+- **Content**: Raw log text with ANSI codes preserved
+- **Deployment record update**: Set `build_log_s3_key` to the S3 key
+
+This persisted log is retrieved by the Step 4 log retrieval endpoint for completed builds.
+
+---
+
+## SSE Event Format
+
+Each log line is sent as an SSE event:
+
+```
+id: 42
+data: {"line":"Installing dependencies...","timestamp":1709424000000}
+
+```
+
+Special events:
+
+```
+event: complete
+data: {}
+
+```
+
+### Event ID for Resume
+
+The `id` field is the sequence number of the log line. If the client reconnects (e.g., network blip), it sends `Last-Event-ID: 42` in the request header. The server replays all events from sequence 43 onward.
+
+---
+
+## Dashboard Client Integration
+
+The dashboard's deployment detail page should use the `EventSource` API:
+
+```typescript
+const eventSource = new EventSource(
+  `/api/projects/${projectId}/deployments/${deploymentId}/logs/stream`,
+);
+
+eventSource.onmessage = (event) => {
+  const { line, timestamp } = JSON.parse(event.data);
+  appendLogLine(line);
+};
+
+eventSource.addEventListener("complete", () => {
+  eventSource.close();
+  // Build is done, can fetch full logs from Step 4 endpoint
+});
+
+eventSource.onerror = () => {
+  // EventSource auto-reconnects; no special handling needed
+};
+```
+
+---
+
+## Edge Cases
+
+1. **Client connects after build is complete**: The `LogBroadcaster` has already cleared the in-memory buffer. The SSE endpoint should detect that the deployment status is `ready` or `failed` and return an immediate `complete` event, directing the client to fetch logs from S3 (Step 4).
+2. **Client connects mid-build**: Buffered logs are replayed first, then live events stream.
+3. **Multiple clients connected**: `LogBroadcaster` uses `EventEmitter`, which supports multiple listeners. Each SSE connection gets its own subscription.
+4. **Build takes longer than SSE timeout**: The endpoint sends a periodic keepalive comment (`:keepalive\n\n`) every 30 seconds to prevent proxy/gateway timeouts.
+5. **Client disconnects**: The `abort` event on `request.signal` triggers unsubscription and cleanup.
+6. **S3 upload of logs fails**: Log the error. The in-memory buffer is cleared regardless. Logs are lost for that build, which is acceptable -- the build result is still recorded.
+
+---
+
+## Testing Approach
+
+1. **Unit test LogBroadcaster**: Emit events, subscribe, verify delivery. Test buffered log replay. Test complete event.
+2. **Integration test SSE endpoint**: Connect to the endpoint via `fetch` with streaming response. Emit log events and verify they arrive. Verify `Last-Event-ID` resume.
+3. **End-to-end test**: Trigger a build, connect to SSE from dashboard, verify logs appear in real-time.
+
+---
+
+## Verification Checklist
+
+- [ ] `LogBroadcaster` singleton created in `packages/core/src/build/log-broadcaster.ts`
+- [ ] `LogBroadcaster.emit()` buffers log events and notifies subscribers
+- [ ] `LogBroadcaster.subscribe()` returns an unsubscribe function
+- [ ] `LogBroadcaster.getBufferedLogs()` returns events for mid-build connections
+- [ ] `LogBroadcaster.complete()` signals end of build to subscribers
+- [ ] `BuildRunner` emits all build output through `LogBroadcaster`
+- [ ] Child process stdout/stderr piped line-by-line to `LogBroadcaster`
+- [ ] SSE endpoint streams log events with sequence-based event IDs
+- [ ] SSE endpoint replays buffered logs on new connection
+- [ ] SSE endpoint supports `Last-Event-ID` for resume after reconnect
+- [ ] SSE endpoint sends `complete` event when build finishes
+- [ ] SSE endpoint requires authentication via session check
+- [ ] Full log uploaded to S3 after build completes
+- [ ] `build_log_s3_key` updated on the deployment record
+- [ ] In-memory log buffer cleared after S3 upload
+
+---
+
+## Output
+
+After this step:
+
+- `packages/core/src/build/log-broadcaster.ts` provides an in-memory pub/sub for build log events.
+- `packages/core/src/build/builder.ts` emits all build output through the broadcaster.
+- `apps/dashboard/src/app/api/.../logs/stream/route.ts` streams build logs via SSE.
+- Build logs are persisted to S3 after completion for later retrieval (Step 4).

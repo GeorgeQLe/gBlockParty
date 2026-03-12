@@ -1,0 +1,260 @@
+# Step 1: GitHub App Registration & Configuration
+
+**Phase:** 3 -- Authentication & GitHub App Integration
+**Step:** 1 of 5
+**Type:** Manual setup + documentation
+**Depends on:** Phase 1 (VPS with public hostname for webhook URL), Phase 2 (Database ready for `github_installations` table)
+**Blocks:** Steps 2-5 (all need the App credentials)
+
+---
+
+## Objective
+
+Register a GitHub App on github.com with the correct permissions, webhook configuration, and OAuth settings. Store all credentials securely in AWS Secrets Manager. The dashboard and core packages read these credentials from environment variables at runtime.
+
+---
+
+## Why a GitHub App (Not an OAuth App)
+
+The spec requires a full GitHub App because:
+- **Webhooks** are scoped to installed repos (not all repos the user has access to)
+- **Bot identity** for PR comments (comments come from the App, not the user)
+- **Higher rate limits** (5,000 requests/hour per installation vs 5,000/hour per user)
+- **Granular permissions** at the repo level (contents:read, not full repo access)
+- **Installation tokens** for server-to-server API calls without user interaction
+
+---
+
+## Registration Steps
+
+### 1. Create the GitHub App
+
+Navigate to: `https://github.com/settings/apps/new`
+
+Fill in the following fields:
+
+| Field | Value |
+|-------|-------|
+| **GitHub App name** | `gBlockParty` (or `gblockparty-dev` for development) |
+| **Homepage URL** | `https://platform.yourdomain.dev` |
+| **Callback URL** | `https://platform.yourdomain.dev/api/auth/github/callback` |
+| **Setup URL** (optional) | Leave blank |
+| **Webhook URL** | `https://platform.yourdomain.dev/api/webhooks/github` |
+| **Webhook secret** | Generate a 32+ character random string (see below) |
+
+Generate the webhook secret:
+```bash
+openssl rand -hex 32
+```
+
+### 2. Set Permissions
+
+Under "Permissions & events" on the App registration page:
+
+**Repository permissions:**
+
+| Permission | Access | Why |
+|-----------|--------|-----|
+| Contents | Read-only | Clone repositories for builds |
+| Pull requests | Read & write | Post/update PR comments with preview URLs |
+| Commit statuses | Read & write | Set pending/success/failure status on commits |
+| Checks | Read & write | Create check runs with build log details |
+
+**Account permissions:**
+- None required
+
+**Organization permissions:**
+- None required
+
+### 3. Subscribe to Events
+
+Under "Subscribe to events":
+
+| Event | Why |
+|-------|-----|
+| Push | Trigger production deployments on push to production branch |
+| Pull request | Trigger preview deployments on PR open/sync; cleanup on close |
+| Installation | Track when the App is installed/uninstalled on repos |
+
+### 4. Configure OAuth Settings
+
+Under "Identifying and authorizing users":
+
+| Field | Value |
+|-------|-------|
+| **Callback URL** | `https://platform.yourdomain.dev/api/auth/github/callback` |
+| **Request user authorization (OAuth) during installation** | Checked |
+| **Enable Device Flow** | Unchecked |
+
+### 5. Scope Settings
+
+| Setting | Value |
+|---------|-------|
+| **Where can this GitHub App be installed?** | "Only on this account" (personal account only) |
+
+### 6. Generate Private Key
+
+After creating the App:
+1. Scroll to "Private keys" section
+2. Click "Generate a private key"
+3. A `.pem` file will download -- this is the App's RSA private key
+4. Store this securely (never commit to git)
+
+### 7. Note the Credentials
+
+After creation, the App settings page shows:
+
+| Credential | Where to find it |
+|-----------|-----------------|
+| **App ID** | Top of the App settings page (numeric) |
+| **Client ID** | Under "About" section (starts with `Iv1.` or `Iv23.`) |
+| **Client secret** | Click "Generate a new client secret" |
+| **Private key** | Downloaded `.pem` file from step 6 |
+| **Webhook secret** | The string you generated in step 1 |
+
+---
+
+## Store Credentials in AWS Secrets Manager
+
+Store each credential as a separate secret in AWS Secrets Manager (us-east-1 region, matching the existing Bismarck infrastructure):
+
+```bash
+# App ID (not truly secret, but keep it consistent)
+aws secretsmanager create-secret \
+  --name "gblockparty/github-app-id" \
+  --secret-string "123456" \
+  --region us-east-1
+
+# Private key (multi-line PEM)
+aws secretsmanager create-secret \
+  --name "gblockparty/github-app-private-key" \
+  --secret-string file://gblockparty.pem \
+  --region us-east-1
+
+# Webhook secret
+aws secretsmanager create-secret \
+  --name "gblockparty/github-app-webhook-secret" \
+  --secret-string "$(openssl rand -hex 32)" \
+  --region us-east-1
+
+# OAuth client ID
+aws secretsmanager create-secret \
+  --name "gblockparty/github-client-id" \
+  --secret-string "Iv1.xxxxxxxxxxxxxxxx" \
+  --region us-east-1
+
+# OAuth client secret
+aws secretsmanager create-secret \
+  --name "gblockparty/github-client-secret" \
+  --secret-string "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  --region us-east-1
+
+# JWT secret for session signing
+aws secretsmanager create-secret \
+  --name "gblockparty/jwt-secret" \
+  --secret-string "$(openssl rand -hex 64)" \
+  --region us-east-1
+```
+
+### Environment Variable Mapping
+
+The dashboard container loads these secrets as environment variables. The mapping:
+
+| Secret Name | Env Var | Used By |
+|------------|---------|---------|
+| `gblockparty/github-app-id` | `GITHUB_APP_ID` | `packages/core/src/github/app.ts` -- `new App({ appId })` |
+| `gblockparty/github-app-private-key` | `GITHUB_APP_PRIVATE_KEY` | `packages/core/src/github/app.ts` -- `new App({ privateKey })` |
+| `gblockparty/github-app-webhook-secret` | `GITHUB_APP_WEBHOOK_SECRET` | `packages/core/src/github/app.ts` -- `new App({ webhooks: { secret } })` and `apps/dashboard/src/app/api/webhooks/github/route.ts` |
+| `gblockparty/github-client-id` | `GITHUB_CLIENT_ID` | `apps/dashboard/src/app/api/auth/github/route.ts` -- OAuth redirect URL |
+| `gblockparty/github-client-secret` | `GITHUB_CLIENT_SECRET` | `apps/dashboard/src/app/api/auth/github/callback/route.ts` -- token exchange |
+| `gblockparty/jwt-secret` | `JWT_SECRET` | `apps/dashboard/src/lib/auth.ts` -- JWT sign/verify |
+
+---
+
+## Private Key Format Handling
+
+The GitHub App private key is a multi-line PEM file. When stored in an environment variable, newlines must be preserved. Two approaches:
+
+**Option A: Store with literal newlines (preferred)**
+```bash
+# AWS Secrets Manager stores the full PEM as-is
+# When loading into env var, ensure newlines are preserved
+export GITHUB_APP_PRIVATE_KEY=$(aws secretsmanager get-secret-value \
+  --secret-id gblockparty/github-app-private-key \
+  --query SecretString --output text)
+```
+
+**Option B: Store with escaped newlines**
+```bash
+# Replace newlines with \n for single-line storage
+# The @octokit/app library handles \n in the private key string
+export GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"
+```
+
+The `@octokit/app` library's `App` constructor accepts both formats -- it will replace `\n` with actual newlines internally.
+
+---
+
+## Local Development Setup
+
+For local development, create a `.env.local` file in `apps/dashboard/` (already in `.gitignore`):
+
+```env
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+GITHUB_APP_WEBHOOK_SECRET=your-webhook-secret-here
+GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxxxxxx
+GITHUB_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+JWT_SECRET=dev-secret-change-in-production
+ALLOWED_GITHUB_USER_ID=12345678
+NEXT_PUBLIC_DASHBOARD_URL=http://localhost:3000
+```
+
+For webhook testing locally, use a tunnel:
+```bash
+# Using ngrok or similar
+ngrok http 3000
+# Then update the GitHub App webhook URL temporarily to the ngrok URL
+```
+
+---
+
+## Install the App
+
+After registration:
+1. Go to `https://github.com/apps/gblockparty` (or your chosen name)
+2. Click "Install"
+3. Select "Only select repositories" and choose the repos you want to deploy
+4. Click "Install"
+5. The installation event will fire a webhook to your endpoint (or fail silently if the VPS isn't ready yet)
+
+The installation ID is shown in the URL after installation: `https://github.com/settings/installations/{installationId}`
+
+---
+
+## Files Affected
+
+This step is primarily manual configuration. No code changes are required, but the following files consume the credentials set up here:
+
+| File | Reads |
+|------|-------|
+| `packages/core/src/github/app.ts` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET` |
+| `apps/dashboard/src/app/api/auth/github/route.ts` | `GITHUB_CLIENT_ID` |
+| `apps/dashboard/src/app/api/auth/github/callback/route.ts` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
+| `apps/dashboard/src/app/api/webhooks/github/route.ts` | `GITHUB_APP_WEBHOOK_SECRET` |
+| `apps/dashboard/src/lib/auth.ts` | `JWT_SECRET` |
+
+---
+
+## Verification
+
+- [ ] GitHub App appears at `https://github.com/settings/apps` with correct name
+- [ ] Permissions show: contents (read), pull_requests (write), statuses (write), checks (write)
+- [ ] Events subscribed: push, pull_request, installation
+- [ ] Webhook URL points to `https://platform.yourdomain.dev/api/webhooks/github`
+- [ ] OAuth callback URL matches `https://platform.yourdomain.dev/api/auth/github/callback`
+- [ ] Private key `.pem` file downloaded and stored in Secrets Manager
+- [ ] All 6 secrets created in AWS Secrets Manager (verify with `aws secretsmanager list-secrets`)
+- [ ] `.env.local` created for local development with all required variables
+- [ ] App installed on at least one test repository
+- [ ] Installation ID noted for testing in subsequent steps

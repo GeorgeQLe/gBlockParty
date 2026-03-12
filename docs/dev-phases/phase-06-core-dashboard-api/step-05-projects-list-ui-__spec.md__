@@ -1,0 +1,352 @@
+# Step 5: Projects List Page UI
+
+**Phase:** 6, Step 5
+**Status:** Not Started
+**Depends on:** Step 1 (projects API -- `GET /api/projects` must return data)
+**Blocks:** Step 6 (project detail page -- project card click navigation)
+
+---
+
+## Goal
+
+Build the home page that displays all connected projects in a responsive grid with project cards showing the project name, GitHub repo link, latest deployment status badge, and production URL. Add a "Connect Repo" button that initiates the GitHub App installation flow. Use SWR for data fetching with loading and error states.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/page.tsx`
+
+```typescript
+export default function HomePage() {
+  return (
+    <div>
+      <h2 className="text-2xl font-bold mb-4">Projects</h2>
+      <p className="text-gray-500">No projects yet. Connect a GitHub repository to get started.</p>
+    </div>
+  );
+}
+```
+
+### Root Layout (`apps/dashboard/src/app/layout.tsx`)
+
+```typescript
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <div className="min-h-screen bg-gray-50">
+          <nav className="border-b bg-white px-6 py-4">
+            <div className="flex items-center justify-between">
+              <h1 className="text-xl font-bold">gBlockParty</h1>
+            </div>
+          </nav>
+          <main className="mx-auto max-w-7xl px-6 py-8">{children}</main>
+        </div>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+## Implementation Details
+
+### Page: `apps/dashboard/src/app/page.tsx`
+
+Convert from a server component to a client component (needed for SWR). The page is the entry point that composes the header, connect button, and projects grid.
+
+```typescript
+"use client";
+
+import useSWR from "swr";
+import { ProjectCard } from "@/components/projects/project-card";
+import { ProjectsEmptyState } from "@/components/projects/projects-empty-state";
+import { ProjectsLoadingSkeleton } from "@/components/projects/projects-loading-skeleton";
+
+const fetcher = (url: string) => fetch(url).then((res) => res.json());
+
+export default function HomePage() {
+  const { data: projects, error, isLoading } = useSWR("/api/projects", fetcher);
+
+  return (
+    <div>
+      {/* Header with title and Connect Repo button */}
+      <div className="mb-8 flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-gray-900">Projects</h2>
+        <a
+          href={process.env.NEXT_PUBLIC_GITHUB_APP_INSTALL_URL ?? "#"}
+          className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"
+        >
+          Connect Repo
+        </a>
+      </div>
+
+      {/* Content: loading, error, empty, or grid */}
+      {isLoading && <ProjectsLoadingSkeleton />}
+      {error && <ErrorBanner message="Failed to load projects" />}
+      {!isLoading && !error && projects?.length === 0 && <ProjectsEmptyState />}
+      {!isLoading && !error && projects?.length > 0 && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {projects.map((project) => (
+            <ProjectCard key={project.id} project={project} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### SWR Configuration
+
+Create a shared SWR fetcher and provider. Add an `SWRConfig` provider in the root layout or create a client layout wrapper.
+
+**File: `apps/dashboard/src/lib/swr.ts`**
+
+```typescript
+export const fetcher = async (url: string) => {
+  const res = await fetch(url);
+  if (!res.ok) {
+    const error = new Error("API request failed");
+    (error as any).status = res.status;
+    (error as any).info = await res.json().catch(() => null);
+    throw error;
+  }
+  return res.json();
+};
+```
+
+---
+
+## New Components
+
+### 1. `apps/dashboard/src/components/projects/project-card.tsx`
+
+A card component that displays a single project's information. Clicking the card navigates to the project detail page.
+
+**Props:**
+```typescript
+interface ProjectCardProps {
+  project: {
+    id: string;
+    name: string;
+    slug: string;
+    githubRepoFullName: string | null;
+    framework: string | null;
+    latestDeployment: {
+      id: string;
+      status: string;
+      url: string | null;
+      createdAt: string;
+    } | null;
+  };
+}
+```
+
+**Layout:**
+```
++--------------------------------------------------+
+| My App                           [ready] badge   |
+|                                                   |
+| georgele/my-app (GitHub link icon)                |
+|                                                   |
+| https://my-app.yourdomain.dev                    |
+| Deployed 2 hours ago                              |
++--------------------------------------------------+
+```
+
+**Visual details:**
+- Card: `rounded-lg border border-gray-200 bg-white p-5 hover:border-gray-300 hover:shadow-sm transition-all cursor-pointer`
+- Project name: `text-lg font-semibold text-gray-900`
+- GitHub repo: `text-sm text-gray-500` with external link icon, opens in new tab
+- Production URL: `text-sm text-blue-600 hover:underline`, truncated if long
+- Timestamp: `text-xs text-gray-400`, displayed as relative time ("2 hours ago")
+- Entire card is wrapped in a `<Link>` to `/projects/{id}`
+- Framework indicator: small pill showing `nextjs`, `dockerfile`, or `static`
+
+### 2. `apps/dashboard/src/components/projects/status-badge.tsx`
+
+A reusable status badge component used across the dashboard.
+
+**Props:**
+```typescript
+interface StatusBadgeProps {
+  status: "queued" | "building" | "deploying" | "ready" | "failed" | "archived";
+  size?: "sm" | "md";
+}
+```
+
+**Color mapping:**
+| Status | Background | Text | Dot Color |
+|--------|-----------|------|-----------|
+| `queued` | `bg-gray-100` | `text-gray-700` | `bg-gray-400` |
+| `building` | `bg-yellow-100` | `text-yellow-700` | `bg-yellow-400` (animate-pulse) |
+| `deploying` | `bg-blue-100` | `text-blue-700` | `bg-blue-400` (animate-pulse) |
+| `ready` | `bg-green-100` | `text-green-700` | `bg-green-400` |
+| `failed` | `bg-red-100` | `text-red-700` | `bg-red-400` |
+| `archived` | `bg-gray-100` | `text-gray-500` | `bg-gray-300` |
+
+**Structure:**
+```
+[ * Ready ]
+```
+A small colored dot before the capitalized status text. Pulsing animation for in-progress statuses (building, deploying).
+
+### 3. `apps/dashboard/src/components/projects/projects-empty-state.tsx`
+
+Displayed when no projects exist.
+
+**Layout:**
+```
++--------------------------------------------------+
+|                                                   |
+|          (illustration/icon placeholder)          |
+|                                                   |
+|           No projects yet                         |
+|   Connect a GitHub repository to get started.     |
+|                                                   |
+|          [ Connect Repo ]                         |
+|                                                   |
++--------------------------------------------------+
+```
+
+**Visual details:**
+- Container: `rounded-lg border-2 border-dashed border-gray-300 p-12 text-center`
+- Title: `text-lg font-medium text-gray-900`
+- Description: `text-sm text-gray-500 mt-2`
+- Button: Same style as header "Connect Repo" button
+- Optional: a simple SVG icon (git branch or code icon) above the text
+
+### 4. `apps/dashboard/src/components/projects/projects-loading-skeleton.tsx`
+
+Skeleton loading state shown while SWR fetches data.
+
+**Layout:** Three skeleton cards in the same grid layout as real projects:
+
+```
++---------------------------+  +---------------------------+  +---------------------------+
+| ████████████              |  | ████████████              |  | ████████████              |
+| ██████████████████        |  | ██████████████████        |  | ██████████████████        |
+| ████████████████          |  | ████████████████          |  | ████████████████          |
+| ████████                  |  | ████████                  |  | ████████                  |
++---------------------------+  +---------------------------+  +---------------------------+
+```
+
+Each skeleton card uses `animate-pulse bg-gray-200 rounded` divs that match the dimensions of actual content.
+
+### 5. `apps/dashboard/src/components/ui/error-banner.tsx`
+
+A reusable error banner component.
+
+**Props:**
+```typescript
+interface ErrorBannerProps {
+  message: string;
+  onRetry?: () => void;
+}
+```
+
+**Visual details:**
+- Container: `rounded-md bg-red-50 border border-red-200 p-4`
+- Text: `text-sm text-red-700`
+- Optional retry button: `text-sm text-red-700 underline hover:text-red-800`
+
+---
+
+## Utility: Relative Time Formatting
+
+Create a utility for formatting timestamps as relative time ("2 hours ago", "just now", etc.).
+
+**File: `apps/dashboard/src/lib/format.ts`**
+
+```typescript
+export function formatRelativeTime(dateString: string): string {
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSeconds = Math.floor(diffMs / 1000);
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  const diffHours = Math.floor(diffMinutes / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffSeconds < 60) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString();
+}
+```
+
+---
+
+## GitHub App Installation Flow
+
+The "Connect Repo" button links to the GitHub App installation URL. This URL is:
+
+```
+https://github.com/apps/{app-slug}/installations/new
+```
+
+After the user installs the app on a repository, GitHub redirects back to the dashboard with a callback URL. The callback handler (implemented in Phase 3) creates the project record or updates the installation.
+
+The URL is stored in the `NEXT_PUBLIC_GITHUB_APP_INSTALL_URL` environment variable so it is available in the client-side code.
+
+---
+
+## Environment Variables Required
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `NEXT_PUBLIC_GITHUB_APP_INSTALL_URL` | GitHub App installation URL for "Connect Repo" button | `https://github.com/apps/gblockparty/installations/new` |
+
+---
+
+## Responsive Breakpoints
+
+| Breakpoint | Grid Columns | Card Width |
+|-----------|-------------|-----------|
+| Default (mobile) | 1 column | Full width |
+| `sm` (640px+) | 2 columns | ~50% |
+| `lg` (1024px+) | 3 columns | ~33% |
+
+Tailwind classes: `grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3`
+
+---
+
+## File Summary
+
+| File | Action | Description |
+|------|--------|-------------|
+| `apps/dashboard/src/app/page.tsx` | Modify | Replace placeholder with SWR-powered projects grid |
+| `apps/dashboard/src/components/projects/project-card.tsx` | Create | Project card component |
+| `apps/dashboard/src/components/projects/status-badge.tsx` | Create | Reusable status badge component |
+| `apps/dashboard/src/components/projects/projects-empty-state.tsx` | Create | Empty state for no projects |
+| `apps/dashboard/src/components/projects/projects-loading-skeleton.tsx` | Create | Skeleton loading state |
+| `apps/dashboard/src/components/ui/error-banner.tsx` | Create | Reusable error banner |
+| `apps/dashboard/src/lib/swr.ts` | Create | Shared SWR fetcher |
+| `apps/dashboard/src/lib/format.ts` | Create | Relative time formatting utility |
+
+---
+
+## Testing
+
+### Visual Tests
+
+1. **Loading state:** On page load, skeleton cards are visible before data arrives.
+2. **Empty state:** With no projects in the database, the empty state message and button are shown.
+3. **Projects grid:** With 1, 2, 3, and 6+ projects, the grid layout is correct at all breakpoints.
+4. **Status badges:** Verify correct colors for each deployment status (queued, building, deploying, ready, failed).
+5. **GitHub link:** Clicking the repo link opens GitHub in a new tab.
+6. **Production URL:** Clicking the URL opens the deployed app.
+7. **Card click:** Clicking a project card navigates to `/projects/{id}`.
+8. **Connect Repo:** Clicking the button opens the GitHub App installation page.
+9. **Error state:** Simulate API failure (e.g., stop server), verify error banner appears.
+10. **Responsive:** Verify grid columns at mobile, tablet, and desktop widths.
+
+### Data Flow Tests
+
+1. **SWR fetches on mount:** Network tab shows `GET /api/projects` request.
+2. **SWR revalidates on focus:** Switching tabs and back triggers a re-fetch.
+3. **Data updates after deploy:** After triggering a deployment via another tab, switching back shows updated status.

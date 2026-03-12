@@ -1,0 +1,278 @@
+# Step 1: deploy.yaml Parser & Validator
+
+**Phase:** 11 -- Monorepo & Advanced Configuration
+**Step:** 1 of 4
+**Type:** Backend implementation
+**Depends on:** Phase 4 (framework detection as fallback), `deployYamlSchema` in `packages/shared/src/validation/deploy-yaml.ts` (already implemented)
+**Blocks:** Steps 2-4 (all depend on the parsed config)
+
+---
+
+## Objective
+
+Implement the `ConfigParser` that reads a `deploy.yaml` file from a cloned repository's root directory, validates it against the existing Zod schema, and returns a normalized `DeployConfig` object. The parser handles two config shapes: single-service (top-level `type`) and multi-service (`services` map). When no `deploy.yaml` exists, it returns `null` to signal that framework auto-detection should be used.
+
+---
+
+## Existing Zod Schema
+
+The validation schema already exists at `packages/shared/src/validation/deploy-yaml.ts`:
+
+```typescript
+const serviceSchema = z.object({
+  type: z.enum(["nextjs", "dockerfile", "static"]),
+  path: z.string().optional(),
+  dockerfile: z.string().optional(),
+  port: z.number().int().min(1).max(65535).default(3000),
+  resources: resourceSchema.optional(),
+  healthCheck: healthCheckSchema.optional(),
+});
+
+export const deployYamlSchema = z.object({
+  name: z.string().min(1).max(100),
+  type: z.enum(["nextjs", "dockerfile", "static"]).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  dockerfile: z.string().optional(),
+  resources: resourceSchema.optional(),
+  healthCheck: healthCheckSchema.optional(),
+  services: z.record(z.string(), serviceSchema).optional(),
+});
+```
+
+This schema already supports both single-service and multi-service configs. The parser needs to read the YAML file, validate it, and normalize the output.
+
+---
+
+## File to Create: `packages/core/src/build/config-parser.ts`
+
+### Types
+
+```typescript
+import type { DeployYamlConfig } from "@gblockparty/shared/validation";
+
+export interface ServiceConfig {
+  name: string;              // service key (e.g., "web", "api") or project name for single-service
+  type: "nextjs" | "dockerfile" | "static";
+  path: string;              // subdirectory path, or "." for root
+  dockerfile?: string;       // relative to path, for type: dockerfile
+  port: number;              // container internal port
+  resources?: { cpu: number; memory: number };
+  healthCheck: { path: string };
+}
+
+export interface DeployConfig {
+  projectName: string;       // from deploy.yaml `name` field
+  isMultiService: boolean;   // true if `services` map is used
+  services: ServiceConfig[]; // one or more services
+}
+```
+
+### Function: `parseConfig(repoPath: string): Promise<DeployConfig | null>`
+
+**Steps:**
+
+1. **Check for deploy.yaml**: Look for `deploy.yaml` (then `deploy.yml` as fallback) in the repo root.
+   ```typescript
+   const yamlPath = path.join(repoPath, "deploy.yaml");
+   const ymlPath = path.join(repoPath, "deploy.yml");
+   ```
+   If neither exists, return `null`.
+
+2. **Read file**: Use `fs.readFile()` to read the YAML content.
+
+3. **Parse YAML**: Use the `yaml` npm package to parse the content:
+   ```typescript
+   import YAML from "yaml";
+   const raw = YAML.parse(content);
+   ```
+   If parsing fails (invalid YAML syntax), throw `ConfigParseError` with the YAML error details.
+
+4. **Validate with Zod**: Pass the parsed object through `deployYamlSchema.safeParse(raw)`.
+   If validation fails, throw `ConfigValidationError` with Zod's formatted error messages.
+
+5. **Normalize to DeployConfig**:
+
+   **Case A: Multi-service** (config has `services` map):
+   ```typescript
+   if (validated.services && Object.keys(validated.services).length > 0) {
+     return {
+       projectName: validated.name,
+       isMultiService: true,
+       services: Object.entries(validated.services).map(([name, svc]) => ({
+         name,
+         type: svc.type,
+         path: svc.path ?? ".",
+         dockerfile: svc.dockerfile,
+         port: svc.port,   // default 3000 from Zod
+         resources: svc.resources,
+         healthCheck: svc.healthCheck ?? { path: "/" },
+       })),
+     };
+   }
+   ```
+
+   **Case B: Single-service** (config has top-level `type`):
+   ```typescript
+   if (validated.type) {
+     return {
+       projectName: validated.name,
+       isMultiService: false,
+       services: [{
+         name: validated.name,
+         type: validated.type,
+         path: ".",
+         dockerfile: validated.dockerfile,
+         port: validated.port ?? 3000,
+         resources: validated.resources,
+         healthCheck: validated.healthCheck ?? { path: "/" },
+       }],
+     };
+   }
+   ```
+
+   **Case C: Neither `type` nor `services`**: Throw `ConfigValidationError("deploy.yaml must specify either 'type' (single-service) or 'services' (multi-service)")`.
+
+6. **Return** the `DeployConfig`.
+
+### Function: `getServiceConfig(repoPath: string, serviceName?: string): Promise<ServiceConfig>`
+
+Convenience function that parses the config and returns a specific service's config. Used by `BuildRunner` when building a specific service.
+
+```typescript
+export async function getServiceConfig(
+  repoPath: string,
+  serviceName?: string,
+): Promise<ServiceConfig> {
+  const config = await parseConfig(repoPath);
+
+  if (!config) {
+    // Fallback to framework auto-detection
+    const detected = await detectFramework(repoPath);
+    return {
+      name: path.basename(repoPath),
+      type: detected.framework,
+      path: ".",
+      port: 3000,
+      healthCheck: { path: "/" },
+    };
+  }
+
+  if (serviceName) {
+    const service = config.services.find(s => s.name === serviceName);
+    if (!service) throw new Error(`Service '${serviceName}' not found in deploy.yaml`);
+    return service;
+  }
+
+  // Single-service: return the only service
+  if (config.services.length === 1) return config.services[0];
+
+  throw new Error("Multi-service config requires a service name");
+}
+```
+
+### Error Classes
+
+```typescript
+export class ConfigParseError extends Error {
+  constructor(message: string, public readonly yamlError?: unknown) {
+    super(`Failed to parse deploy.yaml: ${message}`);
+    this.name = "ConfigParseError";
+  }
+}
+
+export class ConfigValidationError extends Error {
+  constructor(message: string, public readonly zodErrors?: z.ZodError) {
+    super(`Invalid deploy.yaml: ${message}`);
+    this.name = "ConfigValidationError";
+  }
+}
+```
+
+---
+
+## Configuration Precedence
+
+As defined in the spec (section 13):
+
+1. `deploy.yaml` in repo root (highest priority)
+2. Dashboard settings (overrides for build command, output dir, etc.)
+3. Auto-detection (fallback for simple Next.js apps)
+
+When `deploy.yaml` is present, its values take precedence over auto-detection. However, dashboard-level overrides (stored in the `projects` table: `buildCommand`, `outputDir`) can still override `deploy.yaml` values. The merge order is:
+
+```typescript
+const effectiveConfig = {
+  ...deployYamlService,          // from deploy.yaml
+  ...(project.buildCommand ? { buildCommand: project.buildCommand } : {}),
+  ...(project.outputDir ? { outputDir: project.outputDir } : {}),
+};
+```
+
+---
+
+## deploy.yaml Examples
+
+### Single Next.js App
+```yaml
+name: my-app
+type: nextjs
+port: 3000
+healthCheck:
+  path: /api/health
+```
+
+### Monorepo with Frontend + API
+```yaml
+name: my-platform
+services:
+  web:
+    type: nextjs
+    path: apps/web
+    port: 3000
+    healthCheck:
+      path: /
+  api:
+    type: dockerfile
+    path: services/api
+    dockerfile: Dockerfile
+    port: 8080
+    healthCheck:
+      path: /health
+```
+
+### Single Backend with Custom Dockerfile
+```yaml
+name: my-api
+type: dockerfile
+dockerfile: ./Dockerfile
+port: 8080
+healthCheck:
+  path: /health
+```
+
+---
+
+## Dependencies (npm)
+
+The `yaml` package needs to be installed in `packages/core`:
+
+```bash
+pnpm add yaml --filter @gblockparty/core
+```
+
+---
+
+## Verification
+
+- [ ] `parseConfig()` returns `null` when no deploy.yaml exists
+- [ ] `parseConfig()` returns `null` when no deploy.yml exists either
+- [ ] Single-service config with `type: nextjs` parsed into `DeployConfig` with one service
+- [ ] Multi-service config with `services` map parsed into `DeployConfig` with multiple services
+- [ ] Default port (3000) applied when not specified
+- [ ] Default health check path (`/`) applied when not specified
+- [ ] Invalid YAML syntax throws `ConfigParseError`
+- [ ] Schema violations throw `ConfigValidationError` with field details
+- [ ] Config with neither `type` nor `services` throws `ConfigValidationError`
+- [ ] `getServiceConfig()` falls back to `detectFramework()` when no deploy.yaml
+- [ ] `getServiceConfig()` with service name returns correct service from multi-service config
+- [ ] `getServiceConfig()` throws for unknown service name

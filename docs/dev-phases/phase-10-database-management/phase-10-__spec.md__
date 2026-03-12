@@ -1,0 +1,167 @@
+# Phase 10: Database Management
+
+**Phase:** 10 of 12
+**Status:** Not Started
+**Dependencies:** Phase 1 (RDS instance provisioned), Phase 2 (DB schema with `managed_databases` table), Phase 6 (dashboard + API foundation with `withAuth` wrapper)
+**Blocks:** Neon migration (can proceed after this phase); Phase 12 (settings page references database stats)
+
+---
+
+## Goal
+
+Users can create and manage PostgreSQL databases for their apps via the dashboard. When a user clicks "Create Database" on a project's database page, the platform provisions a new database on the shared RDS instance, creates a dedicated user with a random 32-character password, stores the encrypted credentials, and automatically injects `DATABASE_URL` as an environment variable for both production and preview scopes. The dashboard displays connection info, database stats, and provides credential management with copy-to-clipboard functionality.
+
+---
+
+## Context
+
+gBlockParty runs a shared AWS RDS PostgreSQL instance (`db.t4g.micro`, 20 GB gp3) that hosts both the platform's own `gblockparty` database and individual databases for deployed apps. This replaces the current Neon setup ($20/mo) with a single RDS instance ($13/mo).
+
+Currently, the database management infrastructure exists at the schema level (`managed_databases` table in `packages/shared/src/db/schema.ts`) and has placeholder UI/API stubs, but no actual provisioning logic, API implementation, or functional dashboard UI.
+
+### Why This Phase Exists
+
+Without database management, users must manually create PostgreSQL databases on the RDS instance, generate credentials, and configure `DATABASE_URL` environment variables by hand. This phase automates the entire workflow:
+
+1. One-click database creation from the dashboard
+2. Secure credential generation and encrypted storage
+3. Automatic `DATABASE_URL` injection into the project's env vars
+4. Connection string display with show/hide password and copy-to-clipboard
+5. Database stats (size, connections) for monitoring
+6. Safe deletion with confirmation
+
+### Architecture Context
+
+```
+Dashboard UI (/projects/:id/database)
+    |
+    v
+API Routes (GET/POST/DELETE /api/projects/:id/database)
+    |
+    v
+DatabaseProvisioner (packages/core/src/database/provisioner.ts)
+    |
+    +-- 1. Generate db name: app_{project_slug}
+    +-- 2. Generate random password (32 chars, crypto.randomBytes)
+    +-- 3. CREATE USER {user} WITH PASSWORD '{password}'
+    +-- 4. CREATE DATABASE {dbname} OWNER {user}
+    +-- 5. GRANT ALL PRIVILEGES ON DATABASE {dbname} TO {user}
+    +-- 6. Encrypt password with AES-256-GCM (packages/shared/src/backend/encryption.ts)
+    +-- 7. Insert into managed_databases table
+    +-- 8. Upsert DATABASE_URL into env_vars table (production + preview scopes)
+    |
+    v
+App container gets DATABASE_URL at next deploy
+```
+
+---
+
+## Key Files
+
+| File | Package | Purpose | Status |
+|------|---------|---------|--------|
+| `packages/core/src/database/provisioner.ts` | core | Database provisioning logic (CREATE DATABASE, CREATE USER) | New file |
+| `packages/core/src/database/index.ts` | core | Barrel exports for database module | New file |
+| `apps/dashboard/src/app/api/projects/[id]/database/route.ts` | dashboard | GET/POST/DELETE API routes | TODO stub exists |
+| `apps/dashboard/src/app/projects/[id]/database/page.tsx` | dashboard | Database management UI page | Placeholder exists |
+| `apps/dashboard/src/components/database/database-panel.tsx` | dashboard | Database info panel component | New file |
+| `apps/dashboard/src/components/database/connection-string.tsx` | dashboard | Connection string display with copy/show-hide | New file |
+| `apps/dashboard/src/components/database/create-database-dialog.tsx` | dashboard | Create database confirmation dialog | New file |
+| `apps/dashboard/src/components/database/delete-database-dialog.tsx` | dashboard | Delete database confirmation dialog | New file |
+| `packages/shared/src/db/schema.ts` | shared | `managedDatabases` table definition | Implemented |
+| `packages/shared/src/backend/encryption.ts` | shared | AES-256-GCM encrypt/decrypt functions | Implemented |
+
+---
+
+## Steps
+
+### Step 1: Database Provisioning Logic
+Implement the `DatabaseProvisioner` class that connects to the RDS admin database, executes `CREATE DATABASE` and `CREATE USER` SQL commands, generates a random 32-character password, stores encrypted credentials in the `managed_databases` table, and auto-sets `DATABASE_URL` in the `env_vars` table for both production and preview scopes.
+
+**File:** `packages/core/src/database/provisioner.ts`
+**Spec:** `step-01-database-provisioner-__spec.md__`
+
+### Step 2: Database Management API Routes
+Implement GET (info + stats), POST (create), and DELETE (with confirmation token) routes at `/api/projects/:id/database`. GET returns database info including size and connection count queried from `pg_database_size()` and `pg_stat_activity`. POST calls `DatabaseProvisioner.provision()`. DELETE calls `DatabaseProvisioner.deprovision()` and requires a confirmation body.
+
+**File:** `apps/dashboard/src/app/api/projects/[id]/database/route.ts`
+**Spec:** `step-02-database-api-routes-__spec.md__`
+
+### Step 3: Database Management Dashboard UI
+Build the database page with: connection string display (show/hide password, copy-to-clipboard), database stats (size, active connections), Create Database button with confirmation dialog, Delete Database with double-confirmation (type database name). Uses SWR for data fetching.
+
+**File:** `apps/dashboard/src/app/projects/[id]/database/page.tsx` + components
+**Spec:** `step-03-database-dashboard-ui-__spec.md__`
+
+### Step 4: Connection String & Credential Management
+Implement encrypted credential storage using the existing AES-256-GCM module. Connection string format: `postgresql://{user}:{password}@{rds-endpoint}:5432/{dbname}?sslmode=require`. Password is stored encrypted in `managed_databases.db_password_encrypted`. Decryption happens server-side only; the API returns the full connection string on demand (behind auth). Copy-to-clipboard UI with visual feedback.
+
+**Spec:** `step-04-connection-string-credentials-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+1. `DatabaseProvisioner.provision()` creates a new database and user on the shared RDS instance with the naming convention `app_{project_slug}`.
+2. The generated password is 32 characters, cryptographically random, and stored encrypted using AES-256-GCM.
+3. `DATABASE_URL` is automatically inserted into the `env_vars` table for both `production` and `preview` scopes.
+4. The connection string follows the format: `postgresql://{user}:{password}@{rds-endpoint}:5432/{dbname}?sslmode=require`.
+5. `GET /api/projects/:id/database` returns database info (name, user, size, connection count) or `null` if no database exists.
+6. `POST /api/projects/:id/database` provisions a new database and returns the connection info. Returns 409 if a database already exists.
+7. `DELETE /api/projects/:id/database` drops the database and user, removes the `managed_databases` row and the `DATABASE_URL` env vars. Requires confirmation body `{ "confirmName": "app_myproject" }`.
+8. The dashboard page shows a "Create Database" button when no database exists for the project.
+9. The dashboard page shows connection string, stats, and delete option when a database exists.
+10. The connection string password is hidden by default with a show/hide toggle.
+11. Copy-to-clipboard works for the full connection string and provides visual feedback.
+12. Database deletion requires the user to type the database name to confirm.
+13. All API routes are protected by `withAuth` and validate the project belongs to the authenticated user.
+14. `DatabaseProvisioner.deprovision()` drops both the database and the user, and removes all related env vars.
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On (Phase 1)
+- AWS RDS PostgreSQL instance is running and accessible from the VPS.
+- The platform has admin-level credentials to the RDS instance for executing `CREATE DATABASE` and `CREATE USER`.
+- RDS endpoint is available as an environment variable (`RDS_ENDPOINT` or derived from `DATABASE_URL`).
+
+### Depends On (Phase 2)
+- The `managed_databases` table exists in the database schema (`packages/shared/src/db/schema.ts`).
+- The `env_vars` table exists for storing `DATABASE_URL`.
+- Drizzle ORM is configured and `getDb()` returns a working database client.
+
+### Depends On (Phase 6)
+- Dashboard app is running with authentication (`withAuth` wrapper).
+- API route structure (`/api/projects/[id]/database/route.ts`) is in place.
+- Dashboard page routing (`/projects/[id]/database/page.tsx`) is in place.
+- SWR is configured for data fetching.
+
+### Enables (Neon Migration)
+- After this phase, new databases can be created on RDS.
+- Existing Neon databases can be migrated with `pg_dump` / `psql` and then the `DATABASE_URL` env var updated.
+
+---
+
+## Risk & Mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| SQL injection in database/user name generation | Low | High | Validate slug format (alphanumeric + underscore only); use parameterized naming convention |
+| RDS connection limit exceeded during provisioning | Low | Medium | Single admin connection for provisioning; connection pooling for stats queries |
+| Orphaned databases if provisioning fails mid-way | Medium | Medium | Use transaction-like logic: if `managed_databases` insert fails after CREATE DATABASE, run DROP DATABASE in catch block |
+| Password exposure in logs or error messages | Medium | High | Never log passwords; scrub from error messages; encrypted at rest |
+| RDS storage exhaustion from too many app databases | Low | High | Monitor with `pg_database_size()`; alert when total exceeds 80% of 20 GB storage |
+| Race condition: two CREATE DATABASE requests for same project | Low | Low | Database unique constraint on `managed_databases.project_id`; check-then-create with DB lock |
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: Database Provisioning Logic | 2-3 hours |
+| Step 2: Database Management API Routes | 1-2 hours |
+| Step 3: Database Management Dashboard UI | 2-3 hours |
+| Step 4: Connection String & Credential Management | 1-2 hours |
+| **Total** | **6-10 hours** |

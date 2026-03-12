@@ -1,0 +1,157 @@
+# Phase 4: Build System
+
+**Phase:** 4 of 12
+**Status:** Not Started
+**Depends on:** Phase 1 (Docker installed on VPS, S3 bucket provisioned), Phase 2 (Database with `deployments` table for tracking build status), Phase 3 (GitHub App provides installation tokens for `git clone`)
+**Depended on by:** Phase 5 (Deployment engine starts containers from Docker images built here), Phase 7 (Preview deployments trigger builds through the same pipeline), Phase 8 (Build caching and log streaming extend this phase's S3 integration)
+
+---
+
+## Goal
+
+The platform can clone a GitHub repo using an installation token, detect the framework and package manager, generate an appropriate Dockerfile, build a Docker image tagged with the commit SHA, and store build logs to S3. The build queue manages sequential execution with cancel-and-replace semantics for same-project builds.
+
+After this phase:
+- `detectFramework()` identifies Next.js (static vs server), Dockerfile, or static HTML projects
+- `detectPackageManager()` identifies pnpm, npm, yarn, or bun from lockfiles
+- The Docker client can build images, run/stop containers, fetch logs, and prune old images via dockerode
+- `DockerProvider` implements the `DeploymentProvider` interface for the full container lifecycle
+- `BuildRunner.run()` executes the complete pipeline: clone -> detect -> cache restore -> install -> build -> Docker image -> cache save -> report status
+- Build logs are captured in real-time, streamed to subscribers, stored to S3, and scrubbed of secrets
+- The `BuildQueue` (already implemented) orchestrates sequential execution with cancel-and-replace
+
+---
+
+## Architecture Context
+
+```
+GitHub (webhook)        Dashboard                   Core (build system)
+  |                        |                              |
+  |-- push event --------->|                              |
+  |                        |-- handleWebhook() ---------->|
+  |                        |                              |-- create deployment record (status: QUEUED)
+  |                        |                              |-- setCommitStatus("pending")
+  |                        |<-- 200 OK ------------------|
+  |                        |                              |
+  |                        |                              |-- BuildQueue.enqueue(buildItem)
+  |                        |                              |   (cancel-and-replace if same project queued)
+  |                        |                              |
+  |                        |                              |-- BuildRunner.run() starts:
+  |                        |                              |   1. git clone --depth 1 (using installation token)
+  |                        |                              |   2. Read deploy.yaml OR detectFramework()
+  |                        |                              |   3. detectPackageManager()
+  |                        |                              |   4. restoreCache() from S3
+  |                        |                              |   5. pnpm/npm/yarn install
+  |                        |                              |   6. pnpm/npm/yarn build
+  |                        |                              |   7. generateDockerfile() (if not user-provided)
+  |                        |                              |   8. buildImage() via dockerode
+  |                        |                              |   9. Tag: {project}:{commit-sha}
+  |                        |                              |  10. saveCache() to S3
+  |                        |                              |  11. Upload build log to S3
+  |                        |                              |  12. Update deployment: status=DEPLOYING
+  |                        |                              |
+  |                        |                              +---> Phase 5 takes over (deploy container)
+```
+
+---
+
+## Environment Variables Required
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `DOCKER_SOCKET` | VPS config (default: `/var/run/docker.sock`) | Docker daemon socket path |
+| `S3_BUILD_CACHE_BUCKET` | Terraform output (Phase 1) | S3 bucket for build cache and logs |
+| `AWS_REGION` | Terraform config | AWS region for S3 (default: `us-east-1`) |
+| `BUILD_DIR` | VPS config (default: `/tmp/gblockparty/builds`) | Temporary directory for git clones and build artifacts |
+
+These are in addition to Phase 3's GitHub credentials (needed for `git clone` with installation tokens).
+
+---
+
+## Key Files
+
+### Already Implemented (no changes needed)
+
+| File | What it does |
+|------|-------------|
+| `packages/core/src/build/dockerfile-generator.ts` | `generateDockerfile(framework, options)` -- generates optimized multi-stage Dockerfiles for Next.js server, Next.js static, and plain static sites. Uses `caddy:2-alpine` for static and `node:20-alpine` for server. |
+| `packages/core/src/queue/build-queue.ts` | `BuildQueue` class with `enqueue()`, cancel-and-replace for same-project builds, sequential processing, `getQueueLength()`, `isRunning()`. Fully implemented with Pino logging. |
+| `packages/shared/src/backend/aws/s3.ts` | `uploadToS3(bucket, key, body)` and `downloadFromS3(bucket, key)` using `@aws-sdk/client-s3`. Handles `NoSuchKey` gracefully. |
+| `packages/shared/src/constants/deployment.ts` | `BUILD_LIMITS` (15-min timeout, 2GB max image, 1 concurrent, 10 images/project), `FRAMEWORKS`, `NEXT_MODES`, `FRAMEWORK_DEFAULTS` |
+| `packages/shared/src/types/project.ts` | `Framework` type (`"nextjs" | "dockerfile" | "static"`), `NextMode` type (`"static" | "server"`) |
+| `packages/shared/src/types/deployment.ts` | `DeploymentStatus`, `DeploymentType`, `Deployment` interface |
+| `packages/core/src/providers/types.ts` | `DeploymentProvider` interface, `ServiceConfig`, `Service`, `ServiceStatus`, `LogOptions` |
+
+### TODO Stubs (need full implementation)
+
+| File | Current state | What needs to be built |
+|------|--------------|----------------------|
+| `packages/core/src/build/framework-detector.ts` | `detectFramework()` throws "Not implemented"; `detectPackageManager()` returns hardcoded `"pnpm"` | Implement filesystem checks for `next.config.*`, `Dockerfile`, `index.html`; parse Next.js config for `output: 'export'`; check lockfiles for package manager detection |
+| `packages/core/src/providers/docker/client.ts` | `createDockerClient()` works; `buildImage()`, `runContainer()`, `stopContainer()`, `getContainerLogs()`, `pruneImages()` all throw "Not implemented" | Implement all five functions using the `dockerode` library |
+| `packages/core/src/providers/docker/container.ts` | `waitForHealthy()`, `isContainerRunning()`, `getContainerPort()` all throw "Not implemented" | Implement health check polling, container state inspection, port mapping retrieval |
+| `packages/core/src/providers/docker/index.ts` | `DockerProvider` class with all six methods throwing "Not implemented" | Implement `createService`, `updateService`, `deleteService`, `getServiceStatus`, `getLogs`, `rollback` using the Docker client functions |
+| `packages/core/src/build/builder.ts` | `BuildRunner.run()` logs "Build started" then throws "Not implemented" | Implement the full 10-step build pipeline with logging, caching, error handling, and timeout enforcement |
+| `packages/core/src/build/cache.ts` | `saveCache()` and `restoreCache()` both throw "Not implemented" | Implement S3-backed cache upload/download using the existing S3 client |
+
+---
+
+## Steps
+
+| # | Step | Key Deliverable | File(s) |
+|---|------|----------------|---------|
+| 1 | Framework Detection | `detectFramework()` and `detectPackageManager()` fully working | `packages/core/src/build/framework-detector.ts` |
+| 2 | Docker Client Operations | `buildImage()`, `runContainer()`, `stopContainer()`, `getContainerLogs()`, `pruneImages()` implemented via dockerode | `packages/core/src/providers/docker/client.ts`, `packages/core/src/providers/docker/container.ts` |
+| 3 | DockerProvider Implementation | All `DeploymentProvider` interface methods working | `packages/core/src/providers/docker/index.ts` |
+| 4 | Build Pipeline (BuildRunner) | Full clone-detect-cache-install-build-image-tag-cache-report pipeline | `packages/core/src/build/builder.ts` |
+| 5 | Build Logging & S3 Storage | Real-time log capture, secret scrubbing, S3 storage, subscriber streaming | `packages/core/src/build/builder.ts`, `packages/core/src/build/cache.ts` |
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+- `detectFramework()` with mock directories containing various config files
+- `detectPackageManager()` with each lockfile type present
+- `generateDockerfile()` for each framework/mode combination (already implemented -- verify tests exist)
+- `BuildQueue` cancel-and-replace behavior (already implemented -- verify tests exist)
+- `saveCache()` / `restoreCache()` with mocked S3 client
+- Build log secret scrubbing (patterns: API keys, tokens, passwords, connection strings)
+
+### Integration Tests
+
+- Framework detection on real Next.js project directories
+- Docker `buildImage()` with a minimal Dockerfile (requires Docker daemon)
+- Docker `runContainer()` / `stopContainer()` lifecycle (requires Docker daemon)
+- `DockerProvider` full create/update/delete cycle (requires Docker daemon)
+- `BuildRunner.run()` end-to-end with a test repository (requires Docker + S3)
+
+### Manual Verification
+
+- Clone a Next.js server-mode repo, detect framework, generate Dockerfile, build image
+- Clone a Next.js static-export repo, verify static mode detection
+- Clone a repo with custom Dockerfile, verify it uses the user Dockerfile
+- Verify build logs appear in S3 after build completion
+- Trigger two builds for the same project, verify cancel-and-replace in queue
+
+---
+
+## Build Limits (from shared constants)
+
+| Metric | Limit | Constant |
+|--------|-------|----------|
+| Max build time | 15 minutes | `BUILD_LIMITS.MAX_BUILD_TIME_MS` |
+| Max image size | 2 GB | `BUILD_LIMITS.MAX_IMAGE_SIZE_BYTES` |
+| Concurrent builds | 1 (sequential) | `BUILD_LIMITS.CONCURRENT_BUILDS` |
+| Build cache per project | 1 GB | `BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES` |
+| Images retained per project | 10 | `BUILD_LIMITS.MAX_IMAGES_PER_PROJECT` |
+
+---
+
+## Security Considerations
+
+1. **Secret scrubbing in build logs**: Before storing or streaming logs, scan for patterns matching API keys, tokens, passwords, `DATABASE_URL` connection strings, and any value from the project's `env_vars` table marked `is_secret`. Replace with `***REDACTED***`.
+2. **Installation token in clone URL**: The git clone uses `https://x-access-token:{token}@github.com/{owner}/{repo}.git`. The token must not appear in logs. Scrub the full URL and replace with `https://github.com/{owner}/{repo}.git`.
+3. **Temporary build directories**: Clone and build artifacts are written to `BUILD_DIR`. Always clean up after build (success or failure) using try/finally.
+4. **Docker socket access**: The platform process needs access to `/var/run/docker.sock`. This is a privileged operation -- the platform container runs with the Docker socket mounted.
+5. **Build timeout enforcement**: A 15-minute hard timeout kills the build process and any child processes (git, npm, docker build) to prevent resource exhaustion.

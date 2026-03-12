@@ -1,0 +1,353 @@
+# Step 2: OAuth Callback Handler
+
+**Phase:** 3 -- Authentication & GitHub App Integration
+**Step:** 2 of 5
+**Type:** Code implementation
+**Depends on:** Step 1 (GitHub App registered with OAuth credentials)
+**Blocks:** Step 3 (auth routes depend on working sessions), Phase 6 (dashboard API needs auth)
+
+---
+
+## Objective
+
+Implement the OAuth callback route that exchanges the GitHub authorization code for an access token, fetches the user's GitHub profile, verifies the user is the allowed platform owner, creates a JWT session, sets the session cookie, and redirects to the dashboard.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/api/auth/github/route.ts` (partial -- needs update)
+
+```typescript
+// Current: redirects to GitHub OAuth with client_id and scope
+// Missing: redirect_uri parameter, state parameter for CSRF
+export async function GET() {
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  // ...redirects to github.com/login/oauth/authorize
+}
+```
+
+### `apps/dashboard/src/app/api/auth/github/callback/route.ts` (TODO stub)
+
+```typescript
+// Current: extracts code param, returns 501
+export async function GET(request: NextRequest) {
+  const code = request.nextUrl.searchParams.get("code");
+  // TODO: Exchange code for access token
+  // TODO: Fetch user profile from GitHub
+  // TODO: Create/update user record
+  // TODO: Create session
+  return NextResponse.json({ error: "Not implemented" }, { status: 501 });
+}
+```
+
+### `apps/dashboard/src/lib/auth.ts` (FULLY IMPLEMENTED -- no changes needed)
+
+Provides all session management functions:
+- `createSession(session: Session)` -- signs a JWT with `{ userId, githubLogin, githubId }`, 7-day expiry
+- `getSession()` -- reads cookie, verifies JWT, returns `Session | null`
+- `setSessionCookie(token)` -- sets HTTP-only, Secure, SameSite=Lax cookie named `gblockparty-session`
+- `clearSessionCookie()` -- deletes the session cookie
+
+The `Session` interface:
+```typescript
+interface Session {
+  userId: string;
+  githubLogin: string;
+  githubId: number;
+}
+```
+
+---
+
+## Implementation Plan
+
+### 1. Update the OAuth redirect route
+
+**File:** `apps/dashboard/src/app/api/auth/github/route.ts`
+
+Changes needed:
+- Add `redirect_uri` parameter pointing to the callback URL
+- Add `state` parameter with a random nonce for CSRF protection
+- Store the `state` nonce in a short-lived cookie for verification in the callback
+
+```typescript
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import crypto from "node:crypto";
+
+export async function GET() {
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  if (!clientId) {
+    return NextResponse.json(
+      { error: "GitHub OAuth not configured" },
+      { status: 500 },
+    );
+  }
+
+  const state = crypto.randomBytes(16).toString("hex");
+
+  // Store state in a cookie for CSRF verification in the callback
+  const cookieStore = await cookies();
+  cookieStore.set("github-oauth-state", state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 600, // 10 minutes
+    path: "/",
+  });
+
+  const dashboardUrl = process.env.NEXT_PUBLIC_DASHBOARD_URL ?? "http://localhost:3000";
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: `${dashboardUrl}/api/auth/github/callback`,
+    scope: "read:user",
+    state,
+  });
+
+  return NextResponse.redirect(
+    `https://github.com/login/oauth/authorize?${params.toString()}`,
+  );
+}
+```
+
+### 2. Implement the callback handler
+
+**File:** `apps/dashboard/src/app/api/auth/github/callback/route.ts`
+
+The callback handler performs these steps in order:
+
+1. **Extract parameters**: Get `code` and `state` from query string
+2. **Verify CSRF state**: Compare `state` param with the value stored in the `github-oauth-state` cookie
+3. **Exchange code for token**: POST to `https://github.com/login/oauth/access_token` with `client_id`, `client_secret`, and `code`
+4. **Fetch user profile**: GET `https://api.github.com/user` with the access token
+5. **Verify allowed user**: Check that `user.id` matches `ALLOWED_GITHUB_USER_ID`
+6. **Create session**: Call `createSession({ userId, githubLogin, githubId })`
+7. **Set cookie**: Call `setSessionCookie(token)`
+8. **Redirect**: Send user to the dashboard home page
+9. **Clean up**: Delete the `github-oauth-state` cookie
+
+```typescript
+import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createSession, setSessionCookie } from "@/lib/auth";
+
+interface GitHubTokenResponse {
+  access_token: string;
+  token_type: string;
+  scope: string;
+  error?: string;
+  error_description?: string;
+}
+
+interface GitHubUser {
+  id: number;
+  login: string;
+  name: string | null;
+  avatar_url: string;
+}
+
+export async function GET(request: NextRequest) {
+  const code = request.nextUrl.searchParams.get("code");
+  const state = request.nextUrl.searchParams.get("state");
+
+  if (!code) {
+    return NextResponse.json({ error: "Missing code" }, { status: 400 });
+  }
+
+  // 1. Verify CSRF state
+  const cookieStore = await cookies();
+  const storedState = cookieStore.get("github-oauth-state")?.value;
+  cookieStore.delete("github-oauth-state");
+
+  if (!state || !storedState || state !== storedState) {
+    return NextResponse.json({ error: "Invalid state" }, { status: 403 });
+  }
+
+  // 2. Exchange code for access token
+  const tokenResponse = await fetch(
+    "https://github.com/login/oauth/access_token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: process.env.GITHUB_CLIENT_ID,
+        client_secret: process.env.GITHUB_CLIENT_SECRET,
+        code,
+      }),
+    },
+  );
+
+  const tokenData: GitHubTokenResponse = await tokenResponse.json();
+
+  if (tokenData.error || !tokenData.access_token) {
+    return NextResponse.json(
+      { error: tokenData.error_description ?? "Failed to exchange code" },
+      { status: 400 },
+    );
+  }
+
+  // 3. Fetch user profile
+  const userResponse = await fetch("https://api.github.com/user", {
+    headers: {
+      Authorization: `Bearer ${tokenData.access_token}`,
+      Accept: "application/vnd.github.v3+json",
+    },
+  });
+
+  if (!userResponse.ok) {
+    return NextResponse.json(
+      { error: "Failed to fetch user profile" },
+      { status: 502 },
+    );
+  }
+
+  const user: GitHubUser = await userResponse.json();
+
+  // 4. Verify allowed user
+  const allowedUserId = Number(process.env.ALLOWED_GITHUB_USER_ID);
+  if (!allowedUserId || user.id !== allowedUserId) {
+    return NextResponse.json(
+      { error: "Unauthorized: you are not the platform owner" },
+      { status: 403 },
+    );
+  }
+
+  // 5. Create session and set cookie
+  const token = await createSession({
+    userId: String(user.id),
+    githubLogin: user.login,
+    githubId: user.id,
+  });
+
+  await setSessionCookie(token);
+
+  // 6. Redirect to dashboard
+  const dashboardUrl =
+    process.env.NEXT_PUBLIC_DASHBOARD_URL ?? "http://localhost:3000";
+  return NextResponse.redirect(dashboardUrl);
+}
+```
+
+---
+
+## OAuth Flow Sequence
+
+```
+1. User clicks "Login with GitHub" in the dashboard UI
+   |
+2. GET /api/auth/github
+   - Generate random state nonce
+   - Set state in github-oauth-state cookie (10-min expiry)
+   - Redirect to github.com/login/oauth/authorize?client_id=X&redirect_uri=Y&scope=read:user&state=Z
+   |
+3. User authorizes the app on GitHub
+   |
+4. GitHub redirects to GET /api/auth/github/callback?code=ABC&state=Z
+   |
+5. Callback handler:
+   a. Verify state matches cookie        → 403 if mismatch
+   b. DELETE github-oauth-state cookie
+   c. POST github.com/login/oauth/access_token
+      { client_id, client_secret, code }
+      → { access_token }                 → 400 if error
+   d. GET api.github.com/user
+      Authorization: Bearer {access_token}
+      → { id, login, name }              → 502 if error
+   e. Check user.id === ALLOWED_GITHUB_USER_ID
+                                          → 403 if mismatch
+   f. createSession({ userId, githubLogin, githubId })
+   g. setSessionCookie(jwt)
+   h. Redirect to dashboard home (/)
+```
+
+---
+
+## Error Handling
+
+| Scenario | HTTP Status | Response |
+|----------|-------------|----------|
+| Missing `code` parameter | 400 | `{ error: "Missing code" }` |
+| Missing or mismatched `state` | 403 | `{ error: "Invalid state" }` |
+| GitHub token exchange fails | 400 | `{ error: "<github error description>" }` |
+| GitHub user API fails | 502 | `{ error: "Failed to fetch user profile" }` |
+| User is not the allowed owner | 403 | `{ error: "Unauthorized: you are not the platform owner" }` |
+| Missing `GITHUB_CLIENT_ID` env var | 500 | `{ error: "GitHub OAuth not configured" }` (from redirect route) |
+
+---
+
+## Environment Variables Used
+
+| Variable | Used in | Purpose |
+|----------|---------|---------|
+| `GITHUB_CLIENT_ID` | redirect route + callback | OAuth client identifier |
+| `GITHUB_CLIENT_SECRET` | callback only | Exchange code for token (server-side only) |
+| `ALLOWED_GITHUB_USER_ID` | callback only | Numeric GitHub user ID of the platform owner |
+| `NEXT_PUBLIC_DASHBOARD_URL` | redirect + callback | Base URL for `redirect_uri` and post-login redirect |
+| `JWT_SECRET` | auth.ts (called by callback) | Signs the session JWT |
+
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `apps/dashboard/src/app/api/auth/github/route.ts` | Update: add `redirect_uri`, `state` param, state cookie |
+| `apps/dashboard/src/app/api/auth/github/callback/route.ts` | Implement: full OAuth callback handler |
+
+**No changes needed to:**
+- `apps/dashboard/src/lib/auth.ts` (already complete)
+- `apps/dashboard/src/lib/api-helpers.ts` (already complete)
+
+---
+
+## Testing
+
+### Unit Tests
+
+```typescript
+describe("OAuth callback", () => {
+  it("rejects requests without code parameter", async () => {
+    const req = new NextRequest("http://localhost/api/auth/github/callback");
+    const res = await GET(req);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects requests with invalid state", async () => {
+    // Set a state cookie, then send request with different state
+    const req = new NextRequest(
+      "http://localhost/api/auth/github/callback?code=abc&state=wrong",
+    );
+    const res = await GET(req);
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects non-owner GitHub users", async () => {
+    // Mock GitHub API to return user with different ID
+    // Set ALLOWED_GITHUB_USER_ID to a different value
+    const res = await GET(validRequest);
+    expect(res.status).toBe(403);
+  });
+
+  it("creates session and redirects for valid owner", async () => {
+    // Mock GitHub API to return correct user
+    // Set ALLOWED_GITHUB_USER_ID to match
+    const res = await GET(validRequest);
+    expect(res.status).toBe(307); // redirect
+    expect(res.headers.get("set-cookie")).toContain("gblockparty-session");
+  });
+});
+```
+
+### Manual Verification
+
+1. Start the dashboard dev server: `pnpm dev:dashboard`
+2. Open `http://localhost:3000/api/auth/github` in a browser
+3. Authorize the app on GitHub
+4. Verify redirect back to `http://localhost:3000`
+5. Check browser cookies for `gblockparty-session`
+6. Visit `http://localhost:3000/api/auth/me` and verify user data is returned

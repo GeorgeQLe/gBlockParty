@@ -1,0 +1,310 @@
+# Step 3: DockerProvider Implementation
+
+**Phase:** 4 -- Build System
+**Step:** 3 of 5
+**Type:** Code implementation
+**Depends on:** Step 2 (Docker client functions: `buildImage`, `runContainer`, `stopContainer`, `getContainerLogs`, `waitForHealthy`, `isContainerRunning`)
+**Blocks:** Phase 5 (Deployer orchestration uses `DockerProvider` to manage service lifecycle), Phase 7 (Preview deployments call `DockerProvider.createService()`)
+
+---
+
+## Objective
+
+Implement the `DockerProvider` class in `packages/core/src/providers/docker/index.ts` to fulfill the `DeploymentProvider` interface. This class wraps the low-level Docker client functions from Step 2 into a cohesive service management API that the deployment engine (Phase 5) consumes.
+
+---
+
+## Current State
+
+```typescript
+// packages/core/src/providers/docker/index.ts
+import type {
+  DeploymentProvider,
+  ServiceConfig,
+  Service,
+  ServiceStatus,
+  LogOptions,
+} from "../types";
+import { createDockerClient } from "./client";
+
+export class DockerProvider implements DeploymentProvider {
+  private docker = createDockerClient();
+
+  async createService(config: ServiceConfig): Promise<Service> {
+    throw new Error("Not implemented");
+  }
+
+  async updateService(serviceId: string, config: ServiceConfig): Promise<Service> {
+    throw new Error("Not implemented");
+  }
+
+  async deleteService(serviceId: string): Promise<void> {
+    throw new Error("Not implemented");
+  }
+
+  async getServiceStatus(serviceId: string): Promise<ServiceStatus> {
+    throw new Error("Not implemented");
+  }
+
+  async *getLogs(serviceId: string, options: LogOptions): AsyncIterable<string> {
+    throw new Error("Not implemented");
+  }
+
+  async rollback(serviceId: string, targetDeploymentId: string): Promise<Service> {
+    throw new Error("Not implemented");
+  }
+}
+```
+
+The `DeploymentProvider` interface and related types are defined in `packages/core/src/providers/types.ts`:
+
+```typescript
+export interface ServiceConfig {
+  image: string;
+  port: number;
+  envVars: Record<string, string>;
+  name: string;
+  healthCheckPath: string;
+  memoryMb?: number;
+  cpuUnits?: number;
+}
+
+export interface Service {
+  id: string;
+  containerId: string;
+  port: number;
+  status: ServiceStatus;
+}
+
+export type ServiceStatus = "running" | "stopped" | "starting" | "failed" | "unknown";
+
+export interface LogOptions {
+  since?: Date;
+  tail?: number;
+  follow?: boolean;
+}
+
+export interface DeploymentProvider {
+  createService(config: ServiceConfig): Promise<Service>;
+  updateService(serviceId: string, config: ServiceConfig): Promise<Service>;
+  deleteService(serviceId: string): Promise<void>;
+  getServiceStatus(serviceId: string): Promise<ServiceStatus>;
+  getLogs(serviceId: string, options: LogOptions): AsyncIterable<string>;
+  rollback(serviceId: string, targetDeploymentId: string): Promise<Service>;
+}
+```
+
+---
+
+## Implementation Plan
+
+### `createService(config: ServiceConfig): Promise<Service>`
+
+Create and start a new container:
+
+1. Call `runContainer(this.docker, config.image, config.name, config.port, config.envVars)` from `client.ts`.
+2. The `containerId` is returned from `runContainer()`.
+3. Wait for the container to become healthy using `waitForHealthy(this.docker, containerId, config.healthCheckPath, config.port)` from `container.ts`.
+4. If health check fails, stop the container and throw an error.
+5. Return a `Service` object:
+   ```typescript
+   {
+     id: config.name,        // Use the service name as the service ID
+     containerId: containerId,
+     port: config.port,
+     status: "running",
+   }
+   ```
+
+**Note on `id`**: The `Service.id` is the logical identifier for the service. In the Docker context, this is the container name (e.g., `myapp-a1b2c3d4`). The `containerId` is the Docker container's internal 64-character hex ID.
+
+### `updateService(serviceId: string, config: ServiceConfig): Promise<Service>`
+
+Blue-green update:
+
+1. The `serviceId` is the name of the currently running container.
+2. Create a new container with an updated name (append a suffix or use the new commit SHA in the name).
+3. Call `runContainer()` with the new config.
+4. Wait for the new container to be healthy.
+5. If the new container is healthy, stop the old container using `stopContainer()`.
+6. If the new container fails health checks, stop the new container and re-throw the error (old container stays running).
+7. Return the new `Service` object.
+
+```typescript
+async updateService(serviceId: string, config: ServiceConfig): Promise<Service> {
+  // Start new container
+  const containerId = await runContainer(
+    this.docker, config.image, config.name, config.port, config.envVars,
+  );
+
+  // Health check new container
+  const healthy = await waitForHealthy(
+    this.docker, containerId, config.healthCheckPath, config.port,
+  );
+
+  if (!healthy) {
+    await stopContainer(this.docker, containerId);
+    throw new Error(`Health check failed for updated service ${config.name}`);
+  }
+
+  // Stop old container
+  try {
+    const oldContainer = this.docker.getContainer(serviceId);
+    await stopContainer(this.docker, oldContainer.id);
+  } catch {
+    // Old container may already be gone -- that is fine
+  }
+
+  return {
+    id: config.name,
+    containerId,
+    port: config.port,
+    status: "running",
+  };
+}
+```
+
+### `deleteService(serviceId: string): Promise<void>`
+
+Stop and remove the container:
+
+1. Look up the container by `serviceId` (container name).
+2. Call `stopContainer(this.docker, containerId)`.
+3. `stopContainer()` already removes the container after stopping.
+
+```typescript
+async deleteService(serviceId: string): Promise<void> {
+  const containers = await this.docker.listContainers({ all: true, filters: { name: [serviceId] } });
+  for (const c of containers) {
+    await stopContainer(this.docker, c.Id);
+  }
+}
+```
+
+### `getServiceStatus(serviceId: string): Promise<ServiceStatus>`
+
+Map Docker container state to `ServiceStatus`:
+
+1. Get the container by name using `docker.listContainers({ all: true, filters: { name: [serviceId] } })`.
+2. If no container found, return `"unknown"`.
+3. Inspect the container to get its state.
+4. Map Docker states to `ServiceStatus`:
+
+| Docker State | ServiceStatus |
+|-------------|---------------|
+| `running` | `"running"` |
+| `created` | `"starting"` |
+| `restarting` | `"starting"` |
+| `exited` (exit code 0) | `"stopped"` |
+| `exited` (exit code != 0) | `"failed"` |
+| `dead` | `"failed"` |
+| `paused` | `"stopped"` |
+| anything else | `"unknown"` |
+
+### `getLogs(serviceId: string, options: LogOptions): AsyncIterable<string>`
+
+Stream container logs as an async generator:
+
+1. Find the container by name.
+2. Call `container.logs({ stdout: true, stderr: true, follow: options.follow ?? false, tail: options.tail ?? 100, since: options.since ? Math.floor(options.since.getTime() / 1000) : undefined })`.
+3. If `follow` is true, the response is a readable stream. Yield lines as they arrive.
+4. If `follow` is false, yield all lines at once from the buffer.
+
+```typescript
+async *getLogs(serviceId: string, options: LogOptions): AsyncIterable<string> {
+  const containers = await this.docker.listContainers({
+    all: true,
+    filters: { name: [serviceId] },
+  });
+  if (containers.length === 0) return;
+
+  const container = this.docker.getContainer(containers[0].Id);
+  const logStream = await container.logs({
+    stdout: true,
+    stderr: true,
+    follow: options.follow ?? false,
+    tail: options.tail ?? 100,
+    since: options.since
+      ? Math.floor(options.since.getTime() / 1000)
+      : undefined,
+  });
+
+  if (options.follow) {
+    // logStream is a readable stream when follow=true
+    for await (const chunk of logStream as AsyncIterable<Buffer>) {
+      yield chunk.toString("utf-8");
+    }
+  } else {
+    // logStream is a Buffer when follow=false
+    const lines = (logStream as Buffer).toString("utf-8").split("\n");
+    for (const line of lines) {
+      if (line.trim()) yield line;
+    }
+  }
+}
+```
+
+### `rollback(serviceId: string, targetDeploymentId: string): Promise<Service>`
+
+Roll back to a previous deployment's image:
+
+1. The `targetDeploymentId` is used to look up the previous image tag. However, this requires database access which the provider does not have directly.
+2. **Design decision:** The `rollback()` method receives the target image tag via the `serviceId` parameter format or through an extended config. For the MVP, the `Deployer` class (Phase 5) will look up the target image from the database and call `createService()` with the old image tag. The `rollback()` method on `DockerProvider` serves as a convenience wrapper.
+3. For now, implement as: stop the current service, then create a new service from the target image.
+
+```typescript
+async rollback(serviceId: string, targetDeploymentId: string): Promise<Service> {
+  // The Deployer (Phase 5) will handle the database lookup and call createService
+  // directly with the target image. This method provides a provider-level abstraction.
+  // For MVP, this delegates to the Deployer's rollback logic.
+  throw new Error(
+    "DockerProvider.rollback() should not be called directly. " +
+    "Use Deployer.rollbackDeployment() which handles DB lookup and calls createService()."
+  );
+}
+```
+
+**Note:** This is an intentional design choice. The `DeploymentProvider` interface includes `rollback()` for future providers (e.g., AWS ECS) that may have native rollback support. For the Docker provider, rollback is just "start a container from an old image," which the `Deployer` class orchestrates using `createService()`.
+
+---
+
+## File Dependencies
+
+```
+packages/core/src/providers/docker/index.ts
+  ├── imports: DeploymentProvider, ServiceConfig, Service, ServiceStatus, LogOptions from ../types
+  ├── imports: createDockerClient, runContainer, stopContainer, getContainerLogs from ./client
+  ├── imports: waitForHealthy, isContainerRunning from ./container
+  └── used by: packages/core/src/deploy/deployer.ts (Phase 5)
+```
+
+---
+
+## Files Affected
+
+| File | Change |
+|------|--------|
+| `packages/core/src/providers/docker/index.ts` | Replace all TODO stubs with implementations |
+
+No new files are created. No other files are modified.
+
+---
+
+## Verification
+
+- [ ] `createService()` creates a container, starts it, performs health check, and returns `Service` with status `"running"`
+- [ ] `createService()` stops the container and throws if health check fails
+- [ ] `updateService()` starts a new container, health-checks it, stops the old container on success
+- [ ] `updateService()` keeps the old container running if the new container fails health check
+- [ ] `deleteService()` stops and removes the container
+- [ ] `deleteService()` handles non-existent containers gracefully
+- [ ] `getServiceStatus()` returns `"running"` for a running container
+- [ ] `getServiceStatus()` returns `"stopped"` for a stopped container
+- [ ] `getServiceStatus()` returns `"failed"` for a container that exited with non-zero
+- [ ] `getServiceStatus()` returns `"unknown"` when no container matches the service ID
+- [ ] `getLogs()` yields log lines from a container
+- [ ] `getLogs()` respects the `tail` option
+- [ ] `getLogs()` works with `follow: true` (streaming) and `follow: false` (batch)
+- [ ] `rollback()` throws with a clear message directing to `Deployer.rollbackDeployment()`
+- [ ] `DockerProvider` implements all methods of the `DeploymentProvider` interface
+- [ ] `pnpm typecheck` passes with no errors

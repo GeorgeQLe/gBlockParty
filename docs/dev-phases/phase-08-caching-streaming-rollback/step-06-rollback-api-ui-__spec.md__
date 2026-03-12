@@ -1,0 +1,303 @@
+# Step 6: Rollback API & Dashboard UI
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 6 of 8
+**Status:** Not Started
+**Depends on:** Step 5 (Rollback Mechanism -- `rollbackDeployment()` must be implemented)
+
+---
+
+## Goal
+
+Implement the POST `/api/projects/:id/deployments/:did/rollback` API endpoint and add rollback UI to the dashboard's deployment list page. Users can see which deployment is currently active, click "Rollback to this version" on any past deployment, confirm via a dialog, and watch the rollback proceed.
+
+---
+
+## Background
+
+The rollback mechanism (Step 5) provides the core `rollbackDeployment()` function. This step wraps it in an API endpoint and builds the dashboard UI that calls it. The dashboard spec (`__spec.md__` Section 9) describes:
+
+> **Rollback (`/projects/:id/deployments`):**
+> - Deployment history with "Rollback to this version" button per entry
+> - Shows which deployment is currently active (production)
+> - Rollback confirmation dialog
+
+---
+
+## Part 1: Rollback API Endpoint
+
+### File: `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/rollback/route.ts`
+
+Replace the TODO stub:
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+import { getDb } from "@/lib/db";
+import { rollbackDeployment } from "@gblockparty/core/deploy/rollback";
+import { eq, and } from "drizzle-orm";
+import { deployments, projects } from "@gblockparty/shared/db";
+
+export const POST = withAuth(async (_request, _session, context) => {
+  const { id: projectId, deploymentId } = await context.params;
+  const db = getDb();
+
+  // Validate the deployment exists and belongs to this project
+  const deployment = await db.query.deployments.findFirst({
+    where: and(
+      eq(deployments.id, deploymentId),
+      eq(deployments.projectId, projectId),
+    ),
+  });
+
+  if (!deployment) {
+    return errorResponse("Deployment not found", 404);
+  }
+
+  // Only allow rollback to production or rollback deployments (not preview)
+  if (deployment.type === "preview") {
+    return errorResponse("Cannot rollback to a preview deployment", 422);
+  }
+
+  // Check if this deployment is already the active production deployment
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  });
+
+  if (project?.productionDeploymentId === deploymentId) {
+    return errorResponse("This deployment is already active", 409);
+  }
+
+  // Check the target has an image tag
+  if (!deployment.dockerImageTag) {
+    return errorResponse("Deployment has no Docker image -- cannot rollback", 422);
+  }
+
+  try {
+    const newDeploymentId = await rollbackDeployment(db, projectId, deploymentId);
+
+    // Fetch the new deployment for the response
+    const newDeployment = await db.query.deployments.findFirst({
+      where: eq(deployments.id, newDeploymentId),
+    });
+
+    return jsonResponse({
+      success: true,
+      deploymentId: newDeploymentId,
+      url: newDeployment?.url,
+      message: `Rolled back to deployment ${deploymentId.slice(0, 8)}`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Rollback failed";
+
+    if (message.includes("has been pruned")) {
+      return errorResponse(message, 422);
+    }
+
+    return errorResponse(message, 500);
+  }
+});
+```
+
+### API Response Format
+
+**Success (200):**
+
+```json
+{
+  "success": true,
+  "deploymentId": "new-deployment-uuid",
+  "url": "https://myapp.yourdomain.dev",
+  "message": "Rolled back to deployment a1b2c3d4"
+}
+```
+
+**Error Responses:**
+
+| Status | Condition | Response |
+|--------|-----------|----------|
+| 404 | Deployment not found | `{"error": "Deployment not found"}` |
+| 409 | Already the active deployment | `{"error": "This deployment is already active"}` |
+| 422 | Preview deployment | `{"error": "Cannot rollback to a preview deployment"}` |
+| 422 | No Docker image tag | `{"error": "Deployment has no Docker image -- cannot rollback"}` |
+| 422 | Image has been pruned | `{"error": "Docker image ... has been pruned and is no longer available"}` |
+| 500 | Rollback failed (health check, container start, etc.) | `{"error": "..."}` |
+
+---
+
+## Part 2: Dashboard Rollback UI
+
+### Deployment List Page
+
+**File:** `apps/dashboard/src/app/projects/[id]/deployments/page.tsx` (or similar)
+
+The deployment list should display:
+
+1. A list of recent deployments (up to 20, with pagination).
+2. Each deployment row shows:
+   - Commit SHA (short, linked to GitHub)
+   - Branch name
+   - Deployment type badge (`production`, `preview`, `rollback`)
+   - Status badge (`ready`, `failed`, `building`, `deploying`, `queued`, `archived`)
+   - Timestamp (relative, e.g., "2 hours ago")
+   - Build duration
+   - **"Active"** badge on the current production deployment
+   - **"Rollback to this version"** button (for non-active, non-preview, non-failed deployments with a Docker image tag)
+
+3. Rollback entries show additional context:
+   - "Rolled back to {short-sha}" with a link to the source deployment
+
+### Rollback Button Logic
+
+The "Rollback to this version" button should only appear when:
+
+```typescript
+function canRollback(deployment: Deployment, activeDeploymentId: string): boolean {
+  return (
+    deployment.id !== activeDeploymentId &&       // Not already active
+    deployment.type !== "preview" &&               // Not a preview
+    deployment.dockerImageTag !== null &&           // Has an image
+    deployment.status === "ready" ||               // Was previously healthy
+    deployment.status === "archived"               // Was previously active
+  );
+}
+```
+
+### Confirmation Dialog
+
+When the user clicks "Rollback to this version":
+
+1. A modal dialog appears with:
+   - Title: "Confirm Rollback"
+   - Body: "This will deploy commit `{shortSha}` ({branch}) to production. The current deployment will be replaced."
+   - Cancel button
+   - Confirm button (styled as destructive action)
+
+2. On confirm:
+   - Send POST to `/api/projects/${projectId}/deployments/${deploymentId}/rollback`
+   - Show loading state on the button/dialog
+   - On success: close dialog, refresh deployment list, show success toast
+   - On error: show error message in dialog, keep dialog open
+
+### Active Deployment Indicator
+
+The currently active production deployment should be visually distinct:
+
+```tsx
+<div className={cn(
+  "flex items-center gap-2 p-4 rounded-lg border",
+  isActive && "border-green-500 bg-green-50 dark:bg-green-950"
+)}>
+  {isActive && (
+    <span className="inline-flex items-center px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">
+      Active
+    </span>
+  )}
+  {/* ... deployment details */}
+</div>
+```
+
+### Rollback Type Badge
+
+Rollback deployments should have a distinct badge and show the source:
+
+```tsx
+{deployment.type === "rollback" && deployment.sourceDeploymentId && (
+  <span className="text-sm text-gray-500">
+    Rolled back to{" "}
+    <Link href={`/projects/${projectId}/deployments/${deployment.sourceDeploymentId}`}>
+      {deployment.commitSha?.slice(0, 7)}
+    </Link>
+  </span>
+)}
+```
+
+### Loading and Error States
+
+During rollback:
+
+```tsx
+function RollbackButton({ deployment, projectId }) {
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleRollback() {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${projectId}/deployments/${deployment.id}/rollback`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Rollback failed");
+      }
+      // Success -- refresh data
+      mutate(); // SWR invalidation
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rollback failed");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  // ... render button and dialog
+}
+```
+
+---
+
+## Part 3: Deployment Detail Page Integration
+
+On the deployment detail page (`/projects/:id/deployments/:deploymentId`), add a rollback button if the deployment is eligible:
+
+- Shows "Deploy this version to production" button
+- Same confirmation dialog behavior as the list page
+- After rollback, redirects to the new rollback deployment's detail page
+
+---
+
+## Edge Cases
+
+1. **User clicks rollback while another rollback is in progress**: The API should detect concurrent operations. Use the concurrency lock from Step 5 (advisory lock or application mutex). Return 409 with "A deployment operation is already in progress."
+2. **User clicks rollback on a failed deployment**: If the deployment reached the `failed` state but had a Docker image tag (e.g., health check failed), the rollback should still attempt to use the image. The user is explicitly choosing this version.
+3. **Rollback after image pruning (Step 8)**: The API returns 422 with a clear message. The UI should disable the rollback button for deployments whose images have been pruned (if this info is tracked).
+4. **Multiple rapid rollbacks**: Each rollback creates a new deployment. The deployment list may show several rollback entries. This is correct and preserves full history.
+5. **Rollback to a rollback deployment**: Valid. The `source_deployment_id` chain can be followed for audit purposes.
+
+---
+
+## Verification Checklist
+
+### API
+- [ ] POST endpoint calls `rollbackDeployment()` with correct parameters
+- [ ] Validates deployment exists and belongs to project
+- [ ] Rejects rollback to preview deployments (422)
+- [ ] Rejects rollback to already-active deployment (409)
+- [ ] Rejects rollback when image has no tag (422)
+- [ ] Returns new deployment ID and URL on success
+- [ ] Returns appropriate error codes for failure modes
+- [ ] Authentication enforced via `withAuth`
+
+### Dashboard UI
+- [ ] Deployment list shows all recent deployments with correct metadata
+- [ ] Active deployment has a visual indicator ("Active" badge + highlight)
+- [ ] "Rollback to this version" button appears on eligible deployments
+- [ ] Button hidden for active, preview, and imageless deployments
+- [ ] Confirmation dialog appears on button click
+- [ ] Dialog shows commit SHA, branch, and clear warning text
+- [ ] Loading state shown during rollback
+- [ ] Success: dialog closes, list refreshes, toast shown
+- [ ] Error: error message displayed in dialog
+- [ ] Rollback entries show "Rolled back to {sha}" with link
+
+---
+
+## Output
+
+After this step:
+
+- `apps/dashboard/src/app/api/.../rollback/route.ts` handles POST requests and triggers rollback.
+- The dashboard deployment list has rollback buttons, confirmation dialogs, and active deployment indicators.
+- Users can rollback to any eligible past deployment with two clicks (button + confirm).

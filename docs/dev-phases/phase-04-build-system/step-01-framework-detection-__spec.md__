@@ -1,0 +1,197 @@
+# Step 1: Framework Detection
+
+**Phase:** 4 -- Build System
+**Step:** 1 of 5
+**Type:** Code implementation
+**Depends on:** Phase 2 (shared types `Framework`, `NextMode` exist in `packages/shared/src/types/project.ts`)
+**Blocks:** Step 4 (BuildRunner calls `detectFramework()` and `detectPackageManager()` to decide how to build)
+
+---
+
+## Objective
+
+Implement `detectFramework()` and `detectPackageManager()` in `packages/core/src/build/framework-detector.ts`. These functions inspect a cloned repository's filesystem to determine what kind of project it is and which package manager to use for dependency installation.
+
+---
+
+## Current State
+
+The file `packages/core/src/build/framework-detector.ts` contains:
+
+```typescript
+import type { Framework, NextMode } from "@gblockparty/shared/types";
+
+export interface DetectedFramework {
+  framework: Framework;
+  nextMode?: NextMode;
+  buildCommand: string;
+  outputDir: string;
+}
+
+export async function detectFramework(
+  repoPath: string,
+): Promise<DetectedFramework> {
+  // TODO: Detection order:
+  // 1. Check for next.config.{js,ts,mjs} → nextjs (detect static vs server mode)
+  // 2. Check for Dockerfile → dockerfile
+  // 3. Check for index.html → static
+  // 4. Throw error: "Add deploy.yaml to configure"
+  throw new Error("Not implemented");
+}
+
+export function detectPackageManager(
+  repoPath: string,
+): "pnpm" | "npm" | "yarn" | "bun" {
+  // TODO: Check lock files in order:
+  // pnpm-lock.yaml → pnpm
+  // package-lock.json → npm
+  // yarn.lock → yarn
+  // bun.lockb → bun
+  // default → pnpm
+  return "pnpm";
+}
+```
+
+The `DetectedFramework` interface is already defined. The `Framework` and `NextMode` types come from `packages/shared/src/types/project.ts`:
+
+```typescript
+export type Framework = "nextjs" | "dockerfile" | "static";
+export type NextMode = "static" | "server";
+```
+
+Framework defaults are defined in `packages/shared/src/constants/deployment.ts`:
+
+```typescript
+export const FRAMEWORK_DEFAULTS: Record<
+  string,
+  { buildCommand: string; outputDir: string; devCommand: string }
+> = {
+  nextjs: { buildCommand: "pnpm build", outputDir: ".next", devCommand: "pnpm dev" },
+  static: { buildCommand: "", outputDir: ".", devCommand: "npx serve ." },
+  dockerfile: { buildCommand: "docker build .", outputDir: ".", devCommand: "" },
+};
+```
+
+---
+
+## Implementation Plan
+
+### `detectFramework(repoPath: string): Promise<DetectedFramework>`
+
+Detection order (first match wins):
+
+1. **Next.js detection**: Check for `next.config.js`, `next.config.ts`, or `next.config.mjs` in `repoPath`.
+   - If found, read the file contents as a string.
+   - Search for `output:\s*['"]export['"]` or `output:\s*"export"` using a regex. This avoids needing to evaluate/parse the JavaScript/TypeScript config file.
+   - If `output: 'export'` is found: `nextMode = "static"`, `outputDir = "out"`.
+   - Otherwise: `nextMode = "server"`, `outputDir = ".next"`.
+   - `buildCommand` comes from `FRAMEWORK_DEFAULTS.nextjs.buildCommand` (but should use the detected package manager: `{pm} build`).
+   - Return `{ framework: "nextjs", nextMode, buildCommand, outputDir }`.
+
+2. **Dockerfile detection**: Check for `Dockerfile` in `repoPath`.
+   - Return `{ framework: "dockerfile", buildCommand: "", outputDir: "." }`.
+   - No `nextMode` (undefined).
+   - `buildCommand` is empty because the Dockerfile handles everything.
+
+3. **Static site detection**: Check for `index.html` in `repoPath`.
+   - Return `{ framework: "static", buildCommand: "", outputDir: "." }`.
+   - No `nextMode` (undefined).
+
+4. **No match**: Throw `new Error("Could not detect framework. Add a deploy.yaml to your repository root to configure the build.")`.
+
+Use `fs.existsSync()` or `fs.access()` for file existence checks. Use `fs.readFile()` (async) to read the Next.js config content.
+
+### `detectPackageManager(repoPath: string): "pnpm" | "npm" | "yarn" | "bun"`
+
+Check for lockfiles in the following order (first match wins):
+
+| Lockfile | Returns |
+|----------|---------|
+| `pnpm-lock.yaml` | `"pnpm"` |
+| `package-lock.json` | `"npm"` |
+| `yarn.lock` | `"yarn"` |
+| `bun.lockb` | `"bun"` |
+| (none found) | `"pnpm"` (default) |
+
+Use synchronous `fs.existsSync()` since this is a quick filesystem check and the function signature is synchronous.
+
+---
+
+## Next.js Config Parsing Details
+
+The regex approach avoids the complexity of evaluating JS/TS/MJS files. The following patterns should all be detected:
+
+```javascript
+// next.config.js
+module.exports = { output: 'export' }
+
+// next.config.mjs
+export default { output: 'export' }
+
+// next.config.ts
+const config: NextConfig = { output: "export" }
+
+// With spacing variations
+const config = {
+  output:  "export",
+}
+```
+
+**Regex pattern:** `/output\s*:\s*['"]export['"]/`
+
+This regex handles:
+- Any amount of whitespace around the colon
+- Both single and double quotes
+- Works regardless of the config file's module system (CommonJS, ESM, TypeScript)
+
+**Edge case -- commented-out config:**
+
+```javascript
+// output: 'export'  <-- commented out
+```
+
+The regex would match this false positive. However, this is acceptable for MVP:
+- It is extremely unlikely someone would have a commented-out `output: 'export'` while using server mode.
+- The user can always override with `deploy.yaml` if auto-detection is wrong.
+- A future improvement could use a proper AST parser, but it is not worth the complexity now.
+
+---
+
+## File Dependencies
+
+```
+packages/core/src/build/framework-detector.ts
+  ├── imports: Framework, NextMode from @gblockparty/shared/types
+  ├── imports: FRAMEWORK_DEFAULTS from @gblockparty/shared/constants (optional, for defaults)
+  ├── uses: fs/promises (readFile, access) and fs (existsSync)
+  └── used by: packages/core/src/build/builder.ts (BuildRunner.run, Step 4)
+```
+
+---
+
+## Files Affected
+
+| File | Change |
+|------|--------|
+| `packages/core/src/build/framework-detector.ts` | Replace TODO stubs with full implementation |
+
+No new files are created. No other files are modified.
+
+---
+
+## Verification
+
+- [ ] `detectFramework("/path/to/nextjs-server-app")` returns `{ framework: "nextjs", nextMode: "server", buildCommand: "pnpm build", outputDir: ".next" }`
+- [ ] `detectFramework("/path/to/nextjs-static-app")` returns `{ framework: "nextjs", nextMode: "static", buildCommand: "pnpm build", outputDir: "out" }`
+- [ ] `detectFramework("/path/to/dockerized-app")` returns `{ framework: "dockerfile", buildCommand: "", outputDir: "." }`
+- [ ] `detectFramework("/path/to/static-site")` returns `{ framework: "static", buildCommand: "", outputDir: "." }`
+- [ ] `detectFramework("/path/to/empty-dir")` throws `"Could not detect framework"`
+- [ ] `detectPackageManager("/path/with/pnpm-lock.yaml")` returns `"pnpm"`
+- [ ] `detectPackageManager("/path/with/package-lock.json")` returns `"npm"`
+- [ ] `detectPackageManager("/path/with/yarn.lock")` returns `"yarn"`
+- [ ] `detectPackageManager("/path/with/bun.lockb")` returns `"bun"`
+- [ ] `detectPackageManager("/path/with/no-lockfile")` returns `"pnpm"` (default)
+- [ ] Next.js config with `output: 'export'` using single quotes is detected
+- [ ] Next.js config with `output: "export"` using double quotes is detected
+- [ ] Next.js config files with `.js`, `.ts`, and `.mjs` extensions are all checked
+- [ ] `pnpm typecheck` passes with no errors

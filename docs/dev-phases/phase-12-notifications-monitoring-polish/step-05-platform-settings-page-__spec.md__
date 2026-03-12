@@ -1,0 +1,220 @@
+# Step 5: Platform Settings Page
+
+**Phase:** 12 -- Notifications, Monitoring & Polish
+**Step:** 5 of 6
+**Type:** Frontend implementation
+**Depends on:** Step 3 (notification settings form), Step 6 (VPS stats panel), Phase 3 (GitHub App installation data)
+**Blocks:** None
+
+---
+
+## Objective
+
+Complete the `/settings` page with three organized sections: GitHub App connection status, notification preferences (Slack/Discord webhook configuration), and platform info (VPS monitoring stats). The page provides a central place for platform administration, replacing the current placeholder.
+
+---
+
+## Current State
+
+The file `apps/dashboard/src/app/settings/page.tsx` has a placeholder:
+
+```tsx
+import { Placeholder } from "@/components/ui/placeholder";
+
+export default function PlatformSettingsPage() {
+  return <Placeholder title="Platform Settings" />;
+}
+```
+
+---
+
+## Page Layout
+
+```
++=========================================================+
+| Settings                                                  |
++=========================================================+
+|                                                           |
+| --- GitHub App Connection ---                             |
+| +-------------------------------------------------------+ |
+| | GitHub App: gBlockParty                      [Connected] |
+| |                                                         | |
+| | Installed on: georgele                                  | |
+| | Repositories: 3 repos connected                        | |
+| |                                                         | |
+| | Permissions:                                            | |
+| |   Contents: read                                        | |
+| |   Pull requests: read & write                          | |
+| |   Commit statuses: read & write                        | |
+| |   Checks: read & write                                 | |
+| |                                                         | |
+| | [Manage on GitHub ->]                                   | |
+| +-------------------------------------------------------+ |
+|                                                           |
+| --- Notifications ---                                     |
+| +-------------------------------------------------------+ |
+| | [Notification Settings Form from Step 3]               | |
+| +-------------------------------------------------------+ |
+|                                                           |
+| --- Platform Info ---                                     |
+| +-------------------------------------------------------+ |
+| | [VPS Stats Panel from Step 6]                          | |
+| |                                                         | |
+| | Disk: [====------] 42% (34 GB / 80 GB)               | |
+| | Memory: [===-------] 31% (2.5 GB / 8 GB)             | |
+| | Containers: 5 running / 2 stopped                      | |
+| | Ports: 7 allocated (production: 4, preview: 3)        | |
+| |                                                         | |
+| | Platform version: abc1234 | Built: Mar 1, 2026        | |
+| +-------------------------------------------------------+ |
+|                                                           |
++=========================================================+
+```
+
+---
+
+## Components
+
+### 1. `apps/dashboard/src/components/settings/github-status.tsx`
+
+Displays the GitHub App connection status.
+
+**Data source:** Query the `github_installations` table and the GitHub API (via the platform's installation token) for repo count and details.
+
+**Props:**
+```typescript
+interface GitHubStatusProps {
+  installation: {
+    id: number;
+    accountLogin: string;
+    accountType: string;
+    createdAt: string;
+  } | null;
+  repoCount: number;
+}
+```
+
+**Sections:**
+- **Status badge:** Green "Connected" or red "Not Connected" based on whether an installation exists.
+- **Account info:** GitHub username and account type.
+- **Repository count:** Number of repos with the App installed.
+- **Permissions list:** Hardcoded display matching the GitHub App configuration (contents: read, pull_requests: write, statuses: write, checks: write). These don't change at runtime.
+- **Manage link:** External link to `https://github.com/settings/installations/{installationId}` to manage the App on GitHub.
+
+**API route needed:** `GET /api/settings/github` that queries the `github_installations` table and returns the installation info. If no installation exists, returns `null`.
+
+### 2. Notification Settings Form (from Step 3)
+
+The `notification-settings.tsx` component from Step 3 is embedded directly into the settings page.
+
+### 3. `apps/dashboard/src/components/settings/vps-stats-panel.tsx`
+
+Displays VPS resource monitoring stats (from Step 6).
+
+**Data source:** `GET /api/settings/vps-stats` (implemented in Step 6).
+
+**Props (from SWR data):**
+```typescript
+interface VpsStats {
+  disk: { totalGb: number; usedGb: number; availableGb: number; usagePercent: number };
+  memory: { totalMb: number; usedMb: number; availableMb: number; usagePercent: number };
+  containers: { running: number; stopped: number; total: number };
+  ports: { allocated: number; productionUsed: number; previewUsed: number; available: number };
+}
+```
+
+**Display:**
+- **Disk usage:** Progress bar with percentage and absolute values (e.g., "42% (34 GB / 80 GB)")
+- **Memory usage:** Progress bar with percentage and absolute values
+- **Containers:** Running / stopped count
+- **Ports:** Allocated count with production/preview breakdown
+- **Color coding:** Progress bars turn yellow at 60%, red at 80% for disk; yellow at 70%, red at 90% for memory
+- **Auto-refresh:** Use SWR `refreshInterval: 30000` (every 30 seconds)
+
+### 4. Platform Info Footer
+
+At the bottom of the Platform Info section:
+- **Platform version:** The current commit SHA (from `process.env.VERCEL_GIT_COMMIT_SHA` or a build-time constant)
+- **Build date:** Timestamp of when the dashboard was built
+- **Uptime:** How long the platform has been running (from the health endpoint)
+
+---
+
+## API Routes Needed
+
+### `GET /api/settings/github`
+
+New route at `apps/dashboard/src/app/api/settings/github/route.ts`:
+
+```typescript
+export const GET = withAuth(async () => {
+  const installations = await db.select().from(githubInstallations).limit(1);
+  const installation = installations[0] ?? null;
+
+  let repoCount = 0;
+  if (installation) {
+    // Query GitHub API for installed repos count (optional, can be deferred)
+    // Or count projects in the database
+    const projects = await db.select({ count: sql`count(*)` }).from(projectsTable);
+    repoCount = Number(projects[0]?.count ?? 0);
+  }
+
+  return jsonResponse({
+    installation: installation ? {
+      id: installation.id,
+      accountLogin: installation.githubAccountLogin,
+      accountType: installation.githubAccountType,
+      createdAt: installation.createdAt.toISOString(),
+    } : null,
+    repoCount,
+  });
+});
+```
+
+---
+
+## Page Data Fetching Strategy
+
+The settings page fetches data from three endpoints:
+
+```typescript
+// In the page component:
+const { data: githubData } = useSWR("/api/settings/github");
+const { data: notificationData } = useSWR("/api/settings/notifications");
+const { data: vpsData } = useSWR("/api/settings/vps-stats", fetcher, {
+  refreshInterval: 30_000, // refresh every 30 seconds
+});
+```
+
+Each section independently fetches and displays its data. If one fetch fails, the other sections still render.
+
+---
+
+## Styling
+
+- **Page heading:** "Settings" with consistent styling from other dashboard pages
+- **Sections:** Each section has a heading (h2) and a card (bordered, rounded, shadow)
+- **Progress bars:** Tailwind CSS `bg-gray-200` track with colored fill (`bg-green-500` / `bg-yellow-500` / `bg-red-500`)
+- **Responsive:** Single-column layout on mobile, cards stack vertically
+- **Loading:** Each section shows a skeleton while its data loads
+- **Consistent with rest of dashboard:** Same fonts, colors, spacing as project pages
+
+---
+
+## Verification
+
+- [ ] Settings page replaces placeholder
+- [ ] Three sections visible: GitHub App, Notifications, Platform Info
+- [ ] GitHub App section shows connection status (connected/not connected)
+- [ ] GitHub App section shows account login and repo count
+- [ ] GitHub App section shows permissions list
+- [ ] "Manage on GitHub" link opens correct URL in new tab
+- [ ] Notification settings form loads and saves (from Step 3)
+- [ ] VPS stats display disk, memory, containers, ports
+- [ ] Progress bars color-coded by threshold
+- [ ] VPS stats auto-refresh every 30 seconds
+- [ ] Platform version/build info displayed
+- [ ] Each section loads independently (one failure doesn't break others)
+- [ ] Loading skeletons shown while data fetches
+- [ ] Responsive layout on mobile
+- [ ] Page accessible at `/settings` in the dashboard

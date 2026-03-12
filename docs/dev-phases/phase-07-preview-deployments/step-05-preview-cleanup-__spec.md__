@@ -1,0 +1,489 @@
+# Step 5: Preview Cleanup
+
+**Phase:** 7 -- Preview Deployments
+**Step:** 5 of 5
+**Status:** Not Started
+**Depends on:** Step 1 (webhook handler triggers cleanup on PR close), Step 2 (PreviewDeployer creates containers/ports/routes that need cleanup), Phase 5 (PortAllocator, CaddyClient)
+
+---
+
+## Goal
+
+Implement a `cleanupPreview()` function that fully tears down a preview deployment when its PR is closed or merged. This includes stopping the Docker container, releasing the allocated port, removing the Caddy reverse proxy route, deleting preview Docker images, and updating the deployment record to `archived`. The cleanup must be idempotent and resilient -- if any individual cleanup step fails, the remaining steps should still execute.
+
+---
+
+## Background
+
+### When Cleanup Is Triggered
+
+Cleanup is triggered by the `pull_request` webhook with `action: "closed"`. This covers both:
+- **Merged PRs**: `payload.pull_request.merged === true`
+- **Closed PRs** (without merge): `payload.pull_request.merged === false`
+
+Both cases require the same cleanup. The `handlePreviewCleanup()` function in Step 1 finds the active preview deployment for the PR and passes it to `cleanupPreview()`.
+
+### What Needs Cleanup
+
+A running preview deployment has four resources:
+
+| Resource | Created By | Cleanup Action |
+|----------|-----------|----------------|
+| Docker container | `docker run` in Step 2 | `docker stop` + `docker rm` |
+| Port allocation | `PortAllocator.allocate()` | `PortAllocator.release()` |
+| Caddy route | `CaddyClient.addRoute()` | `CaddyClient.removeRoute()` |
+| Docker image(s) | `docker build` in Step 2 | `docker rmi` for all `{slug}:pr-{N}-*` tags |
+
+Additionally, the deployment record status is updated from `ready` to `archived`.
+
+---
+
+## File: `packages/core/src/deploy/preview-cleanup.ts`
+
+### Interface
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+
+export interface PreviewCleanupOptions {
+  db: Database;
+  projectSlug: string;
+  prNumber: number;
+  deployment: {
+    id: string;
+    containerId: string | null;
+    port: number | null;
+    dockerImageTag: string | null;
+  };
+  domain?: string;
+}
+
+export async function cleanupPreview(options: PreviewCleanupOptions): Promise<void> {
+  // Full cleanup pipeline
+}
+```
+
+---
+
+## Implementation
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+import { eq, and, like } from "drizzle-orm";
+import { deployments } from "@gblockparty/shared/db";
+import { PortAllocator } from "./port-allocator";
+import { CaddyClient } from "../routing/caddy";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("preview-cleanup");
+
+export interface PreviewCleanupOptions {
+  db: Database;
+  projectSlug: string;
+  prNumber: number;
+  deployment: {
+    id: string;
+    containerId: string | null;
+    port: number | null;
+    dockerImageTag: string | null;
+  };
+  domain?: string;
+}
+
+export async function cleanupPreview(options: PreviewCleanupOptions): Promise<void> {
+  const { db, projectSlug, prNumber, deployment } = options;
+
+  logger.info(
+    {
+      deploymentId: deployment.id,
+      projectSlug,
+      prNumber,
+      containerId: deployment.containerId,
+      port: deployment.port,
+    },
+    "Starting preview cleanup",
+  );
+
+  const errors: Error[] = [];
+
+  // Step 1: Stop and remove Docker container
+  if (deployment.containerId) {
+    try {
+      await stopAndRemoveContainer(deployment.containerId);
+      logger.info({ containerId: deployment.containerId }, "Preview container stopped");
+    } catch (error) {
+      logger.error({ error, containerId: deployment.containerId }, "Failed to stop container");
+      errors.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  // Step 2: Release port allocation
+  if (deployment.port) {
+    try {
+      const portAllocator = new PortAllocator(db);
+      await portAllocator.release(deployment.port);
+      logger.info({ port: deployment.port }, "Preview port released");
+    } catch (error) {
+      logger.error({ error, port: deployment.port }, "Failed to release port");
+      errors.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  // Step 3: Remove Caddy route
+  try {
+    const domain = options.domain ?? process.env.PLATFORM_DOMAIN ?? "localhost";
+    const previewHostname = `pr-${prNumber}--${projectSlug}.${domain}`;
+    const caddy = new CaddyClient();
+    await caddy.removeRoute(previewHostname);
+    logger.info({ previewHostname }, "Caddy preview route removed");
+  } catch (error) {
+    logger.error({ error, prNumber, projectSlug }, "Failed to remove Caddy route");
+    errors.push(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  // Step 4: Delete preview Docker images for this PR
+  try {
+    await deletePreviewImages(projectSlug, prNumber);
+    logger.info({ projectSlug, prNumber }, "Preview Docker images deleted");
+  } catch (error) {
+    logger.error({ error, projectSlug, prNumber }, "Failed to delete preview images");
+    errors.push(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  // Step 5: Update deployment record to archived
+  try {
+    await db.update(deployments)
+      .set({ status: 'archived', updatedAt: new Date() })
+      .where(eq(deployments.id, deployment.id));
+    logger.info({ deploymentId: deployment.id }, "Deployment record archived");
+  } catch (error) {
+    logger.error({ error, deploymentId: deployment.id }, "Failed to archive deployment");
+    errors.push(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  // Log summary
+  if (errors.length > 0) {
+    logger.warn(
+      { errorCount: errors.length, deploymentId: deployment.id },
+      "Preview cleanup completed with errors",
+    );
+  } else {
+    logger.info(
+      { deploymentId: deployment.id, projectSlug, prNumber },
+      "Preview cleanup completed successfully",
+    );
+  }
+}
+```
+
+---
+
+## Cleanup Step Details
+
+### Step 5a: Stop and Remove Docker Container
+
+```typescript
+async function stopAndRemoveContainer(containerId: string): Promise<void> {
+  // Stop with 30-second graceful timeout (SIGTERM, then SIGKILL after 30s)
+  await dockerStop(containerId, { timeout: 30 });
+
+  // Remove the stopped container to free the container name
+  await dockerRemove(containerId);
+}
+```
+
+The container name (`{slug}-pr-{N}`) must be freed so a new preview can use it if the PR is reopened. The `docker rm` call after `docker stop` ensures the name is available.
+
+**Error cases:**
+- Container already stopped: `docker stop` may return an error. Catch and log.
+- Container does not exist: `docker stop` will fail. Catch and log.
+- Container in a crash loop: `docker stop` still works (sends SIGTERM/SIGKILL).
+
+### Step 5b: Release Port Allocation
+
+```typescript
+const portAllocator = new PortAllocator(db);
+await portAllocator.release(deployment.port);
+```
+
+`PortAllocator.release(port)` deletes the row from `port_allocations` where `port = ?`. If the port is already released (row does not exist), this is a no-op.
+
+### Step 5c: Remove Caddy Route
+
+```typescript
+const domain = options.domain ?? process.env.PLATFORM_DOMAIN ?? "localhost";
+const previewHostname = `pr-${prNumber}--${projectSlug}.${domain}`;
+const caddy = new CaddyClient();
+await caddy.removeRoute(previewHostname);
+```
+
+`CaddyClient.removeRoute(hostname)` calls the Caddy admin API to remove the reverse proxy route for the given hostname. After removal, requests to `pr-{N}--{slug}.domain` will receive a Caddy 404 or default response.
+
+**Error cases:**
+- Route does not exist: The Caddy admin API may return 404. Catch and log.
+- Caddy admin API unreachable: Log error but continue with remaining cleanup steps.
+
+### Step 5d: Delete Preview Docker Images
+
+Preview images are not counted toward the 10-image per project retention limit (from the spec, section 6: "Preview images deleted after PR is closed (not counted toward the 10-image retention limit)").
+
+```typescript
+async function deletePreviewImages(
+  projectSlug: string,
+  prNumber: number,
+): Promise<void> {
+  // List all images matching the preview tag pattern
+  // Pattern: {slug}:pr-{N}-*
+  const tagPrefix = `${projectSlug}:pr-${prNumber}-`;
+
+  const images = await dockerListImages({
+    filter: { reference: `${projectSlug}:pr-${prNumber}-*` },
+  });
+
+  for (const image of images) {
+    for (const tag of image.RepoTags ?? []) {
+      if (tag.startsWith(tagPrefix)) {
+        try {
+          await dockerRmi(tag);
+          logger.info({ imageTag: tag }, "Preview image deleted");
+        } catch (error) {
+          // Image may be in use by another container (unlikely but possible)
+          logger.warn({ error, imageTag: tag }, "Failed to delete preview image");
+        }
+      }
+    }
+  }
+}
+```
+
+This deletes all images tagged with `{slug}:pr-{N}-{sha}` for the given PR number. Multiple images may exist if the PR had multiple commits (each commit creates a new image).
+
+**Docker CLI equivalent:**
+```bash
+docker images --filter reference='{slug}:pr-{N}-*' --format '{{.Repository}}:{{.Tag}}' | xargs -r docker rmi
+```
+
+### Step 5e: Archive Deployment Record
+
+```typescript
+await db.update(deployments)
+  .set({ status: 'archived', updatedAt: new Date() })
+  .where(eq(deployments.id, deployment.id));
+```
+
+The `archived` status indicates the deployment was intentionally stopped (as opposed to `failed` which indicates an error). Archived deployments are kept in the database for history but are not shown as active.
+
+---
+
+## Cleanup for Multiple Deployments per PR
+
+If a PR had multiple commits, there may be multiple deployment records (one per `synchronize` event). The cleanup function is called for the most recent `ready` deployment. However, there may be older `failed` or `archived` records for the same PR.
+
+The older deployments should already have their containers stopped and ports released (Step 2d stops the previous preview before starting a new one). The cleanup step only needs to handle the most recent active deployment.
+
+To be safe, the `handlePreviewCleanup` function (from Step 1) can also clean up any lingering deployments:
+
+```typescript
+// Find ALL non-archived preview deployments for this PR
+const allPreviews = await db.select().from(deployments)
+  .where(
+    and(
+      eq(deployments.projectId, project.id),
+      eq(deployments.type, 'preview'),
+      eq(deployments.prNumber, prNumber),
+      not(eq(deployments.status, 'archived')),
+    )
+  );
+
+for (const preview of allPreviews) {
+  await cleanupPreview({
+    db,
+    projectSlug: project.slug,
+    prNumber,
+    deployment: {
+      id: preview.id,
+      containerId: preview.containerId,
+      port: preview.port,
+      dockerImageTag: preview.dockerImageTag,
+    },
+  });
+}
+```
+
+---
+
+## Idempotency
+
+The cleanup function must be safe to call multiple times for the same deployment:
+
+| Resource | First Call | Second Call |
+|----------|-----------|-------------|
+| Container stop | Stops the container | Container already gone -- error caught, logged |
+| Container remove | Removes the container | Container already removed -- error caught, logged |
+| Port release | Deletes allocation row | Row already deleted -- no-op |
+| Caddy route | Removes route | Route already gone -- error caught, logged |
+| Image deletion | Deletes image(s) | Images already deleted -- no matching images |
+| DB status update | Sets `archived` | Already `archived` -- no-op (update is idempotent) |
+
+---
+
+## Exports
+
+The new file should export `cleanupPreview` and `PreviewCleanupOptions`:
+
+```typescript
+// packages/core/src/deploy/preview-cleanup.ts
+export { cleanupPreview, type PreviewCleanupOptions };
+```
+
+Update `packages/core/src/deploy/index.ts` to re-export:
+
+```typescript
+export { cleanupPreview, type PreviewCleanupOptions } from "./preview-cleanup";
+```
+
+---
+
+## Verification Checklist
+
+- [ ] `cleanupPreview()` function created at `packages/core/src/deploy/preview-cleanup.ts`
+- [ ] Container is stopped with 30-second graceful timeout
+- [ ] Container is removed after stopping (frees container name)
+- [ ] Port is released via `PortAllocator.release()`
+- [ ] Caddy route is removed for `pr-{N}--{slug}.{domain}`
+- [ ] All preview Docker images for the PR are deleted (`{slug}:pr-{N}-*`)
+- [ ] Deployment record status set to `archived`
+- [ ] Each cleanup step is wrapped in try/catch (best-effort)
+- [ ] Remaining steps execute even if one step fails
+- [ ] Function is idempotent (safe to call multiple times)
+- [ ] Handles missing resources gracefully (container already stopped, port already released, etc.)
+- [ ] Logging at info level for each successful cleanup step
+- [ ] Logging at error level for each failed cleanup step
+- [ ] Summary log at end indicates success or partial failure
+
+---
+
+## Testing
+
+### Unit Tests
+
+```typescript
+describe("cleanupPreview", () => {
+  it("calls all cleanup steps in order", async () => {
+    const mockDockerStop = vi.fn().mockResolvedValue(undefined);
+    const mockDockerRemove = vi.fn().mockResolvedValue(undefined);
+    const mockPortRelease = vi.fn().mockResolvedValue(undefined);
+    const mockCaddyRemoveRoute = vi.fn().mockResolvedValue(undefined);
+    const mockDockerRmi = vi.fn().mockResolvedValue(undefined);
+    const mockDbUpdate = vi.fn().mockResolvedValue(undefined);
+
+    // ... inject mocks ...
+
+    await cleanupPreview({
+      db: mockDb,
+      projectSlug: "myapp",
+      prNumber: 42,
+      deployment: {
+        id: "deploy-id",
+        containerId: "container-abc123",
+        port: 4001,
+        dockerImageTag: "myapp:pr-42-a1b2c3d",
+      },
+    });
+
+    expect(mockDockerStop).toHaveBeenCalledWith("container-abc123", { timeout: 30 });
+    expect(mockDockerRemove).toHaveBeenCalledWith("container-abc123");
+    expect(mockPortRelease).toHaveBeenCalledWith(4001);
+    expect(mockCaddyRemoveRoute).toHaveBeenCalledWith("pr-42--myapp.localhost");
+    expect(mockDbUpdate).toHaveBeenCalled();
+  });
+
+  it("continues cleanup if container stop fails", async () => {
+    const mockDockerStop = vi.fn().mockRejectedValue(new Error("Container not found"));
+    const mockPortRelease = vi.fn().mockResolvedValue(undefined);
+    const mockCaddyRemoveRoute = vi.fn().mockResolvedValue(undefined);
+
+    await cleanupPreview({ /* ... options with mocks ... */ });
+
+    // Port release and Caddy route removal should still be called
+    expect(mockPortRelease).toHaveBeenCalled();
+    expect(mockCaddyRemoveRoute).toHaveBeenCalled();
+  });
+
+  it("continues cleanup if port release fails", async () => {
+    const mockDockerStop = vi.fn().mockResolvedValue(undefined);
+    const mockPortRelease = vi.fn().mockRejectedValue(new Error("DB error"));
+    const mockCaddyRemoveRoute = vi.fn().mockResolvedValue(undefined);
+
+    await cleanupPreview({ /* ... options with mocks ... */ });
+
+    // Caddy route removal should still be called
+    expect(mockCaddyRemoveRoute).toHaveBeenCalled();
+  });
+
+  it("handles null containerId gracefully", async () => {
+    const mockDockerStop = vi.fn();
+
+    await cleanupPreview({
+      db: mockDb,
+      projectSlug: "myapp",
+      prNumber: 42,
+      deployment: {
+        id: "deploy-id",
+        containerId: null,   // No container to stop
+        port: 4001,
+        dockerImageTag: null,
+      },
+    });
+
+    expect(mockDockerStop).not.toHaveBeenCalled();
+  });
+
+  it("handles null port gracefully", async () => {
+    const mockPortRelease = vi.fn();
+
+    await cleanupPreview({
+      db: mockDb,
+      projectSlug: "myapp",
+      prNumber: 42,
+      deployment: {
+        id: "deploy-id",
+        containerId: "container-id",
+        port: null,   // No port to release
+        dockerImageTag: null,
+      },
+    });
+
+    expect(mockPortRelease).not.toHaveBeenCalled();
+  });
+});
+```
+
+### Integration Tests
+
+- Trigger cleanup for a running preview: verify container stops, port is freed, route is removed
+- Trigger cleanup twice for the same preview: verify second call completes without errors
+- Trigger cleanup for a preview that was already partially cleaned up (container stopped, port still allocated)
+
+### Manual Verification
+
+1. Open a PR, wait for preview deployment
+2. Verify preview is accessible at `pr-{N}--{slug}.yourdomain.dev`
+3. Close the PR
+4. Verify:
+   - `docker ps` no longer shows the preview container
+   - `curl https://pr-{N}--{slug}.yourdomain.dev` returns 502 or no route
+   - Database shows deployment status as `archived`
+   - `docker images | grep pr-{N}` returns no results
+5. Reopen the PR (optional): verify a new preview can be created
+
+---
+
+## Output
+
+After this step:
+- Preview deployments are fully cleaned up when PRs are closed or merged
+- No orphaned containers, ports, or Caddy routes after cleanup
+- Preview Docker images are deleted and do not count toward retention limits
+- Cleanup is resilient -- individual step failures do not prevent remaining cleanup
+- The full Phase 7 preview deployment lifecycle is complete: create -> update -> cleanup

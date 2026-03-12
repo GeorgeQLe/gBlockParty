@@ -1,0 +1,384 @@
+# Step 5: Env Pull/Push Commands
+
+**Phase:** 9 -- CLI Tool
+**Step:** 5 of 7
+**Status:** Not Started
+**Depends on:** Step 1 (CLI API routes for env), Step 2 (Login), Step 3 (Link)
+**Depends on this step:** None (independent of Steps 6-7)
+
+---
+
+## Goal
+
+Implement `gblockparty env pull` and `gblockparty env push` so the user can download environment variables to `.env.local` and upload them from `.env.local` to the platform. Both commands support scope selection (production/preview) and handle secrets safely.
+
+---
+
+## Background
+
+Environment variables are stored in the platform's PostgreSQL database in the `env_vars` table, scoped per project and per environment (production or preview). The CLI provides a convenient way to synchronize these variables with a local `.env.local` file.
+
+Key safety rules:
+- Secret values (where `is_secret=true`) are **never** returned by the API in cleartext. The API returns `***` for secret values.
+- `env pull` writes only non-secret values to `.env.local`. Secret placeholders are included as comments.
+- `env push` reads `.env.local` and upserts all key-value pairs to the platform. It does **not** mark pushed vars as secrets (that is done via the dashboard).
+
+---
+
+## File to Modify
+
+### `packages/cli/src/commands/env.ts`
+
+**Current state:** Pull and push subcommands print "not yet implemented".
+
+**Target implementation:**
+
+```typescript
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import inquirer from "inquirer";
+import { ApiClient } from "../lib/api-client";
+import { getGlobalConfig, getProjectConfig } from "../lib/config";
+
+interface EnvVar {
+  key: string;
+  value: string;
+  isSecret: boolean;
+}
+
+interface EnvPullResponse {
+  projectId: string;
+  scope: string;
+  vars: EnvVar[];
+}
+
+interface EnvPushResponse {
+  projectId: string;
+  scope: string;
+  updated: number;
+}
+
+export const envCommand = new Command("env")
+  .description("Manage environment variables");
+
+// --- env pull ---
+
+envCommand
+  .command("pull")
+  .description("Download env vars to .env.local")
+  .option("-s, --scope <scope>", "Environment scope (production or preview)", "production")
+  .option("-y, --yes", "Skip overwrite confirmation")
+  .action(async (options: { scope: string; yes?: boolean }) => {
+    // Auth check
+    const config = getGlobalConfig();
+    if (!config.token) {
+      console.error(chalk.red("Not authenticated. Run `gblockparty login` first."));
+      process.exit(1);
+    }
+
+    // Project check
+    const projectConfig = getProjectConfig();
+    if (!projectConfig) {
+      console.error(chalk.red("No project linked. Run `gblockparty link` first."));
+      process.exit(1);
+    }
+
+    // Validate scope
+    if (options.scope !== "production" && options.scope !== "preview") {
+      console.error(chalk.red('Scope must be "production" or "preview".'));
+      process.exit(1);
+    }
+
+    // Check for existing .env.local
+    if (!options.yes && existsSync(".env.local")) {
+      const { confirm } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "confirm",
+          message: ".env.local already exists. Overwrite?",
+          default: false,
+        },
+      ]);
+      if (!confirm) {
+        console.log(chalk.dim("Cancelled."));
+        process.exit(0);
+      }
+    }
+
+    // Fetch env vars
+    const spinner = ora(`Pulling ${options.scope} env vars...`).start();
+    const client = new ApiClient();
+
+    try {
+      const response = await client.get<EnvPullResponse>(
+        `/api/cli/env/${projectConfig.projectId}?scope=${options.scope}`
+      );
+
+      // Build .env.local content
+      const lines: string[] = [];
+      lines.push(`# gBlockParty env vars (${options.scope})`);
+      lines.push(`# Pulled at ${new Date().toISOString()}`);
+      lines.push("");
+
+      let nonSecretCount = 0;
+      let secretCount = 0;
+
+      for (const v of response.vars) {
+        if (v.isSecret) {
+          lines.push(`# ${v.key}=*** (secret -- set via dashboard)`);
+          secretCount++;
+        } else {
+          lines.push(`${v.key}=${v.value}`);
+          nonSecretCount++;
+        }
+      }
+
+      lines.push("");
+
+      writeFileSync(".env.local", lines.join("\n"));
+
+      spinner.succeed(
+        chalk.green(
+          `Wrote ${nonSecretCount} variable${nonSecretCount !== 1 ? "s" : ""} to .env.local`
+        )
+      );
+
+      if (secretCount > 0) {
+        console.log(
+          chalk.yellow(
+            `  ${secretCount} secret${secretCount !== 1 ? "s" : ""} omitted (set via dashboard)`
+          )
+        );
+      }
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to pull env vars"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    }
+  });
+
+// --- env push ---
+
+envCommand
+  .command("push")
+  .description("Upload env vars from .env.local")
+  .option("-s, --scope <scope>", "Environment scope (production or preview)", "production")
+  .action(async (options: { scope: string }) => {
+    // Auth check
+    const config = getGlobalConfig();
+    if (!config.token) {
+      console.error(chalk.red("Not authenticated. Run `gblockparty login` first."));
+      process.exit(1);
+    }
+
+    // Project check
+    const projectConfig = getProjectConfig();
+    if (!projectConfig) {
+      console.error(chalk.red("No project linked. Run `gblockparty link` first."));
+      process.exit(1);
+    }
+
+    // Validate scope
+    if (options.scope !== "production" && options.scope !== "preview") {
+      console.error(chalk.red('Scope must be "production" or "preview".'));
+      process.exit(1);
+    }
+
+    // Read .env.local
+    if (!existsSync(".env.local")) {
+      console.error(chalk.red("No .env.local file found in the current directory."));
+      process.exit(1);
+    }
+
+    const fileContent = readFileSync(".env.local", "utf-8");
+    const vars = parseEnvFile(fileContent);
+
+    if (vars.length === 0) {
+      console.log(chalk.yellow("No variables found in .env.local."));
+      process.exit(0);
+    }
+
+    // Show preview
+    console.log(chalk.dim(`Pushing ${vars.length} variable(s) to ${options.scope}:\n`));
+    for (const v of vars) {
+      const maskedValue = maskValue(v.value);
+      console.log(chalk.dim(`  ${v.key}=${maskedValue}`));
+    }
+    console.log("");
+
+    // Push to API
+    const spinner = ora(`Pushing to ${options.scope}...`).start();
+    const client = new ApiClient();
+
+    try {
+      const response = await client.post<EnvPushResponse>(
+        `/api/cli/env/${projectConfig.projectId}`,
+        {
+          scope: options.scope,
+          vars: vars.map((v) => ({ key: v.key, value: v.value })),
+        }
+      );
+
+      spinner.succeed(
+        chalk.green(
+          `Updated ${response.updated} variable${response.updated !== 1 ? "s" : ""} in ${options.scope}`
+        )
+      );
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to push env vars"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    }
+  });
+
+function parseEnvFile(content: string): Array<{ key: string; value: string }> {
+  const vars: Array<{ key: string; value: string }> = [];
+
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+
+    // Skip empty lines and comments
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+
+    const key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+
+    // Remove surrounding quotes
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (key) {
+      vars.push({ key, value });
+    }
+  }
+
+  return vars;
+}
+
+function maskValue(value: string): string {
+  if (value.length <= 3) return "***";
+  return value.slice(0, 3) + "***";
+}
+```
+
+---
+
+## `.env.local` File Format
+
+### Output format (from `env pull`):
+
+```env
+# gBlockParty env vars (production)
+# Pulled at 2026-03-02T12:00:00.000Z
+
+DATABASE_URL=postgresql://user:pass@host:5432/db
+NEXT_PUBLIC_API_URL=https://api.example.com
+# STRIPE_SECRET_KEY=*** (secret -- set via dashboard)
+# AWS_SECRET_ACCESS_KEY=*** (secret -- set via dashboard)
+
+```
+
+### Input format (for `env push`):
+
+Standard `.env` file format:
+- Lines with `KEY=VALUE` pairs
+- Lines starting with `#` are comments (ignored)
+- Empty lines are ignored
+- Values can optionally be quoted with `"` or `'`
+- No multi-line value support (keep it simple)
+
+---
+
+## Secret Handling
+
+**Pull behavior:**
+- The API returns `"***"` for any env var where `is_secret=true`
+- The CLI writes these as comments: `# SECRET_KEY=*** (secret -- set via dashboard)`
+- This makes it clear the value is not available locally and must be managed via the dashboard
+- The count of omitted secrets is printed after the pull
+
+**Push behavior:**
+- All key-value pairs in `.env.local` are pushed as non-secret vars
+- The push does **not** change the `is_secret` flag on existing vars
+- If a pushed var already exists as a secret in the database, the upsert will update its value but the `is_secret` flag is preserved (the `ON CONFLICT DO UPDATE` only sets `value` and `updatedAt`)
+- To mark a variable as a secret, use the dashboard UI
+
+---
+
+## Value Masking in Terminal Output
+
+During `env push`, values are masked in the terminal preview to avoid leaking sensitive data in terminal scrollback:
+
+```
+Pushing 3 variable(s) to production:
+
+  DATABASE_URL=pos***
+  NEXT_PUBLIC_API_URL=htt***
+  API_KEY=sk-***
+```
+
+Values of 3 characters or fewer are shown as `***` entirely.
+
+---
+
+## Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Not authenticated | Print auth error, exit with code 1 |
+| Not linked to project | Print link error, exit with code 1 |
+| `.env.local` does not exist (push) | Print error "No .env.local file found", exit with code 1 |
+| `.env.local` already exists (pull) | Prompt for overwrite confirmation (skip with `-y`) |
+| `.env.local` is empty (push) | Print "No variables found", exit with code 0 |
+| Invalid scope | Print scope validation error, exit with code 1 |
+| API returns 404 | Print "Project not found", exit with code 1 |
+| All vars are secrets (pull) | Write only the header comments, print warning about secrets |
+| Malformed lines in `.env.local` | Skip lines without `=` separator, skip comment and empty lines |
+
+---
+
+## Verification Checklist
+
+### Env Pull
+
+- [ ] `gblockparty env pull` downloads vars and writes to `.env.local`
+- [ ] Default scope is `production`
+- [ ] `-s preview` fetches preview scope vars
+- [ ] Secret values are written as comments (`# KEY=*** (secret -- set via dashboard)`)
+- [ ] Non-secret values are written as `KEY=VALUE` pairs
+- [ ] File includes header comment with scope and timestamp
+- [ ] Overwrite confirmation is shown when `.env.local` exists
+- [ ] `-y` flag skips overwrite confirmation
+- [ ] Success message shows count of written variables
+- [ ] Secret omission count is shown as a warning
+
+### Env Push
+
+- [ ] `gblockparty env push` reads `.env.local` and uploads vars
+- [ ] Default scope is `production`
+- [ ] `-s preview` pushes to preview scope
+- [ ] Comment lines and empty lines are skipped during parsing
+- [ ] Quoted values (`"value"` or `'value'`) have quotes stripped
+- [ ] Preview shows masked values before pushing
+- [ ] Success message shows count of upserted variables
+- [ ] Missing `.env.local` results in an error message
+- [ ] Empty `.env.local` results in a "no variables" message
+
+### General
+
+- [ ] Auth and project link guards work for both subcommands
+- [ ] Invalid scope values are rejected
+- [ ] `pnpm typecheck` passes

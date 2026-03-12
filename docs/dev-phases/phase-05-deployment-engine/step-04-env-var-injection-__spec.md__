@@ -1,0 +1,339 @@
+# Step 4: Environment Variable Injection
+
+**Phase:** 5 -- Deployment Engine
+**Step:** 4 of 5
+**Status:** Not Started
+**Depends on:** Phase 2 (Database) -- `env_vars` table must exist; `encrypt()`/`decrypt()` in `packages/shared/src/backend/encryption.ts` must be working
+**Blocks:** Step 5 (Deployer Orchestration) -- `Deployer.deploy()` calls env var functions before starting the container
+
+---
+
+## Goal
+
+Implement the environment variable injection pipeline: retrieve env vars from the database for a given project and scope, decrypt secret values, write them to a temporary `.env` file, pass the file to `docker run --env-file`, and delete the file after the container starts. Handle `NEXT_PUBLIC_*` variables for build-time injection.
+
+---
+
+## Context
+
+Each project has environment variables scoped to `production` or `preview`. The variables are stored in the `env_vars` table in the platform database. Variables marked with `is_secret = true` have their `value` column encrypted with AES-256-GCM (implemented in `packages/shared/src/backend/encryption.ts`).
+
+### Env Var Table Schema
+
+```typescript
+// packages/shared/src/db/schema.ts
+export const envVars = pgTable(
+  "env_vars",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }).notNull(),
+    scope: text("scope").notNull(),      // "production" | "preview"
+    key: text("key").notNull(),          // e.g., "DATABASE_URL"
+    value: text("value").notNull(),      // plaintext or encrypted (if is_secret)
+    isSecret: boolean("is_secret").default(false).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("idx_env_vars_project_scope").on(table.projectId, table.scope),
+    unique("env_vars_project_scope_key").on(table.projectId, table.scope, table.key),
+  ],
+);
+```
+
+### Encryption Module
+
+```typescript
+// packages/shared/src/backend/encryption.ts
+export function encrypt(plaintext: string): string;  // Returns "iv:tag:ciphertext"
+export function decrypt(ciphertext: string): string;  // Decrypts "iv:tag:ciphertext"
+```
+
+The encryption key is stored in the `ENCRYPTION_KEY` environment variable (hex-encoded 32-byte key, sourced from AWS Secrets Manager).
+
+---
+
+## File
+
+There is no existing file for this module. The env var injection logic should be implemented as a new file in the deploy module:
+
+**`packages/core/src/deploy/env.ts`**
+
+This module is called by `Deployer.deploy()` (Step 5) and does not exist as a stub yet.
+
+---
+
+## Implementation Requirements
+
+### Module: `packages/core/src/deploy/env.ts`
+
+#### Exports
+
+```typescript
+export async function getEnvVars(
+  db: Database,
+  projectId: string,
+  scope: "production" | "preview",
+): Promise<Record<string, string>>;
+
+export async function writeEnvFile(
+  envVars: Record<string, string>,
+  deploymentId: string,
+): Promise<string>; // returns file path
+
+export async function cleanupEnvFile(filePath: string): Promise<void>;
+
+export function getBuildTimeVars(
+  envVars: Record<string, string>,
+): Record<string, string>;
+```
+
+### `getEnvVars(db, projectId, scope)`
+
+1. Query the `env_vars` table for all variables matching the `projectId` and `scope`:
+   ```typescript
+   const rows = await db.select()
+     .from(envVars)
+     .where(and(
+       eq(envVars.projectId, projectId),
+       eq(envVars.scope, scope),
+     ));
+   ```
+
+2. For each row, check `isSecret`:
+   - If `isSecret === true`, decrypt the value: `decrypt(row.value)`
+   - If `isSecret === false`, use the value as-is
+
+3. Build and return a `Record<string, string>` mapping `key -> value`:
+   ```typescript
+   const result: Record<string, string> = {};
+   for (const row of rows) {
+     result[row.key] = row.isSecret ? decrypt(row.value) : row.value;
+   }
+   return result;
+   ```
+
+4. If no env vars exist for the project/scope, return an empty object `{}`.
+
+### `writeEnvFile(envVars, deploymentId)`
+
+1. If the env vars object is empty (no keys), return an empty string `""` to signal no file was written.
+
+2. Build the `.env` file content in `KEY=VALUE` format:
+   ```typescript
+   const lines = Object.entries(envVars).map(([key, value]) => {
+     // Escape double quotes and wrap values with special characters in quotes
+     const escapedValue = value.includes("\n") || value.includes(" ") || value.includes('"')
+       ? `"${value.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`
+       : value;
+     return `${key}=${escapedValue}`;
+   });
+   const content = lines.join("\n") + "\n";
+   ```
+
+3. Write to a temporary file with a unique name:
+   ```typescript
+   import { writeFile, mkdir } from "node:fs/promises";
+   import { join } from "node:path";
+
+   const tmpDir = join(process.cwd(), ".tmp", "env");
+   await mkdir(tmpDir, { recursive: true });
+
+   const filePath = join(tmpDir, `.env.${deploymentId}`);
+   await writeFile(filePath, content, { mode: 0o600 }); // Owner read/write only
+   ```
+
+4. The file is stored at `.tmp/env/.env.{deploymentId}` with restrictive permissions (`0o600`).
+
+5. Return the file path.
+
+### `cleanupEnvFile(filePath)`
+
+1. Delete the temporary `.env` file:
+   ```typescript
+   import { unlink } from "node:fs/promises";
+
+   try {
+     if (filePath) {
+       await unlink(filePath);
+       logger.debug({ filePath }, "Env file cleaned up");
+     }
+   } catch (error) {
+     // File might already be deleted or never created -- log but don't throw
+     logger.warn({ filePath, error: (error as Error).message }, "Failed to cleanup env file");
+   }
+   ```
+
+2. This function must never throw. If the file does not exist or cannot be deleted, log a warning and continue.
+
+3. This function is always called in a `finally` block by the Deployer, so it runs even when the deploy fails.
+
+### `getBuildTimeVars(envVars)`
+
+1. Filter the env vars to only those prefixed with `NEXT_PUBLIC_`:
+   ```typescript
+   const buildVars: Record<string, string> = {};
+   for (const [key, value] of Object.entries(envVars)) {
+     if (key.startsWith("NEXT_PUBLIC_")) {
+       buildVars[key] = value;
+     }
+   }
+   return buildVars;
+   ```
+
+2. These variables are needed at Docker build time (passed as `--build-arg` to `docker build`). Phase 4 uses this function during the build step.
+
+3. If no `NEXT_PUBLIC_*` variables exist, return an empty object.
+
+---
+
+## Integration with Deployer
+
+The env var functions are called by `Deployer.deploy()` in Step 5:
+
+```typescript
+// Inside Deployer.deploy()
+const envVars = await getEnvVars(this.db, projectId, scope);
+const envFilePath = await writeEnvFile(envVars, deploymentId);
+
+try {
+  // Pass envFilePath to docker run
+  const containerId = await runContainer(
+    docker, imageTag, containerName, port,
+    envFilePath ? { envFile: envFilePath } : {},
+  );
+
+  // ... health check, Caddy, etc.
+} finally {
+  await cleanupEnvFile(envFilePath);
+}
+```
+
+---
+
+## Integration with `runContainer()`
+
+The `runContainer()` function in `packages/core/src/providers/docker/client.ts` currently accepts `envVars: Record<string, string>`. Two approaches for env file injection:
+
+**Option A: Pass env file path to runContainer** (preferred)
+- Modify `runContainer()` signature to accept an optional `envFilePath` parameter
+- Use Docker's `HostConfig.Binds` to mount the env file, or use Dockerode's `Env` option with the resolved key-value pairs
+- Simpler: just pass the resolved `Record<string, string>` directly as `Env` to Dockerode
+
+**Option B: Use docker run --env-file semantics via Dockerode**
+- Dockerode does not natively support `--env-file`, but it accepts `Env: ["KEY=VALUE", ...]`
+- Convert the `Record<string, string>` to `string[]` format: `Object.entries(envVars).map(([k,v]) => \`${k}=${v}\`)`
+
+The recommended approach is **Option A with direct Env array**: read the env vars into memory, pass them as `Env` to Dockerode's `createContainer()`, and still write the temp file as a backup/audit trail that gets cleaned up. The actual injection is in-memory via the Docker API.
+
+```typescript
+// In runContainer() -- packages/core/src/providers/docker/client.ts
+const container = await docker.createContainer({
+  Image: image,
+  name: name,
+  Env: Object.entries(envVars).map(([k, v]) => `${k}=${v}`),
+  ExposedPorts: { "3000/tcp": {} },
+  HostConfig: {
+    PortBindings: {
+      "3000/tcp": [{ HostPort: String(port) }],
+    },
+    RestartPolicy: { Name: "on-failure", MaximumRetryCount: 3 },
+  },
+});
+```
+
+---
+
+## Secret Handling
+
+### Security Requirements
+
+1. **Never log secret values.** Log keys only:
+   ```
+   logger.info({ keys: Object.keys(envVars), count: Object.keys(envVars).length }, "Env vars retrieved")
+   ```
+
+2. **Temp file permissions.** The `.env` file is created with `0o600` (owner read/write only).
+
+3. **Temp file lifetime.** The file exists only between writing and container start. It is deleted in a `finally` block.
+
+4. **Memory-only preferred.** The env vars are passed to Docker via the `Env` array in the container config. The temp file is a safety net -- if the in-memory approach works, the file write can be skipped.
+
+5. **Decryption errors.** If `decrypt()` throws (corrupted ciphertext, wrong key), the error propagates to the Deployer, which marks the deployment as failed.
+
+---
+
+## `NEXT_PUBLIC_*` Variables
+
+Next.js inlines `NEXT_PUBLIC_*` variables at build time. They must be available as `--build-arg` during `docker build`, not just at runtime. The `getBuildTimeVars()` function extracts these.
+
+The build system (Phase 4) calls `getBuildTimeVars()` and passes them to `buildImage()`:
+
+```typescript
+// Phase 4 build pipeline (for reference)
+const envVars = await getEnvVars(db, projectId, scope);
+const buildArgs = getBuildTimeVars(envVars);
+await buildImage(docker, contextPath, tag, dockerfile, buildArgs);
+```
+
+At runtime, `NEXT_PUBLIC_*` vars are also included in the container env (they are just regular env vars at that point, but Next.js has already inlined them during the build).
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| No env vars for project/scope | Return empty object, skip file write |
+| Decryption fails (bad key, corrupted value) | Error propagates to Deployer, deployment fails |
+| File write fails (disk full, permissions) | Error propagates to Deployer, deployment fails |
+| File cleanup fails (file not found) | Log warning, do not throw |
+| Empty value for a key | Write `KEY=` (empty value is valid) |
+| Value contains newlines | Escape newlines, wrap in quotes |
+| Value contains special characters | Wrap in quotes, escape inner quotes |
+
+---
+
+## Logging
+
+| Level | Event | Fields |
+|-------|-------|--------|
+| `info` | Env vars retrieved | `projectId`, `scope`, `count`, `secretCount` |
+| `debug` | Env file written | `filePath`, `deploymentId`, `varCount` |
+| `debug` | Env file cleaned up | `filePath` |
+| `warn` | Env file cleanup failed | `filePath`, `error` |
+| `info` | Build-time vars extracted | `count`, `keys` |
+
+Never log secret values. Only log keys and counts.
+
+---
+
+## Acceptance Criteria
+
+1. `getEnvVars()` returns all env vars for a project/scope with secrets decrypted.
+2. `getEnvVars()` returns an empty object when no env vars exist.
+3. `writeEnvFile()` creates a temp file at `.tmp/env/.env.{deploymentId}` with `KEY=VALUE` format.
+4. `writeEnvFile()` returns empty string when env vars object is empty (no file created).
+5. The temp file has restrictive permissions (`0o600`).
+6. `cleanupEnvFile()` deletes the temp file.
+7. `cleanupEnvFile()` does not throw if the file does not exist.
+8. `getBuildTimeVars()` returns only `NEXT_PUBLIC_*` variables.
+9. Secret values are never logged.
+10. Values with special characters (newlines, spaces, quotes) are properly escaped in the env file.
+11. `pnpm typecheck` passes with no errors.
+12. The `packages/core/src/deploy/index.ts` barrel file exports the new env functions.
+
+---
+
+## Testing Approach
+
+1. **getEnvVars with mixed secrets**: Insert rows with `isSecret: true/false`, verify secrets are decrypted.
+2. **getEnvVars empty**: Query project with no env vars, verify empty object.
+3. **writeEnvFile**: Write env vars, read file back, verify content matches.
+4. **writeEnvFile empty**: Pass empty object, verify no file created (returns "").
+5. **writeEnvFile special chars**: Values with newlines, quotes, spaces -- verify proper escaping.
+6. **cleanupEnvFile**: Write file, cleanup, verify file deleted.
+7. **cleanupEnvFile missing file**: Call with non-existent path, verify no error.
+8. **getBuildTimeVars**: Mix of NEXT_PUBLIC_ and regular vars, verify only NEXT_PUBLIC_ returned.
+9. **getBuildTimeVars none**: No NEXT_PUBLIC_ vars, verify empty object.
+10. **File permissions**: Verify temp file has 0o600 permissions.

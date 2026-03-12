@@ -1,0 +1,527 @@
+# Step 5: Build Logging & S3 Storage
+
+**Phase:** 4 -- Build System
+**Step:** 5 of 5
+**Type:** Code implementation
+**Depends on:** Step 4 (BuildRunner generates the logs that this step captures and stores), Phase 1 (S3 bucket for log storage)
+**Blocks:** Phase 8 (Log streaming over WebSocket extends this step's subscriber pattern)
+
+---
+
+## Objective
+
+Implement real-time build log capture, secret scrubbing, subscriber-based streaming, and S3 storage for completed build logs. Every build produces a log file that captures all stdout and stderr output from git, package manager, build tools, and Docker. The logs are scrubbed of secrets before being stored or streamed.
+
+---
+
+## Current State
+
+The build log infrastructure needs to be built from scratch. The relevant integration points are:
+
+1. **`packages/core/src/build/builder.ts`** -- The `BuildRunner` class executes shell commands that produce stdout/stderr output. This step adds an `onLog` callback and a `BuildLogger` to capture that output.
+
+2. **`packages/core/src/build/cache.ts`** -- The S3 upload/download functions need implementation for both build cache (tarballs) and build logs (text files).
+
+3. **`packages/shared/src/backend/aws/s3.ts`** -- Already fully implemented. `uploadToS3()` and `downloadFromS3()` are ready to use.
+
+---
+
+## Implementation Plan
+
+### BuildLogger Class
+
+Create a `BuildLogger` class that handles log accumulation, secret scrubbing, subscriber notification, and S3 upload. This can be defined at the top of `builder.ts` or in a new file if it grows large enough.
+
+```typescript
+// packages/core/src/build/builder.ts (or packages/core/src/build/build-logger.ts)
+
+export class BuildLogger {
+  private lines: string[] = [];
+  private subscribers: Set<(line: string) => void> = new Set();
+  private secretPatterns: RegExp[] = [];
+
+  constructor(private deploymentId: string) {}
+
+  /**
+   * Add secret values that must be scrubbed from all log output.
+   * Call this before the build starts with known secrets.
+   */
+  addSecrets(secrets: string[]): void {
+    for (const secret of secrets) {
+      if (secret && secret.length > 3) {
+        // Escape regex special characters in the secret value
+        const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        this.secretPatterns.push(new RegExp(escaped, "g"));
+      }
+    }
+  }
+
+  /**
+   * Subscribe to real-time log output.
+   * Returns an unsubscribe function.
+   */
+  subscribe(callback: (line: string) => void): () => void {
+    this.subscribers.add(callback);
+    return () => this.subscribers.delete(callback);
+  }
+
+  /**
+   * Log a line. Scrubs secrets, stores, and notifies subscribers.
+   */
+  log(line: string): void {
+    const scrubbed = this.scrub(line);
+    this.lines.push(scrubbed);
+    for (const sub of this.subscribers) {
+      try {
+        sub(scrubbed);
+      } catch {
+        // Subscriber errors should not break the build
+      }
+    }
+  }
+
+  /**
+   * Log a section header for visual separation in logs.
+   */
+  section(title: string): void {
+    this.log(`\n--- ${title} ---\n`);
+  }
+
+  /**
+   * Get all accumulated log lines as a single string.
+   */
+  getFullLog(): string {
+    return this.lines.join("\n");
+  }
+
+  /**
+   * Upload the complete log to S3.
+   */
+  async uploadToS3(bucket: string, projectId: string): Promise<string> {
+    const key = `${projectId}/builds/${this.deploymentId}/build.log`;
+    await uploadToS3(bucket, key, this.getFullLog());
+    return key;
+  }
+
+  /**
+   * Scrub secrets from a log line.
+   */
+  private scrub(line: string): string {
+    let result = line;
+
+    // Scrub known secret values from env_vars
+    for (const pattern of this.secretPatterns) {
+      result = result.replace(pattern, "***REDACTED***");
+    }
+
+    // Scrub git clone URLs with tokens
+    result = result.replace(
+      /https:\/\/x-access-token:[^@]+@github\.com/g,
+      "https://github.com",
+    );
+
+    // Scrub common secret patterns
+    result = this.scrubCommonPatterns(result);
+
+    return result;
+  }
+
+  /**
+   * Scrub common secret patterns that might appear in build output.
+   */
+  private scrubCommonPatterns(line: string): string {
+    let result = line;
+
+    // AWS access keys (AKIA...)
+    result = result.replace(/AKIA[0-9A-Z]{16}/g, "***REDACTED***");
+
+    // Generic API key patterns (key=..., token=..., secret=...)
+    result = result.replace(
+      /(api[_-]?key|token|secret|password|passwd|credential)[=:]\s*['"]?[^\s'"]+['"]?/gi,
+      "$1=***REDACTED***",
+    );
+
+    // PostgreSQL connection strings
+    result = result.replace(
+      /postgresql:\/\/[^:]+:[^@]+@/g,
+      "postgresql://***:***@",
+    );
+
+    // Generic bearer tokens
+    result = result.replace(
+      /Bearer\s+[A-Za-z0-9\-._~+/]+=*/g,
+      "Bearer ***REDACTED***",
+    );
+
+    return result;
+  }
+}
+```
+
+---
+
+### Integration with BuildRunner
+
+The `BuildRunner` must use the `BuildLogger` to capture all output:
+
+#### 1. Initialize the logger at build start
+
+```typescript
+async run(): Promise<{ imageTag: string; durationMs: number }> {
+  const buildLogger = new BuildLogger(this.options.deploymentId);
+
+  // Load project secrets for scrubbing
+  const secrets = await this.loadProjectSecrets();
+  buildLogger.addSecrets(secrets);
+
+  // Add the installation token to secrets (so it gets scrubbed from clone URL)
+  const token = await getInstallationToken(this.options.installationId);
+  buildLogger.addSecrets([token]);
+
+  // Connect the onLog callback if provided
+  if (this.options.onLog) {
+    buildLogger.subscribe(this.options.onLog);
+  }
+
+  // ... pipeline execution ...
+}
+```
+
+#### 2. Capture command output
+
+Wrap all `execFile` calls to pipe stdout/stderr through the logger:
+
+```typescript
+private async execAsync(
+  cmd: string,
+  args: string[],
+  options: { cwd?: string },
+  logger: BuildLogger,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const proc = spawn(cmd, args, {
+      cwd: options.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    proc.stdout?.on("data", (data: Buffer) => {
+      const lines = data.toString("utf-8").split("\n");
+      for (const line of lines) {
+        if (line.trim()) logger.log(line);
+      }
+    });
+
+    proc.stderr?.on("data", (data: Buffer) => {
+      const lines = data.toString("utf-8").split("\n");
+      for (const line of lines) {
+        if (line.trim()) logger.log(line);
+      }
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Command '${cmd} ${args.join(" ")}' exited with code ${code}`));
+    });
+
+    proc.on("error", reject);
+  });
+}
+```
+
+Use `child_process.spawn()` instead of `execFile()` for streaming. `spawn()` gives us readable streams for stdout/stderr that we can pipe through the logger line by line. `execFile()` buffers all output and only returns it when the process exits, which prevents real-time streaming.
+
+#### 3. Add section headers for each pipeline step
+
+```typescript
+buildLogger.section("Cloning repository");
+await this.cloneRepo(buildDir, buildLogger);
+
+buildLogger.section("Detecting framework");
+const framework = await this.detectOrReadConfig(buildDir);
+buildLogger.log(`Framework: ${framework.framework}, Mode: ${framework.nextMode ?? "n/a"}`);
+
+buildLogger.section("Restoring build cache");
+await this.restoreCache(buildDir, packageManager, buildLogger);
+
+buildLogger.section("Installing dependencies");
+await this.installDependencies(buildDir, packageManager, buildLogger);
+
+buildLogger.section("Running build");
+await this.runBuildCommand(buildDir, framework, buildLogger);
+
+buildLogger.section("Building Docker image");
+const imageTag = await this.buildDockerImage(buildDir, buildLogger);
+
+buildLogger.section("Saving build cache");
+await this.saveCache(buildDir, packageManager, buildLogger);
+
+buildLogger.section("Build complete");
+```
+
+#### 4. Upload log to S3 in the finally block
+
+```typescript
+} finally {
+  // Upload build log to S3 (even on failure)
+  try {
+    const s3Key = await buildLogger.uploadToS3(S3_BUCKET, this.options.projectId);
+    await this.options.db
+      .update(deployments)
+      .set({ buildLogS3Key: s3Key })
+      .where(eq(deployments.id, this.options.deploymentId));
+  } catch (err) {
+    logger.warn({ err }, "Failed to upload build log to S3");
+  }
+
+  // Clean up build directory
+  await this.cleanup(buildDir);
+}
+```
+
+---
+
+### Loading Project Secrets for Scrubbing
+
+Query the `env_vars` table for secrets that should be redacted:
+
+```typescript
+private async loadProjectSecrets(): Promise<string[]> {
+  const envVarRecords = await this.options.db
+    .select({ value: envVars.value, isSecret: envVars.isSecret })
+    .from(envVars)
+    .where(
+      and(
+        eq(envVars.projectId, this.options.projectId),
+        eq(envVars.isSecret, true),
+      ),
+    );
+
+  // Decrypt the secret values (using the encryption module from shared)
+  return envVarRecords.map((record) => decrypt(record.value));
+}
+```
+
+---
+
+### Implementing `cache.ts`
+
+The cache module uses the already-implemented S3 client:
+
+```typescript
+// packages/core/src/build/cache.ts
+import { uploadToS3, downloadFromS3 } from "@gblockparty/shared/backend";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("build-cache");
+
+export async function saveCache(
+  bucket: string,
+  projectId: string,
+  branch: string,
+  lockfileHash: string,
+  data: Buffer,
+): Promise<void> {
+  const key = `${projectId}/deps/${lockfileHash}`;
+  logger.info({ projectId, branch, key }, "Saving build cache");
+  await uploadToS3(bucket, key, data);
+}
+
+export async function restoreCache(
+  bucket: string,
+  projectId: string,
+  branch: string,
+  lockfileHash: string,
+): Promise<Buffer | null> {
+  const key = `${projectId}/deps/${lockfileHash}`;
+  logger.info({ projectId, branch, key }, "Restoring build cache");
+  return downloadFromS3(bucket, key);
+}
+```
+
+The S3 key format:
+- **Dependency cache:** `{projectId}/deps/{lockfileHash}` -- keyed by lockfile content hash so it invalidates when dependencies change.
+- **Framework build cache:** `{projectId}/build/{branch}` -- keyed by branch so each branch has its own cache.
+- **Build logs:** `{projectId}/builds/{deploymentId}/build.log` -- one log per deployment.
+
+The existing `downloadFromS3()` already returns `null` for `NoSuchKey` errors (cache miss), so no special handling is needed.
+
+---
+
+### Tarball Helpers
+
+For creating and extracting tarballs (used by cache save/restore), use the `tar` package:
+
+```typescript
+import tar from "tar";
+import { pipeline } from "stream/promises";
+
+async function createTarball(directoryPath: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  const stream = tar.create({ gzip: true, cwd: path.dirname(directoryPath) }, [
+    path.basename(directoryPath),
+  ]);
+  for await (const chunk of stream) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function extractTarball(data: Buffer, targetPath: string): Promise<void> {
+  await fs.promises.mkdir(targetPath, { recursive: true });
+  const { Readable } = await import("stream");
+  const stream = Readable.from(data);
+  await pipeline(stream, tar.extract({ cwd: path.dirname(targetPath) }));
+}
+```
+
+These can be added to `cache.ts` or a separate utility file.
+
+**Dependency:** The `tar` package may need to be added:
+```bash
+pnpm --filter @gblockparty/core add tar
+pnpm --filter @gblockparty/core add -D @types/tar
+```
+
+---
+
+## S3 Key Structure
+
+After Phase 4, the S3 bucket contains:
+
+```
+s3://gblockparty-builds/
+  {projectId}/
+    deps/
+      {lockfileHash}              # dependency cache tarball
+    build/
+      {branch}                    # framework build cache tarball
+    builds/
+      {deploymentId}/
+        build.log                 # complete build log (scrubbed)
+```
+
+---
+
+## Log Format
+
+Build logs have a structured format with section headers:
+
+```
+--- Cloning repository ---
+
+Cloning into '/tmp/gblockparty/builds/abc123-def456'...
+remote: Enumerating objects: 150, done.
+remote: Counting objects: 100% (150/150), done.
+remote: Compressing objects: 100% (120/120), done.
+
+--- Detecting framework ---
+
+Framework: nextjs, Mode: server
+Package manager: pnpm
+
+--- Restoring build cache ---
+
+Dependency cache restored from S3
+
+--- Installing dependencies ---
+
+Lockfile is up to date, resolution step is skipped
+Packages: +850
+++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+--- Running build ---
+
+> my-app@1.0.0 build
+> next build
+
+   Creating an optimized production build...
+   Compiled successfully
+
+--- Building Docker image ---
+
+Step 1/10 : FROM node:20-alpine AS base
+Step 2/10 : RUN corepack enable && corepack prepare pnpm@9 --activate
+...
+Successfully built abc123def456
+Successfully tagged myapp:a1b2c3d4e5f6
+
+--- Saving build cache ---
+
+Dependency cache saved to S3
+Framework build cache saved to S3
+
+--- Build complete ---
+```
+
+---
+
+## Files Affected
+
+| File | Change |
+|------|--------|
+| `packages/core/src/build/builder.ts` | Add `BuildLogger` class, integrate logging into pipeline, add `onLog` to `BuildRunnerOptions`, use `spawn` for command execution, add secret loading, add S3 log upload |
+| `packages/core/src/build/cache.ts` | Replace TODO stubs with S3 upload/download using `uploadToS3`/`downloadFromS3`, add tarball create/extract helpers |
+| `packages/core/package.json` | Add `tar` dependency (if not already present) |
+
+---
+
+## Security: Secret Scrubbing Patterns
+
+The following patterns are scrubbed from all build log output:
+
+| Pattern | Example | Replacement |
+|---------|---------|-------------|
+| Exact env var secret values | `sk_live_abc123` | `***REDACTED***` |
+| Git clone tokens | `https://x-access-token:ghs_xxx@github.com` | `https://github.com` |
+| AWS access keys | `AKIAIOSFODNN7EXAMPLE` | `***REDACTED***` |
+| API key assignments | `api_key=abc123` | `api_key=***REDACTED***` |
+| PostgreSQL connection strings | `postgresql://user:pass@host` | `postgresql://***:***@host` |
+| Bearer tokens | `Bearer eyJhbGciOi...` | `Bearer ***REDACTED***` |
+
+The exact env var values (from the `env_vars` table where `is_secret=true`) are loaded and scrubbed first, then generic patterns are applied. This ensures project-specific secrets are caught even if they don't match a generic pattern.
+
+---
+
+## Verification
+
+### Build Logging
+
+- [ ] `BuildLogger.log(line)` stores the line and notifies all subscribers
+- [ ] `BuildLogger.section(title)` adds a formatted section header
+- [ ] `BuildLogger.subscribe(callback)` receives real-time log lines
+- [ ] `BuildLogger.subscribe()` returns an unsubscribe function that stops notifications
+- [ ] `BuildLogger.getFullLog()` returns all accumulated lines joined with newlines
+- [ ] Subscriber errors do not break the build (caught and ignored)
+
+### Secret Scrubbing
+
+- [ ] Known env var secret values are replaced with `***REDACTED***`
+- [ ] Git clone URLs with `x-access-token` are scrubbed
+- [ ] AWS access key patterns (`AKIA...`) are scrubbed
+- [ ] API key assignment patterns (`api_key=...`) are scrubbed
+- [ ] PostgreSQL connection string passwords are scrubbed
+- [ ] Bearer token patterns are scrubbed
+- [ ] Short values (3 chars or fewer) are not used as scrub patterns (to avoid false positives)
+
+### S3 Storage
+
+- [ ] Build log is uploaded to S3 with key `{projectId}/builds/{deploymentId}/build.log`
+- [ ] The `build_log_s3_key` field on the deployment record is updated after upload
+- [ ] Log upload happens in the `finally` block (even for failed builds)
+- [ ] Log upload failure is non-fatal (warning logged)
+
+### Build Cache (cache.ts)
+
+- [ ] `saveCache()` uploads a buffer to the correct S3 key
+- [ ] `restoreCache()` downloads a buffer from S3
+- [ ] `restoreCache()` returns `null` when no cache exists (first build)
+- [ ] Tarball creation produces a valid gzipped tar archive
+- [ ] Tarball extraction recreates the original directory structure
+
+### Integration
+
+- [ ] `BuildRunner.run()` uses `BuildLogger` throughout the entire pipeline
+- [ ] All shell command output (stdout + stderr) flows through the logger
+- [ ] Section headers appear in the correct order in the final log
+- [ ] The `onLog` callback in `BuildRunnerOptions` receives real-time scrubbed output
+- [ ] `pnpm typecheck` passes with no errors

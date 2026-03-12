@@ -1,0 +1,188 @@
+# Phase 12: Notifications, Monitoring & Polish
+
+**Phase:** 12 of 12
+**Status:** Not Started
+**Dependencies:** Phase 6 (Dashboard foundation with `withAuth`, SWR data fetching), Phase 8 (Rollback system for auto-rollback notifications), Phase 5 (Deployer for deployment failure notifications), Phase 4 (BuildRunner for build failure notifications)
+**Blocks:** None (final phase)
+
+---
+
+## Goal
+
+Implement Slack and Discord webhook notifications for build failures, deployment failures, and auto-rollback events. Complete the platform settings page with GitHub App connection status, notification preferences, and VPS monitoring stats (disk usage, container count, memory). Monitor the VPS for resource constraints and alert when thresholds are exceeded. After this phase, the platform is production-ready with observability, alerting, and a polished settings experience.
+
+---
+
+## Context
+
+The notification system has been stubbed since the initial scaffolding. The file `packages/core/src/notifications/notifier.ts` contains TODO implementations for `sendSlackNotification()`, `sendDiscordNotification()`, and a `notify()` aggregator function. The `notification_settings` table exists in the database schema with fields for webhook URLs and event toggles. The dashboard settings page at `/settings` is a placeholder.
+
+This phase connects all the pieces:
+1. Implement the actual Slack and Discord webhook HTTP calls with rich formatting
+2. Wire notifications into the build/deploy pipeline failure paths
+3. Build the settings page where the user configures webhook URLs and preferences
+4. Add VPS monitoring that alerts when resources are running low
+
+### Architecture Context
+
+```
+Build/Deploy Pipeline Failure Events
+    |
+    +-- BuildRunner: build fails
+    +-- Deployer: health check fails, container fails to start
+    +-- Auto-Rollback Monitor: crash-loop detected, rollback triggered
+    |
+    v
+notify(settings, payload)
+    |
+    +-- settings.slackWebhookUrl? --> sendSlackNotification()
+    +-- settings.discordWebhookUrl? --> sendDiscordNotification()
+    |
+    v
+Slack/Discord channels receive formatted messages
+
+VPS Monitor (periodic)
+    |
+    +-- Check disk usage (df)
+    +-- Check container count (docker ps)
+    +-- Check memory usage (free)
+    |
+    v
+Threshold exceeded? --> notify() with alert payload
+    |
+    v
+Dashboard settings page displays current VPS stats
+```
+
+---
+
+## Key Files
+
+| File | Package | Purpose | Status |
+|------|---------|---------|--------|
+| `packages/core/src/notifications/notifier.ts` | core | Slack/Discord webhook implementations + notify() aggregator | TODO stubs exist |
+| `packages/core/src/notifications/index.ts` | core | Barrel exports | May need creation |
+| `packages/core/src/monitoring/vps-monitor.ts` | core | VPS resource monitoring (disk, memory, containers) | New file |
+| `packages/core/src/monitoring/index.ts` | core | Barrel exports | New file |
+| `apps/dashboard/src/app/settings/page.tsx` | dashboard | Platform settings page (full implementation) | Placeholder exists |
+| `apps/dashboard/src/app/api/settings/notifications/route.ts` | dashboard | Notification settings CRUD API | New file |
+| `apps/dashboard/src/app/api/settings/vps-stats/route.ts` | dashboard | VPS stats API endpoint | New file |
+| `apps/dashboard/src/components/settings/notification-settings.tsx` | dashboard | Notification config form component | New file |
+| `apps/dashboard/src/components/settings/vps-stats-panel.tsx` | dashboard | VPS monitoring stats display | New file |
+| `apps/dashboard/src/components/settings/github-status.tsx` | dashboard | GitHub App connection status display | New file |
+| `packages/shared/src/db/schema.ts` | shared | `notificationSettings` table | Implemented |
+| `packages/core/src/build/builder.ts` | core | BuildRunner -- notification integration point | TODO stub |
+| `packages/core/src/deploy/deployer.ts` | core | Deployer -- notification integration point | TODO stub |
+| `packages/core/src/deploy/rollback.ts` | core | Auto-rollback -- notification integration point | TODO stub |
+
+---
+
+## Steps
+
+### Step 1: Slack Webhook Integration
+Implement `sendSlackNotification()` that sends a rich formatted message to a Slack webhook URL. Use Slack's Block Kit for message formatting with color-coded attachments (red for failures, green for success, yellow for rollbacks). Include project name, deployment type, error message, and link to the dashboard.
+
+**File:** `packages/core/src/notifications/notifier.ts`
+**Spec:** `step-01-slack-integration-__spec.md__`
+
+### Step 2: Discord Webhook Integration
+Implement `sendDiscordNotification()` that sends a rich embedded message to a Discord webhook URL. Use Discord's embed format with color coding and fields. Similar content to Slack but formatted for Discord's API.
+
+**File:** `packages/core/src/notifications/notifier.ts`
+**Spec:** `step-02-discord-integration-__spec.md__`
+
+### Step 3: Notification Settings API & Dashboard UI
+Create API routes for notification settings CRUD and a dashboard form for configuring Slack/Discord webhook URLs and toggling which events trigger notifications. The settings are global (not per-project) since this is a single-user platform.
+
+**Files:** API route + `apps/dashboard/src/app/settings/page.tsx`
+**Spec:** `step-03-notification-settings-__spec.md__`
+
+### Step 4: Notification Trigger Integration
+Wire the `notify()` function into the build and deployment failure paths. When a build fails, deployment fails, or auto-rollback triggers, load the notification settings from the database and call `notify()`. Respect the event toggles (`notifyOnFailure`, `notifyOnRollback`).
+
+**Spec:** `step-04-notification-triggers-__spec.md__`
+
+### Step 5: Platform Settings Page
+Complete the `/settings` page with three sections: GitHub App connection status (installation info, permissions), notification preferences (from Step 3), and platform info (VPS stats from Step 6). Polished, responsive layout.
+
+**File:** `apps/dashboard/src/app/settings/page.tsx`
+**Spec:** `step-05-platform-settings-page-__spec.md__`
+
+### Step 6: VPS Monitoring & Alerts
+Implement a VPS monitor that checks disk usage, running container count, and memory usage. Expose these stats via an API endpoint for the dashboard. Alert via notifications when disk exceeds 80% or memory exceeds 90%. Optionally expose a `/api/health` endpoint for external monitoring services.
+
+**File:** `packages/core/src/monitoring/vps-monitor.ts`
+**Spec:** `step-06-vps-monitoring-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+1. `sendSlackNotification()` sends a formatted message to a Slack webhook URL and receives HTTP 200.
+2. `sendDiscordNotification()` sends a formatted embedded message to a Discord webhook URL and receives HTTP 200/204.
+3. Slack messages include: project name, event type, error message (if applicable), color coding, dashboard link.
+4. Discord messages include: project name, event type, error message (if applicable), color coding, dashboard link.
+5. `notify()` sends to both Slack and Discord if both webhook URLs are configured.
+6. `notify()` gracefully handles one webhook failing (sends to the other, logs the error).
+7. Notification settings can be created, read, and updated via `GET/PUT /api/settings/notifications`.
+8. Dashboard settings page displays a form for Slack webhook URL, Discord webhook URL, and event toggles.
+9. "Test" button on the settings page sends a test notification to verify the webhook URL works.
+10. Build failures trigger a notification with the error message and project name.
+11. Deployment failures (health check, container crash) trigger a notification.
+12. Auto-rollback events trigger a notification with the reason and the deployment that was rolled back to.
+13. Notifications respect the `notifyOnFailure` and `notifyOnRollback` toggles.
+14. The settings page shows GitHub App connection status (installed, permissions).
+15. The settings page shows VPS stats: disk usage (%), running container count, memory usage (%).
+16. VPS disk usage > 80% triggers an alert notification.
+17. VPS stats are refreshed periodically (every 30 seconds on the dashboard, or on page load).
+18. `/api/health` endpoint returns 200 with basic platform health info.
+19. `pnpm typecheck` passes after all changes.
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On (Phase 6)
+- Dashboard foundation: Next.js app router, `withAuth` wrapper, SWR data fetching.
+- API route structure and conventions.
+
+### Depends On (Phase 8)
+- Auto-rollback system: when crash-loop detection triggers a rollback, it should call `notify()`.
+- `rollbackDeployment()` function exists in `packages/core/src/deploy/rollback.ts`.
+
+### Depends On (Phase 4 & 5)
+- `BuildRunner.run()` has failure paths where notifications should be sent.
+- `Deployer.deploy()` has failure paths (health check failure, container start failure).
+
+### Depends On (Phase 3)
+- GitHub App installation info (for the settings page connection status display).
+- `GITHUB_APP_ID` and installation ID available for querying the GitHub API.
+
+### Enables
+- This is the final phase. It makes the platform production-ready with observability.
+
+---
+
+## Risk & Mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| Slack/Discord webhook URL invalid or expired | Medium | Low | Validate URL format; test button; graceful error handling |
+| Notification spam during rapid deployments | Low | Medium | Debounce: don't send more than 1 notification per project per 5 minutes for the same event type |
+| VPS monitoring command execution timeout | Low | Low | Set 5-second timeout on `exec` commands; return stale data on timeout |
+| Shell command injection in VPS monitor | Low | High | No user input in shell commands; all commands are hardcoded |
+| Settings page performance with frequent VPS stat polling | Low | Low | Poll every 30s; use SWR's `refreshInterval`; abort on page navigation |
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: Slack Webhook Integration | 1-2 hours |
+| Step 2: Discord Webhook Integration | 1-2 hours |
+| Step 3: Notification Settings API & Dashboard UI | 2-3 hours |
+| Step 4: Notification Trigger Integration | 1-2 hours |
+| Step 5: Platform Settings Page | 2-3 hours |
+| Step 6: VPS Monitoring & Alerts | 2-3 hours |
+| **Total** | **9-15 hours** |

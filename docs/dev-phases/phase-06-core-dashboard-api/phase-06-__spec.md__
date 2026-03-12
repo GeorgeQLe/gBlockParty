@@ -1,0 +1,272 @@
+# Phase 6: Core Dashboard & API Routes
+
+**Phase:** 6 of 12
+**Status:** Not Started
+**Depends on:** Phase 3 (Auth & GitHub App), Phase 4 (Build System), Phase 5 (Deployment Engine)
+**Blocks:** Phase 7 (Preview Deployments) -- webhook handler foundation, Phase 8 (CLI Tool) -- API routes must exist
+
+---
+
+## Goal
+
+The dashboard is fully functional with all core CRUD operations. Users can list projects, connect repos, view deployments, manage environment variables, and trigger deployments through the web UI. The GitHub webhook handler processes push events to create deployment records and enqueue production builds. All API routes are protected by session-based authentication, validated with Zod schemas, and backed by Drizzle ORM queries.
+
+---
+
+## Context
+
+### What Exists
+
+Phase 5 delivered the deployment engine (`packages/core`) with Docker provider, build pipeline, port allocation, Caddy routing, and the build queue. Phase 3 delivered GitHub App OAuth, JWT session management, and the `withAuth` middleware. The shared package provides all Drizzle ORM schemas (`packages/shared/src/db/schema.ts`), Zod validation schemas (`packages/shared/src/validation/`), TypeScript types (`packages/shared/src/types/`), encryption utilities (`packages/shared/src/backend/encryption.ts`), and constants (`packages/shared/src/constants/deployment.ts`).
+
+The dashboard app has:
+- **Root layout** (`apps/dashboard/src/app/layout.tsx`) -- nav bar, `max-w-7xl` container, Tailwind CSS
+- **Project layout** (`apps/dashboard/src/app/projects/[id]/layout.tsx`) -- tab navigation (Deployments, Settings, Environment, Database) as static `<span>` elements
+- **API route stubs** -- all 10 route files exist with `withAuth` wrappers and TODO comments
+- **API helpers** (`apps/dashboard/src/lib/api-helpers.ts`) -- `withAuth`, `jsonResponse`, `errorResponse` implemented
+- **DB singleton** (`apps/dashboard/src/lib/db.ts`) -- `getDb()` implemented with lazy initialization
+- **Auth** (`apps/dashboard/src/lib/auth.ts`) -- JWT creation, verification, cookie management implemented
+- **Placeholder UI** -- all 5 page files exist with `<Placeholder>` components
+- **Webhook route** (`apps/dashboard/src/app/api/webhooks/github/route.ts`) -- HMAC-SHA256 signature verification implemented, event handling is TODO
+
+### What This Phase Delivers
+
+1. **Complete API routes** -- All TODO stubs filled with working Drizzle queries, Zod validation, proper error handling, and pagination
+2. **GitHub webhook handler** -- Push events parsed, deduplicated by delivery ID, deployment records created, builds enqueued
+3. **Project list page** -- Grid of project cards with SWR data fetching, deployment status badges, "Connect Repo" button
+4. **Project detail page** -- Overview with production URL, recent deployments, quick actions, tab navigation
+5. **Deployment history & detail pages** -- Status badges, commit info, build logs from S3, ANSI color rendering
+6. **Environment variables page** -- Scope toggle, key-value editor, secret masking, bulk edit mode
+
+---
+
+## Architecture
+
+### API Layer
+
+All API routes follow the same pattern:
+
+```
+Request → withAuth (session check) → Zod validation → Drizzle query → jsonResponse/errorResponse
+```
+
+Key conventions:
+- Route handlers exported as named functions (`GET`, `POST`, `PATCH`, `DELETE`)
+- `withAuth` wraps every handler and injects the authenticated `Session` object
+- Request bodies parsed with `request.json()` then validated with Zod's `.parse()` or `.safeParse()`
+- Route params accessed via `await context.params` (Next.js 15 async params)
+- Errors returned as `{ error: string }` with appropriate HTTP status codes
+- List endpoints return `{ data: T[], total: number }` for pagination support
+- Singleton `getDb()` used for all database access
+
+### UI Layer
+
+All pages are React client components using:
+- **SWR** (`useSWR`) for data fetching with automatic revalidation
+- **Tailwind CSS** for styling (utility-first, no component library)
+- **fetch** for mutations (POST/PATCH/DELETE) with SWR `mutate()` for cache invalidation
+- **Next.js `useParams()`** and **`useRouter()`** for routing
+
+### Data Flow
+
+```
+[Browser Page]
+    |
+    | SWR fetch → GET /api/projects
+    |           → GET /api/projects/:id
+    |           → GET /api/projects/:id/deployments?page=1&limit=20
+    |           → GET /api/projects/:id/env?scope=production
+    |
+    | Mutations → POST /api/projects (create)
+    |           → PATCH /api/projects/:id (update settings)
+    |           → DELETE /api/projects/:id (disconnect)
+    |           → POST /api/projects/:id/deployments (trigger deploy)
+    |           → POST /api/projects/:id/env (create env var)
+    |           → PATCH /api/projects/:id/env/:varId (update env var)
+    |           → DELETE /api/projects/:id/env/:varId (delete env var)
+    |
+[API Routes] → withAuth → Zod validation → Drizzle ORM → PostgreSQL (RDS)
+    |
+    | (for deployments) → BuildQueue.enqueue() → Builder → Deployer
+    |
+[GitHub Webhook] → Signature verify → Parse event → Deduplicate → Create deployment → Enqueue build
+```
+
+---
+
+## Existing Code Reference
+
+### Drizzle Schema Tables Used
+
+| Table | Import | Used By |
+|-------|--------|---------|
+| `projects` | `@gblockparty/shared/db` | Projects API, webhook handler |
+| `deployments` | `@gblockparty/shared/db` | Deployments API, webhook handler |
+| `envVars` | `@gblockparty/shared/db` | Env vars API |
+| `githubInstallations` | `@gblockparty/shared/db` | Webhook handler (project lookup) |
+
+### Zod Validation Schemas
+
+| Schema | File | Used By |
+|--------|------|---------|
+| `createProjectSchema` | `packages/shared/src/validation/project.ts` | POST /api/projects |
+| `updateProjectSchema` | `packages/shared/src/validation/project.ts` | PATCH /api/projects/:id |
+| `triggerDeploymentSchema` | `packages/shared/src/validation/deployment.ts` | POST /api/projects/:id/deployments |
+| `createEnvVarSchema` | `packages/shared/src/validation/env-var.ts` | POST /api/projects/:id/env |
+| `updateEnvVarSchema` | `packages/shared/src/validation/env-var.ts` | PATCH /api/projects/:id/env/:varId |
+
+### Core Package Functions
+
+| Function | Import | Used By |
+|----------|--------|---------|
+| `handleWebhook` | `@gblockparty/core/github` | Webhook route |
+| `verifySignature` | `@gblockparty/core/github` | Webhook route (already used) |
+| `BuildQueue.enqueue()` | `@gblockparty/core/queue` | Deployments API, webhook handler |
+
+### Encryption
+
+| Function | Import | Used By |
+|----------|--------|---------|
+| `encrypt` | `@gblockparty/shared/backend` | Env vars API (creating secrets) |
+| `decrypt` | `@gblockparty/shared/backend` | Env vars API (reading non-masked secrets, internal) |
+
+---
+
+## Steps
+
+### Step 1: Projects API Routes
+Implement all 5 project CRUD endpoints: list, create, get detail, update settings, delete with cleanup. Generate project slugs from names. Handle the GitHub App installation ID during project creation.
+
+**Files:** `apps/dashboard/src/app/api/projects/route.ts`, `apps/dashboard/src/app/api/projects/[id]/route.ts`
+**Spec:** `step-01-projects-api-__spec.md__`
+
+### Step 2: Deployments API Routes
+Implement deployment list with pagination, manual deploy trigger that enqueues a build, and deployment detail with build log S3 URL. Integrate with the `BuildQueue` from `@gblockparty/core`.
+
+**Files:** `apps/dashboard/src/app/api/projects/[id]/deployments/route.ts`, `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/route.ts`
+**Spec:** `step-02-deployments-api-__spec.md__`
+
+### Step 3: Environment Variables API Routes
+Implement full CRUD for environment variables with scope filtering, secret encryption via AES-256-GCM, and value masking in API responses. Enforce uniqueness on `(project_id, scope, key)`.
+
+**Files:** `apps/dashboard/src/app/api/projects/[id]/env/route.ts`, `apps/dashboard/src/app/api/projects/[id]/env/[varId]/route.ts`
+**Spec:** `step-03-env-vars-api-__spec.md__`
+
+### Step 4: GitHub Webhook Handler
+Complete the webhook POST handler: parse JSON payload, deduplicate by delivery ID (idempotency), route push events to the production deploy flow, add placeholder routing for pull_request events (Phase 7). Handle installation events.
+
+**File:** `apps/dashboard/src/app/api/webhooks/github/route.ts`
+**Spec:** `step-04-webhook-handler-__spec.md__`
+
+### Step 5: Projects List Page UI
+Build the home page with a grid of project cards showing name, GitHub repo link, latest deployment status, production URL. Add a "Connect Repo" button that opens the GitHub App installation flow. Use SWR for data fetching.
+
+**Files:** `apps/dashboard/src/app/page.tsx`, new components in `apps/dashboard/src/components/`
+**Spec:** `step-05-projects-list-ui-__spec.md__`
+
+### Step 6: Project Detail Page UI
+Build project overview with current production URL, recent deployments list, quick action buttons (Deploy, View Logs). Make the tab navigation interactive with actual links. Add a project layout that fetches project data.
+
+**Files:** `apps/dashboard/src/app/projects/[id]/page.tsx`, `apps/dashboard/src/app/projects/[id]/layout.tsx`, new components
+**Spec:** `step-06-project-detail-ui-__spec.md__`
+
+### Step 7: Deployment Detail & Build Logs Page UI
+Build deployment history page with filtering and status badges. Individual deployment detail page showing build logs fetched from S3, ANSI-to-HTML rendering, deployment metadata, and status timeline.
+
+**Files:** `apps/dashboard/src/app/projects/[id]/deployments/page.tsx`, new file `apps/dashboard/src/app/projects/[id]/deployments/[deploymentId]/page.tsx`, new components
+**Spec:** `step-07-deployment-detail-ui-__spec.md__`
+
+### Step 8: Environment Variables Page UI
+Build environment management page with production/preview scope toggle, key-value pair editor, secret toggle per variable, add/edit/delete operations, and bulk edit mode for pasting KEY=VALUE lines.
+
+**Files:** `apps/dashboard/src/app/projects/[id]/environment/page.tsx`, new components
+**Spec:** `step-08-env-vars-ui-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+### API Routes
+1. `GET /api/projects` returns all projects with their latest deployment status.
+2. `POST /api/projects` creates a project, validates with `createProjectSchema`, generates a slug, returns the created project.
+3. `GET /api/projects/:id` returns full project details including latest deployment info.
+4. `PATCH /api/projects/:id` updates allowed fields, validates with `updateProjectSchema`.
+5. `DELETE /api/projects/:id` removes the project and all associated data (cascade).
+6. `GET /api/projects/:id/deployments` returns paginated deployments sorted by `created_at DESC`.
+7. `POST /api/projects/:id/deployments` creates a deployment record with status `queued` and enqueues a build.
+8. `GET /api/projects/:id/deployments/:did` returns deployment detail with build log S3 URL.
+9. `GET /api/projects/:id/env?scope=production` returns env vars for the specified scope with secret values masked as `"***"`.
+10. `POST /api/projects/:id/env` creates an env var, encrypting the value if `isSecret` is true.
+11. `PATCH /api/projects/:id/env/:varId` updates an env var (value and/or isSecret flag).
+12. `DELETE /api/projects/:id/env/:varId` deletes an env var.
+13. All routes return 401 for unauthenticated requests (via `withAuth`).
+14. All routes return 400 for invalid input with descriptive Zod error messages.
+15. All routes return 404 when the referenced project or resource does not exist.
+
+### Webhook Handler
+16. Push events to the production branch create a deployment record and enqueue a build.
+17. Push events to non-production branches are ignored (200 response, no side effects).
+18. Duplicate delivery IDs are detected and return 200 without re-processing.
+19. Pull request events are acknowledged but routed to a placeholder handler (Phase 7).
+20. Installation events are logged and handled.
+21. Invalid signatures return 401 (already implemented).
+
+### UI Pages
+22. The projects list page displays all projects in a responsive grid with status badges.
+23. Clicking a project card navigates to the project detail page.
+24. The "Connect Repo" button initiates the GitHub App installation flow.
+25. The project detail page shows production URL, recent deployments, and working tab navigation.
+26. The deployments page shows deployment history with status, commit SHA, branch, and timestamps.
+27. The deployment detail page renders build logs with ANSI color support.
+28. The environment variables page allows full CRUD with scope toggle and secret masking.
+29. Bulk edit mode parses pasted KEY=VALUE lines and creates env vars.
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On
+
+| Phase | What It Provides | Used By |
+|-------|-----------------|---------|
+| Phase 3 (Auth & GitHub App) | `withAuth` middleware, `getSession()`, JWT cookie, GitHub OAuth flow, GitHub App credentials | All API routes, webhook handler, UI auth state |
+| Phase 4 (Build System) | `BuildQueue`, `Builder`, framework detection, Dockerfile generation, S3 build cache | Deployments API (enqueue builds), webhook handler |
+| Phase 5 (Deployment Engine) | `Deployer`, port allocator, Caddy routing, Docker provider, health checks | Deployments API (deploy after build), webhook handler |
+
+### Enables
+
+| Phase | What It Needs From Phase 6 |
+|-------|--------------------------|
+| Phase 7 (Preview Deployments) | Webhook handler with `pull_request` event routing (placeholder from Step 4), deployments API for creating preview deployment records |
+| Phase 8 (CLI Tool) | All API routes for programmatic access (deploy, env pull/push, logs, rollback) |
+| Phase 9 (Database Management) | Projects API for project lookup, env vars API for setting DATABASE_URL automatically |
+
+---
+
+## Risk & Mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| SWR cache becomes stale after mutations | Medium | Low | Call `mutate()` after every POST/PATCH/DELETE; use `revalidateOnFocus` |
+| Webhook handler processes events too slowly (>500ms) | Medium | Medium | Return 200 immediately after creating the deployment record; build runs async via queue |
+| Concurrent webhook deliveries create duplicate deployments | Medium | High | Deduplicate by delivery ID using a database check before processing |
+| Slug collision on project creation | Low | Medium | Generate slug from name, check uniqueness, append random suffix if collision |
+| Env var encryption key not available in API routes | Low | High | Validate ENCRYPTION_KEY at startup; error early if missing |
+| Large build logs from S3 cause slow page loads | Medium | Medium | Stream logs or paginate; set a max display size with "download full log" fallback |
+| ANSI escape codes in build logs cause XSS | Low | High | Use a battle-tested ANSI-to-HTML library (ansi-to-html) that sanitizes output |
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: Projects API Routes | 2-3 hours |
+| Step 2: Deployments API Routes | 2-3 hours |
+| Step 3: Environment Variables API Routes | 2-3 hours |
+| Step 4: GitHub Webhook Handler | 2-3 hours |
+| Step 5: Projects List Page UI | 3-4 hours |
+| Step 6: Project Detail Page UI | 3-4 hours |
+| Step 7: Deployment Detail & Build Logs Page UI | 3-4 hours |
+| Step 8: Environment Variables Page UI | 3-4 hours |
+| **Total** | **20-28 hours** |

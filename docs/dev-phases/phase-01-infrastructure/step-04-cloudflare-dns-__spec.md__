@@ -1,0 +1,286 @@
+# Step 4: Cloudflare DNS Configuration
+
+**Phase:** 1 - Infrastructure Provisioning
+**Step:** 4 of 5
+**Dependencies:** Step 2 (VPS IP address known), Step 3 (Caddy configured with Cloudflare DNS plugin)
+**Depends on this step:** Step 5 (verification), all subsequent phases (DNS routing)
+
+---
+
+## Objective
+
+Configure Cloudflare DNS for the `yourdomain.dev` domain so that all subdomains resolve to the VPS. This enables the wildcard routing pattern (`*.yourdomain.dev`) used by gBlockParty for production apps, preview deployments, and the platform dashboard. After this step, `https://platform.yourdomain.dev` should complete a TLS handshake via Cloudflare and reach Caddy on the VPS.
+
+---
+
+## Architecture Context
+
+```
+Browser request: https://myapp.yourdomain.dev
+         |
+         v
+  Cloudflare DNS resolves *.yourdomain.dev
+         |
+         v
+  Cloudflare Proxy (orange cloud)
+  - CDN caching for static assets
+  - DDoS protection
+  - SSL termination (Cloudflare <-> browser)
+  - Re-encrypts to origin (Cloudflare <-> VPS) with Full (Strict) mode
+         |
+         v
+  VPS:443 (Caddy)
+  - Caddy presents its own TLS cert (Let's Encrypt wildcard via DNS-01 challenge)
+  - Routes by hostname to correct Docker container
+```
+
+**Full (Strict) SSL mode** means Cloudflare validates the origin server's TLS certificate. Caddy must have a valid cert (which it obtains automatically via Let's Encrypt DNS challenge, configured in Step 3).
+
+---
+
+## DNS Records
+
+### Required Records
+
+Create the following DNS records in the Cloudflare dashboard (or via API):
+
+| Type | Name | Content | Proxy | TTL |
+|------|------|---------|-------|-----|
+| A | `@` (root) | `<VPS_IP>` | Proxied (orange) | Auto |
+| A | `*` (wildcard) | `<VPS_IP>` | Proxied (orange) | Auto |
+
+**Why both records:**
+- The `@` record handles `yourdomain.dev` itself (may be used for a landing page or redirect)
+- The `*` wildcard record handles all subdomains: `platform.yourdomain.dev`, `myapp.yourdomain.dev`, `pr-42--myapp.yourdomain.dev`, etc.
+
+**Why proxied (orange cloud):**
+- Hides the VPS real IP address
+- Provides Cloudflare CDN and DDoS protection
+- Enables Cloudflare's SSL/TLS termination
+- Allows using Cloudflare page rules and caching
+
+### Optional Records
+
+| Type | Name | Content | Proxy | TTL | Purpose |
+|------|------|---------|-------|-----|---------|
+| TXT | `@` | `v=spf1 -all` | N/A | Auto | Prevent email spoofing from this domain |
+| CAA | `@` | `0 issue "letsencrypt.org"` | N/A | Auto | Restrict CA issuance to Let's Encrypt |
+
+---
+
+## SSL/TLS Configuration
+
+### SSL/TLS Mode: Full (Strict)
+
+In Cloudflare dashboard: **SSL/TLS > Overview > Full (Strict)**
+
+This mode ensures:
+- Cloudflare encrypts traffic between the browser and Cloudflare (automatic)
+- Cloudflare encrypts traffic between Cloudflare and the origin VPS
+- Cloudflare validates the origin's TLS certificate (must be valid, not self-signed -- Let's Encrypt certs from Caddy satisfy this)
+
+**Do NOT use:**
+- "Flexible" -- traffic between Cloudflare and VPS would be unencrypted
+- "Full" (without Strict) -- does not validate origin certificate
+
+### Edge Certificates
+
+- Cloudflare automatically provisions edge certificates for proxied records
+- Wildcard coverage is included on the free plan for proxied DNS
+- No additional configuration needed
+
+### Origin Certificate (Alternative Approach)
+
+If Let's Encrypt cert issuance via Caddy's DNS challenge proves unreliable, an alternative is to use a Cloudflare Origin Certificate:
+
+1. Generate in Cloudflare dashboard: **SSL/TLS > Origin Server > Create Certificate**
+2. Install the certificate and key on the VPS for Caddy to use
+3. This certificate is only valid for Cloudflare-to-origin traffic (trusted by Cloudflare, not by browsers directly)
+
+This is a fallback option; the primary approach uses Let's Encrypt via Caddy.
+
+---
+
+## Caching Configuration
+
+### Cache Rules
+
+Configure in Cloudflare dashboard: **Caching > Cache Rules**
+
+**Rule 1: Cache static assets aggressively**
+- When: `URI Path matches /\_next/static/*` OR `URI Path matches /favicon.ico` OR `URI Path matches /robots.txt`
+- Then: Cache eligible (with Edge TTL of 1 month)
+
+**Rule 2: Bypass cache for API routes**
+- When: `URI Path starts with /api/`
+- Then: Bypass cache
+
+**Rule 3: Bypass cache for WebSocket**
+- When: `URI Path starts with /api/` AND request header `Upgrade` equals `websocket`
+- Then: Bypass cache
+
+### Browser Cache TTL
+
+Set in **Caching > Configuration**:
+- Browser Cache TTL: Respect Existing Headers
+
+This allows Next.js and Caddy to set appropriate cache headers per asset type.
+
+---
+
+## Page Rules (Optional)
+
+Cloudflare free plan allows 3 page rules. Recommended:
+
+| Priority | URL Pattern | Setting |
+|----------|-------------|---------|
+| 1 | `*yourdomain.dev/api/*` | Cache Level: Bypass |
+| 2 | `*yourdomain.dev/_next/static/*` | Cache Level: Cache Everything, Edge Cache TTL: 1 month |
+| 3 | `*yourdomain.dev/*` | SSL: Full (Strict) |
+
+---
+
+## Security Settings
+
+### Firewall / WAF
+
+In **Security > WAF**:
+- Enable managed rules (free tier provides basic protection)
+- Security Level: Medium
+
+### Bot Management
+
+In **Security > Bots**:
+- Bot Fight Mode: On (free tier)
+
+### Under Attack Mode
+
+- Keep off normally
+- Can be toggled on temporarily if DDoS detected
+
+---
+
+## Cloudflare API Token
+
+A Cloudflare API token is needed by Caddy (Step 3) for DNS-01 challenge. It is also useful for managing DNS records programmatically.
+
+### Create API Token
+
+In Cloudflare dashboard: **My Profile > API Tokens > Create Token**
+
+**For Caddy (DNS challenge):**
+- Template: "Edit zone DNS"
+- Permissions: Zone > DNS > Edit
+- Zone Resources: Include > Specific zone > `yourdomain.dev`
+
+**For DNS management (optional, broader):**
+- Permissions: Zone > DNS > Edit, Zone > Zone > Read
+- Zone Resources: Include > Specific zone > `yourdomain.dev`
+
+Store the token in:
+1. Caddy's environment file on VPS (`/etc/caddy/caddy.env`)
+2. AWS Secrets Manager (for backup/rotation)
+
+---
+
+## Files to Create
+
+### `/infra/scripts/setup-cloudflare-dns.sh`
+
+A reference script using the Cloudflare API to create DNS records:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configuration
+CF_API_TOKEN="${CF_API_TOKEN:?Set CF_API_TOKEN}"
+CF_ZONE_ID="${CF_ZONE_ID:?Set CF_ZONE_ID}"
+VPS_IP="${VPS_IP:?Set VPS_IP}"
+
+API="https://api.cloudflare.com/client/v4"
+AUTH=(-H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+
+# Create wildcard A record
+curl -s -X POST "$API/zones/$CF_ZONE_ID/dns_records" \
+  "${AUTH[@]}" \
+  -d "{\"type\":\"A\",\"name\":\"*\",\"content\":\"$VPS_IP\",\"proxied\":true}" | jq .
+
+# Create root A record
+curl -s -X POST "$API/zones/$CF_ZONE_ID/dns_records" \
+  "${AUTH[@]}" \
+  -d "{\"type\":\"A\",\"name\":\"@\",\"content\":\"$VPS_IP\",\"proxied\":true}" | jq .
+
+echo "DNS records created. Verify with: dig +short platform.yourdomain.dev"
+```
+
+This script is for initial setup. DNS records are managed via the Cloudflare dashboard for ongoing changes.
+
+---
+
+## Files to Modify
+
+None. This step is primarily Cloudflare dashboard configuration and DNS setup.
+
+---
+
+## Verification Commands
+
+After DNS records are created and propagated:
+
+```bash
+# Check wildcard resolution (returns Cloudflare proxy IPs, not VPS IP)
+dig +short A platform.yourdomain.dev
+# Expected: Cloudflare IPs (104.x.x.x or 172.x.x.x)
+
+# Check wildcard works for arbitrary subdomains
+dig +short A anything.yourdomain.dev
+# Expected: same Cloudflare IPs
+
+# Check root domain
+dig +short A yourdomain.dev
+# Expected: same Cloudflare IPs
+
+# Test HTTPS (may be 502 if Caddy cert not yet issued, but TLS handshake should work)
+curl -v https://platform.yourdomain.dev 2>&1 | grep "SSL certificate"
+# Expected: shows Cloudflare SSL certificate info
+
+# Check SSL/TLS mode in headers
+curl -sI https://platform.yourdomain.dev | grep -i "cf-"
+# Expected: cf-ray header present (confirms Cloudflare proxy)
+```
+
+---
+
+## Expected Behavior After Completion
+
+1. `dig +short A *.yourdomain.dev` returns Cloudflare proxy IPs
+2. `dig +short A yourdomain.dev` returns Cloudflare proxy IPs
+3. `curl -v https://platform.yourdomain.dev` completes TLS handshake (certificate from Cloudflare)
+4. If Caddy has obtained its Let's Encrypt cert: the request reaches Caddy and returns a response
+5. If Caddy has NOT yet obtained its cert: Cloudflare returns 502 (origin cert error) -- this resolves once Caddy completes DNS challenge
+6. `cf-ray` header is present in responses (confirms Cloudflare proxy is active)
+7. VPS real IP is not exposed in DNS lookups
+
+---
+
+## Troubleshooting
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| `dig` returns VPS IP directly | Proxy not enabled (grey cloud) | Enable proxy on DNS record |
+| `curl` returns 521 (Web server is down) | Caddy not running or not listening on 443 | Check `systemctl status caddy` |
+| `curl` returns 522 (Connection timed out) | VPS firewall blocking port 443 | Check `ufw status`, ensure 443 is allowed |
+| `curl` returns 525 (SSL handshake failed) | Caddy cert not yet issued or invalid | Check Caddy logs, wait for cert issuance |
+| `curl` returns 526 (Invalid SSL certificate) | SSL mode is "Full (Strict)" but Caddy has no valid cert | Wait for Let's Encrypt cert or switch to "Full" temporarily |
+| DNS not resolving | Propagation delay or wrong record | Wait 5 minutes; verify in Cloudflare dashboard |
+
+---
+
+## Security Considerations
+
+- The Cloudflare API token should be scoped to the minimum required permissions
+- The VPS real IP should never be exposed; always use Cloudflare proxy
+- Consider enabling "Always Use HTTPS" in Cloudflare to redirect HTTP to HTTPS
+- The `SPF -all` TXT record prevents email spoofing from this domain
+- Cloudflare's bot protection and WAF provide baseline security for the platform

@@ -1,0 +1,267 @@
+# Step 3: Multi-Service Deployment Orchestration
+
+**Phase:** 11 -- Monorepo & Advanced Configuration
+**Step:** 3 of 4
+**Type:** Backend implementation (integration)
+**Depends on:** Step 1 (ConfigParser), Step 2 (MonorepoDetector), Phase 4 (BuildRunner), Phase 5 (Deployer, PortAllocator, CaddyClient)
+**Blocks:** None directly, but Phase 12 settings page may show per-service status
+
+---
+
+## Objective
+
+Wire the config parser and monorepo detection into the existing build and deployment pipeline so that a single push to a monorepo can trigger builds and deployments for multiple services. Each service gets its own deployment record, Docker image, container, port, and hostname. The orchestration runs services sequentially for the MVP to avoid overwhelming the VPS.
+
+---
+
+## Current Build/Deploy Pipeline (Single Service)
+
+The current flow (Phases 4-6):
+
+```
+Webhook -> create 1 deployment record -> BuildRunner.run() -> Deployer.deploy()
+```
+
+This needs to become:
+
+```
+Webhook -> parseConfig(repoPath)
+    |
+    +-- No deploy.yaml? -> existing single-service flow (unchanged)
+    |
+    +-- deploy.yaml found -> getAffectedServices(config, changedFiles)
+            |
+            +-- For each affected service:
+                    |
+                    +-- Create deployment record (per service)
+                    +-- BuildRunner.run() with service context
+                    +-- Deployer.deploy() with service-specific image, port, hostname
+```
+
+---
+
+## Changes to Existing Files
+
+### 1. Webhook Handler (`packages/core/src/github/webhooks.ts`)
+
+After cloning the repo and before starting the build:
+
+```typescript
+import { parseConfig } from "../build/config-parser";
+import { getChangedFiles, getAffectedServices } from "../build/monorepo";
+
+// Inside push event handler:
+const config = await parseConfig(repoPath);
+const changedFiles = getChangedFiles(payload.commits);
+
+if (config && config.isMultiService) {
+  const affected = getAffectedServices(config, changedFiles);
+
+  if (affected.length === 0) {
+    logger.info("No services affected by this push, skipping build");
+    // Set commit status to success (nothing to build)
+    return;
+  }
+
+  // Build and deploy each affected service sequentially
+  for (const { service } of affected) {
+    await buildAndDeployService(project, service, commitSha, repoPath);
+  }
+} else {
+  // Single-service: existing flow
+  const serviceConfig = config?.services[0] ?? await autoDetect(repoPath);
+  await buildAndDeployService(project, serviceConfig, commitSha, repoPath);
+}
+```
+
+### 2. BuildRunner (`packages/core/src/build/builder.ts`)
+
+Extend `BuildRunnerOptions` to accept service context:
+
+```typescript
+export interface BuildRunnerOptions {
+  db: Database;
+  projectId: string;
+  commitSha: string;
+  branch: string;
+  cloneUrl: string;
+  installationId: number;
+  // New fields for multi-service support:
+  serviceName?: string;       // service key from deploy.yaml
+  servicePath?: string;       // subdirectory path (e.g., "apps/web")
+  serviceType?: "nextjs" | "dockerfile" | "static";
+  servicePort?: number;       // container internal port
+  dockerfile?: string;        // path to Dockerfile (for type: dockerfile)
+}
+```
+
+In `BuildRunner.run()`:
+
+1. If `servicePath` is provided and not `"."`, change the build context to `path.join(repoPath, servicePath)`.
+2. If `serviceType` is provided, use it instead of auto-detection.
+3. Docker image tag: `{projectSlug}-{serviceName}:{commitSha}` for multi-service, or `{projectSlug}:{commitSha}` for single-service.
+4. Build cache key: `{projectId}/{serviceName}/deps/{lockfileHash}` for multi-service.
+
+### 3. Deployer (`packages/core/src/deploy/deployer.ts`)
+
+Extend `DeployOptions` to accept service context:
+
+```typescript
+export interface DeployOptions {
+  db: Database;
+  projectId: string;
+  deploymentId: string;
+  imageTag: string;
+  envVars: Record<string, string>;
+  healthCheckPath: string;
+  // New fields:
+  serviceName?: string;        // for multi-service hostname generation
+  servicePort?: number;        // container internal port (default 3000)
+}
+```
+
+In `Deployer.deploy()`:
+
+1. If `serviceName` is provided and project is multi-service, the hostname becomes `{serviceName}--{projectSlug}.yourdomain.dev`.
+2. If `servicePort` is provided, use it instead of the default 3000 for the container's internal port mapping: `-p {hostPort}:{servicePort}`.
+3. The CaddyClient receives the correct hostname for routing.
+
+---
+
+## Deployment Records
+
+For multi-service deploys, create one deployment record per service:
+
+```typescript
+// For each affected service:
+const deployment = await db.insert(deployments).values({
+  projectId: project.id,
+  type: "production",           // or "preview"
+  status: "queued",
+  commitSha,
+  branch,
+  dockerImageTag: `${project.slug}-${service.name}:${commitSha}`,
+  // serviceName stored in a metadata field or derived from dockerImageTag
+}).returning();
+```
+
+The deployment's `url` will be `https://{serviceName}--{projectSlug}.yourdomain.dev` for multi-service projects.
+
+For single-service projects, the existing flow is unchanged (no `serviceName`, URL is `https://{projectSlug}.yourdomain.dev`).
+
+---
+
+## Hostname Patterns
+
+| Config Type | Service | Hostname |
+|-------------|---------|----------|
+| Single-service | `my-app` | `my-app.yourdomain.dev` |
+| Multi-service | `web` service in `my-platform` | `web--my-platform.yourdomain.dev` |
+| Multi-service | `api` service in `my-platform` | `api--my-platform.yourdomain.dev` |
+| Preview (single) | `my-app` PR #42 | `pr-42--my-app.yourdomain.dev` |
+| Preview (multi) | `web` in `my-platform` PR #42 | `pr-42--web--my-platform.yourdomain.dev` |
+
+The double-dash `--` separator remains consistent. Multi-service preview URLs are longer but unambiguous.
+
+### URL Generation Update
+
+Update `packages/core/src/routing/url.ts` to support service-scoped URLs:
+
+```typescript
+export function generateServiceUrl(
+  projectSlug: string,
+  serviceName: string,
+  domain?: string,
+): string {
+  const d = domain ?? process.env.PLATFORM_DOMAIN ?? "localhost";
+  return `https://${serviceName}--${projectSlug}.${d}`;
+}
+
+export function generateServicePreviewUrl(
+  projectSlug: string,
+  serviceName: string,
+  prNumber: number,
+  domain?: string,
+): string {
+  const d = domain ?? process.env.PLATFORM_DOMAIN ?? "localhost";
+  return `https://pr-${prNumber}--${serviceName}--${projectSlug}.${d}`;
+}
+```
+
+---
+
+## Build Cache Key Changes
+
+For multi-service projects, the build cache key must include the service name to avoid cache collisions between services:
+
+| Cache Type | Single-Service Key | Multi-Service Key |
+|------------|-------------------|-------------------|
+| Dependencies | `{projectId}/deps/{lockfileHash}` | `{projectId}/{serviceName}/deps/{lockfileHash}` |
+| Build cache | `{projectId}/build/{branch}` | `{projectId}/{serviceName}/build/{branch}` |
+
+---
+
+## Sequential vs. Parallel Builds
+
+For the MVP, services are built and deployed **sequentially** (one at a time). This is because:
+- The VPS has limited resources (4 vCPU, 8 GB RAM)
+- Build concurrency is already limited to 1 (Phase 4 design decision)
+- Sequential builds are simpler to implement and debug
+
+Future optimization: parallel builds with resource limits.
+
+The sequential order follows the order of services in the `deploy.yaml` `services` map.
+
+---
+
+## Error Handling
+
+### Per-Service Failures
+
+If one service's build or deployment fails:
+1. Mark that service's deployment record as `FAILED` with the error message.
+2. Continue building and deploying the remaining affected services.
+3. Set the GitHub commit status based on the aggregate result:
+   - All services succeed -> `success`
+   - Any service fails -> `failure` (with description noting which services failed)
+
+### Partial Deployment State
+
+After a multi-service push where service A succeeds and service B fails:
+- Service A is live at its new version.
+- Service B remains at its previous version (no changes made).
+- The dashboard shows per-service deployment status.
+
+---
+
+## GitHub Commit Status
+
+For multi-service deploys, set commit status for each service as a separate context:
+
+```
+context: "gblockparty/web"    -> success
+context: "gblockparty/api"    -> failure
+```
+
+This gives per-service status visibility in the GitHub PR/commit view.
+
+For single-service deploys, the existing context remains: `context: "gblockparty"`.
+
+---
+
+## Verification
+
+- [ ] Webhook handler calls `parseConfig()` before building
+- [ ] Multi-service push triggers builds for all affected services
+- [ ] Each service gets its own deployment record
+- [ ] Docker image tags include service name: `{project}-{service}:{sha}`
+- [ ] Each service deployed to its own port (from PortAllocator)
+- [ ] Each service routed via its own hostname (`{service}--{project}.yourdomain.dev`)
+- [ ] Caddy routing works for multi-service hostnames
+- [ ] Build cache keys include service name
+- [ ] BuildRunner uses service path as working directory
+- [ ] Single-service projects continue to work unchanged (no regressions)
+- [ ] Failed service does not block remaining services
+- [ ] GitHub commit status set per service
+- [ ] Sequential build order matches deploy.yaml service order
+- [ ] `generateServiceUrl()` and `generateServicePreviewUrl()` produce correct URLs

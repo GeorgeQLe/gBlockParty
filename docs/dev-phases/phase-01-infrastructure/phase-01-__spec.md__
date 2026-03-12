@@ -1,0 +1,199 @@
+# Phase 1: Infrastructure Provisioning
+
+**Phase:** 1 of 12
+**Status:** Not Started
+**Dependencies:** None (foundational phase)
+**Depends on this phase:** All subsequent phases (2-12)
+
+---
+
+## Overview
+
+Phase 1 provisions all cloud infrastructure required by the gBlockParty deployment platform. By the end of this phase, the following must be running and accessible:
+
+- A Hetzner CX32 VPS (4 vCPU, 8 GB RAM, 80 GB disk) with Docker Engine and Caddy installed
+- An AWS RDS PostgreSQL instance (db.t4g.micro) with SSL-only access
+- An AWS S3 bucket (`gblockparty-builds`) for build cache and logs
+- AWS Secrets Manager secrets for all platform credentials
+- Cloudflare DNS with a wildcard record (`*.yourdomain.dev`) pointing to the VPS IP
+
+No application code is deployed in this phase. The goal is a verified, secure, and connected infrastructure layer that all subsequent phases build on.
+
+---
+
+## Architecture Context
+
+```
+                    Cloudflare (DNS + CDN + SSL)
+                    *.yourdomain.dev --> VPS IP
+                              |
+                              v
+                 +---------------------------+
+                 |   Hetzner VPS (CX32)      |
+                 |   Ubuntu 22.04 LTS        |
+                 |                           |
+                 |   Docker Engine           |
+                 |   Caddy (reverse proxy)   |
+                 |   systemd services        |
+                 |   UFW firewall            |
+                 +---------------------------+
+                       |              |
+            AWS SDK    |              |  PostgreSQL (SSL)
+                       v              v
+              +-------------+  +------------------+
+              |  AWS S3      |  |  AWS RDS         |
+              |  builds      |  |  db.t4g.micro    |
+              |  bucket      |  |  PostgreSQL 16   |
+              +-------------+  +------------------+
+                       |
+                       v
+              +-------------------+
+              |  AWS Secrets Mgr  |
+              |  5 secrets        |
+              +-------------------+
+```
+
+---
+
+## Requirements
+
+### Functional Requirements
+
+1. **AWS Resources (Terraform)**
+   - RDS PostgreSQL 16 instance (`db.t4g.micro`, 20 GB gp3 storage, auto-scaling to 100 GB)
+   - S3 bucket `gblockparty-builds` with 7-day lifecycle expiration, AES-256 encryption, all public access blocked
+   - Secrets Manager secrets: `database-url`, `github-app-private-key`, `github-webhook-secret`, `jwt-secret`, `encryption-key`
+   - Security group restricting RDS access to VPS IP and local dev IP
+   - IAM user/role with scoped access to S3 and Secrets Manager (least privilege)
+
+2. **VPS (Hetzner)**
+   - CX32 instance in US East (Ashburn) datacenter
+   - Ubuntu 22.04 LTS
+   - Docker Engine (latest stable) + Docker Compose v2
+   - UFW firewall: allow SSH (custom port), 80, 443; deny everything else
+   - SSH hardened: key-only auth, non-default port (e.g., 2222), root login disabled
+   - AWS CLI configured with IAM credentials for S3 and Secrets Manager access
+
+3. **Docker & Caddy**
+   - Docker network `gblockparty` created for inter-container communication
+   - Caddy installed as a systemd service with admin API enabled on `localhost:2019`
+   - Base Caddyfile configured with the platform dashboard route and a wildcard catch-all
+   - Caddy must obtain TLS certificates via Cloudflare DNS challenge (wildcard cert)
+   - systemd unit files for both Docker and Caddy with restart policies
+
+4. **Cloudflare DNS**
+   - Wildcard A record: `*.yourdomain.dev` pointing to the VPS public IP
+   - Root A record: `yourdomain.dev` pointing to the VPS public IP
+   - Cloudflare proxy enabled (orange cloud) for DDoS protection and CDN
+   - SSL/TLS mode set to "Full (Strict)"
+   - Cache rules configured for static assets
+
+5. **Verification**
+   - VPS can connect to RDS over SSL (`psql` test with `sslmode=require`)
+   - VPS can read/write to S3 (`aws s3 ls`, `aws s3 cp` test)
+   - VPS can read from Secrets Manager (`aws secretsmanager get-secret-value` test)
+   - Caddy responds to HTTP requests on the VPS
+   - DNS resolves `*.yourdomain.dev` to the VPS IP
+   - End-to-end: `curl https://platform.yourdomain.dev` returns a Caddy response
+
+### Non-Functional Requirements
+
+- All secrets stored in Secrets Manager, never in plain text on disk or in version control
+- RDS backups configured (7-day retention, daily window 03:00-04:00 UTC)
+- Terraform state stored in S3 backend with DynamoDB locking (or local state with `.gitignore`)
+- All infrastructure changes are reproducible via Terraform and documented scripts
+- SSH access requires a key file; password authentication fully disabled
+
+---
+
+## Existing Scaffolding
+
+The following files already exist in the repository and form the starting point:
+
+### Terraform (`/infra/terraform/`)
+
+| File | Status | Notes |
+|------|--------|-------|
+| `environments/prod/main.tf` | Exists | Calls RDS, S3, and Secrets modules |
+| `environments/prod/variables.tf` | Exists | Variables defined for all module inputs |
+| `environments/prod/providers.tf` | Exists | AWS provider, us-east-1, Terraform >= 1.5 |
+| `environments/prod/outputs.tf` | Exists | Outputs database_url, bucket_name, secret_arns |
+| `environments/prod/terraform.tfvars.example` | Exists | Example values |
+| `modules/rds/main.tf` | Exists | RDS instance resource (db.t4g.micro, pg16, gp3) |
+| `modules/s3/main.tf` | Exists | S3 bucket + lifecycle + encryption + public block |
+| `modules/secrets/main.tf` | Exists | 5 Secrets Manager secrets |
+
+**What needs to be added:**
+- Security group module (or inline resource) for RDS access control
+- IAM module for VPS access to S3 and Secrets Manager
+- Terraform backend configuration (S3 + DynamoDB or local)
+- VPC/subnet references (existing Bismarck VPC or new)
+- `publicly_accessible` on RDS needs to be `true` with SG restrictions (VPS is outside AWS VPC)
+- Parameter group for SSL enforcement on RDS
+
+### Docker (`/infra/docker/`)
+
+| File | Status | Notes |
+|------|--------|-------|
+| `docker-compose.yml` | Exists | Local dev: postgres + dashboard services |
+| `Caddyfile` | Exists | Base config: admin API on :2019, platform route |
+| `Dockerfile.dashboard` | Exists | Multi-stage build for dashboard |
+
+**What needs to be added:**
+- Production `docker-compose.prod.yml` for VPS
+- Caddy systemd service file
+- Docker network creation script
+- Caddy TLS configuration for wildcard cert via Cloudflare DNS challenge
+
+---
+
+## Steps
+
+| Step | Name | Description |
+|------|------|-------------|
+| 1 | Terraform AWS Resources | Complete Terraform configs; provision RDS, S3, Secrets Manager, security groups, IAM |
+| 2 | VPS Provisioning | Provision Hetzner CX32; install Docker, configure firewall, harden SSH |
+| 3 | Docker & Caddy Setup | Configure Docker network, Caddy with wildcard TLS, systemd services |
+| 4 | Cloudflare DNS Configuration | Create DNS records, configure SSL/TLS, set caching rules |
+| 5 | Infrastructure Verification | End-to-end connectivity tests across all components |
+
+---
+
+## Interaction with Other Phases
+
+Phase 1 is entirely foundational. It produces:
+
+- **For Phase 2 (Database & Migrations):** A running RDS instance that Drizzle migrations can target
+- **For Phase 3 (Auth & GitHub App):** Secrets Manager entries for GitHub App credentials, JWT secret
+- **For Phase 4 (Build System):** S3 bucket for build cache and logs, Docker Engine for image builds
+- **For Phase 5 (Deployment Engine):** Docker network, Caddy reverse proxy, port allocation
+- **For Phase 6 (Dashboard):** A running VPS where the dashboard container will be deployed
+- **For all phases:** DNS routing via Cloudflare, SSL/TLS termination
+
+No other phase can begin until Phase 1 infrastructure is verified.
+
+---
+
+## Risk Assessment
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| RDS publicly accessible without proper SG | Medium | High | Security group restricts to VPS IP + dev IP only; SSL required |
+| Hetzner US East datacenter latency to AWS us-east-1 | Low | Low | Same geographic region; expect <10ms |
+| Terraform state corruption | Low | Medium | Use S3 backend with versioning or keep local backups |
+| Cloudflare wildcard DNS propagation delay | Low | Low | Cloudflare DNS propagates within seconds |
+| VPS SSH lockout after hardening | Medium | High | Test SSH access before disabling password auth; keep Hetzner console access |
+| Caddy wildcard cert issuance failure | Low | Medium | Use Cloudflare DNS challenge plugin; test in staging first |
+
+---
+
+## Estimated Effort
+
+| Step | Estimated Time |
+|------|---------------|
+| Step 1: Terraform AWS | 2-3 hours |
+| Step 2: VPS Provisioning | 1-2 hours |
+| Step 3: Docker & Caddy | 1-2 hours |
+| Step 4: Cloudflare DNS | 30 minutes |
+| Step 5: Verification | 1 hour |
+| **Total** | **5-8 hours** |

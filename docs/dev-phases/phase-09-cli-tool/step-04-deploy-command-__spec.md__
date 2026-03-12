@@ -1,0 +1,337 @@
+# Step 4: Deploy Command
+
+**Phase:** 9 -- CLI Tool
+**Step:** 4 of 7
+**Status:** Not Started
+**Depends on:** Step 1 (CLI API route `POST /api/cli/deploy`), Step 2 (Login), Step 3 (Link), Phase 8 (Build log streaming via WebSocket/SSE)
+**Depends on this step:** None (independent of Steps 5-7)
+
+---
+
+## Goal
+
+Implement `gblockparty deploy` so the user can trigger a deployment from the terminal. The command reads the linked project config and current git info, sends a deploy request to the API, streams build logs in real-time, and prints the deployment URL on success.
+
+---
+
+## Background
+
+The deploy command is the most complex CLI command. It needs to:
+
+1. Read the linked project ID from `.gblockparty/config.json`
+2. Detect the current git branch and commit SHA from the local repository
+3. Send a `POST /api/cli/deploy` request with the project ID, branch, commit SHA, and production flag
+4. Connect to the returned `streamUrl` to receive build logs in real-time
+5. Display logs with proper ANSI color support
+6. Show a final success or failure message with the deployment URL
+
+---
+
+## File to Modify
+
+### `packages/cli/src/commands/deploy.ts`
+
+**Current state:** Prints "Deploy not yet implemented". Has `--branch` option defined.
+
+**Target implementation:**
+
+```typescript
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+import { execSync } from "node:child_process";
+import { ApiClient } from "../lib/api-client";
+import { getGlobalConfig, getProjectConfig } from "../lib/config";
+
+interface DeployResponse {
+  deploymentId: string;
+  type: string;
+  branch: string;
+  streamUrl: string;
+}
+
+interface DeploymentResult {
+  id: string;
+  status: string;
+  url?: string;
+  errorMessage?: string;
+}
+
+export const deployCommand = new Command("deploy")
+  .description("Trigger a deployment")
+  .option("--prod", "Deploy to production")
+  .option("-b, --branch <branch>", "Branch to deploy")
+  .action(async (options: { prod?: boolean; branch?: string }) => {
+    // Check authentication
+    const config = getGlobalConfig();
+    if (!config.token) {
+      console.error(chalk.red("Not authenticated. Run `gblockparty login` first."));
+      process.exit(1);
+    }
+
+    // Check project link
+    const projectConfig = getProjectConfig();
+    if (!projectConfig) {
+      console.error(chalk.red("No project linked. Run `gblockparty link` first."));
+      process.exit(1);
+    }
+
+    // Detect git info
+    const branch = options.branch ?? getGitBranch();
+    const commitSha = getGitCommitSha();
+
+    if (!branch) {
+      console.error(chalk.red("Could not detect git branch. Use --branch to specify."));
+      process.exit(1);
+    }
+
+    const deployType = options.prod ? "production" : "preview";
+    console.log(chalk.dim(`Deploying ${chalk.bold(branch)} (${commitSha?.slice(0, 7) ?? "latest"}) as ${deployType}...`));
+
+    // Trigger deployment
+    const spinner = ora("Triggering deployment...").start();
+    const client = new ApiClient();
+
+    let deployResponse: DeployResponse;
+    try {
+      deployResponse = await client.post<DeployResponse>("/api/cli/deploy", {
+        projectId: projectConfig.projectId,
+        branch,
+        commitSha,
+        production: options.prod ?? false,
+      });
+      spinner.succeed(`Deployment queued (${deployResponse.deploymentId.slice(0, 8)})`);
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to trigger deployment"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    }
+
+    // Stream build logs
+    console.log(chalk.dim("\n--- Build Logs ---\n"));
+
+    try {
+      await streamBuildLogs(config, deployResponse.streamUrl);
+    } catch (error) {
+      console.error(chalk.yellow("\nLog streaming interrupted."));
+      console.error(chalk.dim("The deployment may still be running."));
+    }
+
+    // Fetch final deployment status
+    const statusSpinner = ora("Checking deployment status...").start();
+    try {
+      const result = await client.get<DeploymentResult>(
+        `/api/projects/${projectConfig.projectId}/deployments/${deployResponse.deploymentId}`
+      );
+
+      if (result.status === "ready") {
+        statusSpinner.succeed(chalk.green("Deployment successful!"));
+        if (result.url) {
+          console.log(chalk.green(`\n  ${chalk.bold(result.url)}\n`));
+        }
+      } else if (result.status === "failed") {
+        statusSpinner.fail(chalk.red("Deployment failed"));
+        if (result.errorMessage) {
+          console.error(chalk.red(result.errorMessage));
+        }
+        process.exit(1);
+      } else {
+        statusSpinner.info(chalk.yellow(`Deployment status: ${result.status}`));
+        console.log(chalk.dim("Check the dashboard for more details."));
+      }
+    } catch (error) {
+      statusSpinner.fail(chalk.yellow("Could not fetch deployment status"));
+      console.log(chalk.dim("Check the dashboard for deployment results."));
+    }
+  });
+
+function getGitBranch(): string | null {
+  try {
+    return execSync("git rev-parse --abbrev-ref HEAD", { encoding: "utf-8" }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function getGitCommitSha(): string | null {
+  try {
+    return execSync("git rev-parse HEAD", { encoding: "utf-8" }).trim();
+  } catch {
+    return null;
+  }
+}
+
+async function streamBuildLogs(
+  config: { apiUrl?: string; token?: string },
+  streamUrl: string
+): Promise<void> {
+  const apiUrl = config.apiUrl ?? "http://localhost:3000";
+  const fullUrl = `${apiUrl}${streamUrl}`;
+
+  // Option A: WebSocket streaming
+  // const ws = new WebSocket(fullUrl, {
+  //   headers: { Authorization: `Bearer ${config.token}` },
+  // });
+  //
+  // return new Promise((resolve, reject) => {
+  //   ws.on("message", (data) => {
+  //     process.stdout.write(data.toString());
+  //   });
+  //   ws.on("close", () => resolve());
+  //   ws.on("error", (err) => reject(err));
+  // });
+
+  // Option B: SSE streaming (EventSource)
+  // Use fetch with streaming response
+  const response = await fetch(fullUrl, {
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      Accept: "text/event-stream",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Stream error: ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("No response body");
+  }
+
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+
+    // Parse SSE events
+    const lines = chunk.split("\n");
+    for (const line of lines) {
+      if (line.startsWith("data: ")) {
+        const data = line.slice(6);
+        if (data === "[DONE]") return;
+        process.stdout.write(data + "\n");
+      }
+    }
+  }
+}
+```
+
+---
+
+## Git Info Detection
+
+The command detects the current git branch and commit SHA using `git rev-parse`:
+
+- **Branch**: `git rev-parse --abbrev-ref HEAD` returns the current branch name (e.g., `main`, `feature/new-thing`)
+- **Commit SHA**: `git rev-parse HEAD` returns the full 40-character commit SHA
+
+Both are wrapped in try/catch blocks. If git is not available or the directory is not a git repository, the branch can be specified manually via `--branch`.
+
+---
+
+## Build Log Streaming
+
+The `streamUrl` returned by `POST /api/cli/deploy` points to a WebSocket or SSE endpoint that streams build log lines in real-time. The implementation should support both protocols, preferring SSE for simplicity (one-way streaming is sufficient for logs).
+
+**SSE format:**
+```
+data: Installing dependencies...
+data: added 1423 packages in 12s
+data: Building project...
+data: [DONE]
+```
+
+The `[DONE]` sentinel indicates the stream has completed. The CLI should stop reading and check the final deployment status.
+
+**Log output rules:**
+- ANSI escape codes are preserved (build tools emit colored output)
+- Each `data:` line is written directly to stdout
+- No additional formatting is applied to log lines (they appear exactly as the build process outputs them)
+
+---
+
+## Command Flags
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--prod` | none | Deploy to production | `false` (preview deployment) |
+| `--branch` | `-b` | Override the detected git branch | Auto-detected from git |
+
+---
+
+## Output Format
+
+**During deployment:**
+```
+Deploying main (a1b2c3d) as production...
+✔ Deployment queued (550e8400)
+
+--- Build Logs ---
+
+Cloning repository...
+Installing dependencies...
+added 1423 packages in 12s
+Building project...
+Creating optimized production build...
+✓ Compiled successfully
+Building Docker image...
+Image built: myapp:a1b2c3d4 (145 MB)
+Starting container...
+Health check passed
+
+✔ Deployment successful!
+
+  https://myapp.yourdomain.dev
+```
+
+**On failure:**
+```
+Deploying main (a1b2c3d) as production...
+✔ Deployment queued (550e8400)
+
+--- Build Logs ---
+
+Cloning repository...
+Installing dependencies...
+Building project...
+Error: Module not found: 'missing-package'
+
+✖ Deployment failed
+Build error: Module not found: 'missing-package'
+```
+
+---
+
+## Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Not authenticated | Print auth error, exit with code 1 |
+| Not linked to a project | Print link error, exit with code 1 |
+| Not in a git repository | Print error; allow `--branch` override but no commit SHA |
+| API returns 404 (project deleted) | Print "Project not found" error, exit with code 1 |
+| Build log stream drops | Print warning "Log streaming interrupted", check final status |
+| Deployment times out | After stream ends, poll for final status; print status or "check dashboard" |
+| `--prod` flag with dirty working tree | No warning (deployment uses the committed code on the server, not local files) |
+
+---
+
+## Verification Checklist
+
+- [ ] `gblockparty deploy` requires authentication and a linked project
+- [ ] Git branch is auto-detected from the current repository
+- [ ] Git commit SHA is auto-detected from HEAD
+- [ ] `--branch` overrides the detected branch
+- [ ] `--prod` triggers a production deployment
+- [ ] Default (no `--prod`) triggers a preview deployment
+- [ ] `POST /api/cli/deploy` is called with correct payload
+- [ ] Build logs stream in real-time in the terminal
+- [ ] ANSI colors are preserved in log output
+- [ ] Success message includes the deployment URL
+- [ ] Failure message includes the error details
+- [ ] Build log streaming interruption is handled gracefully
+- [ ] `pnpm typecheck` passes

@@ -1,0 +1,278 @@
+# Step 2: Caddy Dynamic Routing Client
+
+**Phase:** 5 -- Deployment Engine
+**Step:** 2 of 5
+**Status:** Not Started
+**Depends on:** Phase 1 (Infrastructure) -- Caddy must be installed on the VPS with admin API enabled on `http://localhost:2019`
+**Blocks:** Step 5 (Deployer Orchestration) -- `Deployer.deploy()` calls `CaddyClient.addRoute()` after health check passes
+
+---
+
+## Goal
+
+Implement the `CaddyClient` class to dynamically add and remove reverse-proxy routes via the Caddy admin API. When a deployment succeeds, a route is added so `{hostname} -> localhost:{port}`. When a deployment is replaced or cleaned up, the route is removed. No Caddy restart is required.
+
+---
+
+## Context
+
+Caddy is the reverse proxy on the VPS that routes incoming HTTPS requests to the correct Docker container. Cloudflare handles SSL termination and forwards requests to the VPS. Caddy listens on port 80/443 for incoming traffic and exposes an admin API on `http://localhost:2019` for dynamic configuration.
+
+### Caddy Admin API
+
+Caddy's admin API allows runtime configuration changes without restart:
+
+- **`POST /load`** -- Replace the entire Caddy config with a new JSON document
+- **`GET /config/`** -- Read the current config (or a subtree)
+- **`POST /config/...`** -- Add to the config at a specific path
+- **`PUT /config/...`** -- Replace at a specific path
+- **`DELETE /config/...`** -- Remove from a specific path
+- **`PATCH /config/...`** -- Partial update at a specific path
+
+For gBlockParty, the recommended approach is to manage routes via the `/config/apps/http/servers/srv0/routes` path. Each route has a matcher (hostname) and a handler (reverse_proxy to upstream port).
+
+### Route JSON Structure
+
+A Caddy route for `myapp.yourdomain.dev -> localhost:3001`:
+
+```json
+{
+  "@id": "route-myapp.yourdomain.dev",
+  "match": [
+    {
+      "host": ["myapp.yourdomain.dev"]
+    }
+  ],
+  "handle": [
+    {
+      "handler": "reverse_proxy",
+      "upstreams": [
+        {
+          "dial": "localhost:3001"
+        }
+      ]
+    }
+  ]
+}
+```
+
+The `@id` field is a Caddy convention that allows referencing the route later by ID (e.g., `DELETE /id/route-myapp.yourdomain.dev`). This is the cleanest way to manage individual routes.
+
+---
+
+## File
+
+**`packages/core/src/routing/caddy.ts`**
+
+### Current State (TODO Stub)
+
+```typescript
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("caddy");
+
+export class CaddyClient {
+  private adminUrl: string;
+
+  constructor(adminUrl?: string) {
+    this.adminUrl = adminUrl ?? process.env.CADDY_ADMIN_URL ?? "http://localhost:2019";
+  }
+
+  async addRoute(
+    hostname: string,
+    upstreamPort: number,
+  ): Promise<void> {
+    // TODO: POST to Caddy admin API to add reverse proxy route
+    // hostname -> localhost:upstreamPort
+    logger.info({ hostname, upstreamPort }, "Adding Caddy route");
+    throw new Error("Not implemented");
+  }
+
+  async removeRoute(hostname: string): Promise<void> {
+    // TODO: Remove route from Caddy config
+    logger.info({ hostname }, "Removing Caddy route");
+    throw new Error("Not implemented");
+  }
+
+  async reloadConfig(): Promise<void> {
+    // TODO: POST http://localhost:2019/load with full config
+    throw new Error("Not implemented");
+  }
+}
+```
+
+---
+
+## Implementation Requirements
+
+### `addRoute(hostname, upstreamPort)`
+
+1. Build the route JSON object:
+   ```typescript
+   const routeId = `route-${hostname}`;
+   const route = {
+     "@id": routeId,
+     match: [{ host: [hostname] }],
+     handle: [
+       {
+         handler: "reverse_proxy",
+         upstreams: [{ dial: `localhost:${upstreamPort}` }],
+       },
+     ],
+   };
+   ```
+
+2. First, attempt to remove any existing route for this hostname (idempotent upsert). Use `DELETE /id/{routeId}` and ignore 404 errors (route did not exist).
+
+3. Then, add the new route by POSTing to the routes array:
+   ```
+   POST {adminUrl}/config/apps/http/servers/srv0/routes
+   Content-Type: application/json
+   Body: route JSON
+   ```
+
+4. Verify the response is 2xx. If not, throw an error with the Caddy response body for debugging.
+
+5. Log success:
+   ```
+   logger.info({ hostname, upstreamPort, routeId }, "Caddy route added")
+   ```
+
+6. Retry logic: If the Caddy admin API returns a 5xx or connection error, retry up to 3 times with exponential backoff (1s, 2s, 4s). Log each retry attempt.
+
+### `removeRoute(hostname)`
+
+1. Compute the route ID: `route-${hostname}`
+
+2. Send `DELETE {adminUrl}/id/{routeId}` to remove the route by its ID.
+
+3. If Caddy returns 404 (route not found), this is a no-op -- log a debug message but do not throw.
+
+4. If Caddy returns a non-2xx, non-404 response, throw an error.
+
+5. Log:
+   ```
+   logger.info({ hostname, routeId }, "Caddy route removed")
+   ```
+
+### `reloadConfig()`
+
+1. Read the current full config from `GET {adminUrl}/config/`.
+
+2. POST it back to `POST {adminUrl}/load` to trigger a reload.
+
+3. This is a fallback mechanism -- in normal operation, `addRoute` and `removeRoute` are sufficient. `reloadConfig` is used for recovery scenarios or initial setup.
+
+4. If the reload fails, throw with the Caddy error response.
+
+### HTTP Client
+
+Use Node.js built-in `fetch` (available in Node 18+) for HTTP requests to the Caddy admin API. No external HTTP client library needed.
+
+```typescript
+const response = await fetch(`${this.adminUrl}/config/apps/http/servers/srv0/routes`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(route),
+});
+
+if (!response.ok) {
+  const body = await response.text();
+  throw new Error(`Caddy API error (${response.status}): ${body}`);
+}
+```
+
+---
+
+## Caddy Server Configuration Prerequisite
+
+The Caddy server must be configured with an initial HTTP server block. The minimum Caddyfile or JSON config that the admin API requires:
+
+```json
+{
+  "apps": {
+    "http": {
+      "servers": {
+        "srv0": {
+          "listen": [":443", ":80"],
+          "routes": []
+        }
+      }
+    }
+  }
+}
+```
+
+This base config is set up in Phase 1 (Infrastructure). The deployment engine adds and removes individual routes from the `routes` array.
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Caddy admin API not reachable (ECONNREFUSED) | Retry 3 times with backoff, then throw |
+| Caddy returns 5xx | Retry 3 times with backoff, then throw |
+| Caddy returns 4xx (not 404 on remove) | Throw immediately with response body |
+| Route already exists for hostname | Remove old route first, then add new one (idempotent) |
+| Route does not exist on remove | No-op, log debug message |
+| Invalid hostname format | Not validated here -- caller (Deployer) is responsible |
+| Invalid port (0, negative, > 65535) | Not validated here -- PortAllocator ensures valid ports |
+
+---
+
+## Logging
+
+Events to log:
+
+| Level | Event | Fields |
+|-------|-------|--------|
+| `info` | Route added | `hostname`, `upstreamPort`, `routeId` |
+| `info` | Route removed | `hostname`, `routeId` |
+| `info` | Config reloaded | -- |
+| `warn` | Retrying Caddy API call | `attempt`, `maxAttempts`, `error` |
+| `debug` | Route not found on remove (no-op) | `hostname`, `routeId` |
+| `error` | Caddy API error after all retries | `hostname`, `statusCode`, `responseBody` |
+
+---
+
+## Caddy Route ID Convention
+
+Route IDs follow the pattern `route-{hostname}`:
+
+| Deployment | Hostname | Route ID |
+|------------|----------|----------|
+| Production `myapp` | `myapp.yourdomain.dev` | `route-myapp.yourdomain.dev` |
+| Preview PR #42 | `pr-42--myapp.yourdomain.dev` | `route-pr-42--myapp.yourdomain.dev` |
+| Platform dashboard | `platform.yourdomain.dev` | `route-platform.yourdomain.dev` |
+
+The `--` separator in preview hostnames is safe for use in Caddy route IDs.
+
+---
+
+## Acceptance Criteria
+
+1. `addRoute("myapp.yourdomain.dev", 3001)` creates a Caddy route that proxies `myapp.yourdomain.dev` to `localhost:3001`.
+2. After `addRoute()`, an HTTP request to `myapp.yourdomain.dev` reaches the container on port 3001.
+3. `addRoute()` for an existing hostname updates the upstream port (idempotent upsert).
+4. `removeRoute("myapp.yourdomain.dev")` removes the route from Caddy.
+5. After `removeRoute()`, HTTP requests to the hostname return a Caddy error (no route matched).
+6. `removeRoute()` for a non-existent hostname is a no-op (does not throw).
+7. Transient Caddy API failures are retried up to 3 times.
+8. `reloadConfig()` successfully reloads the Caddy configuration.
+9. The admin URL is configurable via constructor parameter or `CADDY_ADMIN_URL` env var.
+10. `pnpm typecheck` passes with no errors.
+
+---
+
+## Testing Approach
+
+Integration tests require a running Caddy instance. For unit tests, mock the `fetch` calls.
+
+1. **Add route**: Mock `fetch` to return 200. Verify correct URL and JSON body sent.
+2. **Add route (upsert)**: Mock DELETE (200 for existing route), then POST (200). Verify both calls made.
+3. **Remove route**: Mock DELETE returning 200. Verify correct URL.
+4. **Remove non-existent route**: Mock DELETE returning 404. Verify no error thrown.
+5. **Retry on 500**: Mock first call returning 500, second returning 200. Verify retry.
+6. **Retry exhaustion**: Mock all calls returning 500. Verify error thrown after 3 attempts.
+7. **Reload config**: Mock GET config (200), POST /load (200). Verify calls.

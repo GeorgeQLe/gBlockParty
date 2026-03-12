@@ -1,0 +1,234 @@
+# Step 2: Monorepo Service Detection
+
+**Phase:** 11 -- Monorepo & Advanced Configuration
+**Step:** 2 of 4
+**Type:** Backend implementation
+**Depends on:** Step 1 (ConfigParser provides the `DeployConfig` with service paths)
+**Blocks:** Step 3 (orchestration needs to know which services to build)
+
+---
+
+## Objective
+
+Implement the monorepo service detection logic that determines which services are affected by a push event. Given a `DeployConfig` with multiple services (each having a `path` field) and a list of changed files from the GitHub push webhook, the detector returns only the services whose files changed. This prevents unnecessary builds when a change only affects one service in a monorepo.
+
+---
+
+## Context
+
+GitHub push webhooks include a `commits` array, where each commit has `added`, `modified`, and `removed` file lists. For example:
+
+```json
+{
+  "commits": [
+    {
+      "id": "abc123",
+      "added": ["apps/web/src/page.tsx"],
+      "modified": ["apps/web/package.json", "pnpm-lock.yaml"],
+      "removed": []
+    }
+  ]
+}
+```
+
+In a monorepo with this structure:
+```
+my-platform/
+  apps/web/          # service "web", path: "apps/web"
+  services/api/      # service "api", path: "services/api"
+  packages/shared/   # shared code (not a service)
+  pnpm-lock.yaml     # root file
+```
+
+The changed files `apps/web/src/page.tsx` and `apps/web/package.json` match the `web` service's path (`apps/web`), but the root file `pnpm-lock.yaml` does not match any service path, so it triggers a rebuild of ALL services (it could affect any service's dependencies).
+
+---
+
+## File to Create: `packages/core/src/build/monorepo.ts`
+
+### Types
+
+```typescript
+import type { ServiceConfig, DeployConfig } from "./config-parser";
+
+export interface AffectedService {
+  service: ServiceConfig;
+  changedFiles: string[];     // files that triggered this service's rebuild
+  reason: "direct" | "shared"; // "direct" = files in service path; "shared" = root/shared files changed
+}
+
+export interface PushCommit {
+  id: string;
+  added: string[];
+  modified: string[];
+  removed: string[];
+}
+```
+
+### Function: `getChangedFiles(commits: PushCommit[]): string[]`
+
+Extract and deduplicate all changed file paths from the push webhook's commits array.
+
+```typescript
+export function getChangedFiles(commits: PushCommit[]): string[] {
+  const files = new Set<string>();
+  for (const commit of commits) {
+    for (const f of commit.added) files.add(f);
+    for (const f of commit.modified) files.add(f);
+    for (const f of commit.removed) files.add(f);
+  }
+  return Array.from(files);
+}
+```
+
+### Function: `getAffectedServices(config: DeployConfig, changedFiles: string[]): AffectedService[]`
+
+**Algorithm:**
+
+1. If `config.isMultiService` is `false` (single service), return the single service as affected with reason `"direct"` and all changed files.
+
+2. For multi-service configs:
+
+   a. **Categorize each changed file**: For each file, check if it falls under any service's path.
+   ```typescript
+   function getServiceForFile(file: string, services: ServiceConfig[]): ServiceConfig | null {
+     // Normalize paths: ensure service path ends without trailing slash
+     for (const service of services) {
+       const prefix = service.path === "." ? "" : service.path.replace(/\/$/, "") + "/";
+       if (prefix === "" || file.startsWith(prefix)) {
+         return service;
+       }
+     }
+     return null; // file is outside all service paths (shared/root)
+   }
+   ```
+
+   b. **Build a map of service name -> changed files**:
+   ```typescript
+   const serviceFiles = new Map<string, string[]>();
+   const sharedFiles: string[] = [];
+
+   for (const file of changedFiles) {
+     const service = getServiceForFile(file, config.services);
+     if (service) {
+       const existing = serviceFiles.get(service.name) ?? [];
+       existing.push(file);
+       serviceFiles.set(service.name, existing);
+     } else {
+       sharedFiles.push(file);
+     }
+   }
+   ```
+
+   c. **Determine affected services**:
+   - If `sharedFiles` is non-empty, ALL services are affected (shared files could impact any service).
+   - Otherwise, only services with direct file changes are affected.
+
+   ```typescript
+   const affected: AffectedService[] = [];
+
+   if (sharedFiles.length > 0) {
+     // Shared files changed -- rebuild all services
+     for (const service of config.services) {
+       affected.push({
+         service,
+         changedFiles: [...(serviceFiles.get(service.name) ?? []), ...sharedFiles],
+         reason: serviceFiles.has(service.name) ? "direct" : "shared",
+       });
+     }
+   } else {
+     // Only direct changes -- rebuild affected services only
+     for (const [name, files] of serviceFiles) {
+       const service = config.services.find(s => s.name === name)!;
+       affected.push({
+         service,
+         changedFiles: files,
+         reason: "direct",
+       });
+     }
+   }
+   ```
+
+3. **Return** the `AffectedService[]` array.
+
+---
+
+## Edge Cases
+
+### Service Path Considerations
+
+| Path Value | Matches Files Starting With | Notes |
+|------------|---------------------------|-------|
+| `"apps/web"` | `apps/web/...` | Standard subdirectory |
+| `"."` | Everything | Root service (same as single-service) |
+| `"services/api"` | `services/api/...` | Nested subdirectory |
+
+### Overlapping Paths
+
+If one service's path is a prefix of another's (e.g., `services/` and `services/api/`), the more specific path takes precedence. Sort service paths by length (longest first) when matching:
+
+```typescript
+const sortedServices = [...services].sort(
+  (a, b) => b.path.length - a.path.length,
+);
+```
+
+### Empty Changed Files
+
+If the commits array contains no file changes (e.g., a merge commit with no new changes), return an empty array (no services affected, no builds triggered).
+
+### Root-Only Files
+
+Common root files that trigger all-service rebuilds:
+- `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`
+- `tsconfig.json`
+- `.env.example`
+- `deploy.yaml` itself
+
+This behavior is correct since lockfile changes can affect any service's dependencies.
+
+---
+
+## Integration with Webhook Handler
+
+The webhook handler (Phase 6) will call this module after parsing the config:
+
+```typescript
+// In webhook handler (simplified)
+const config = await parseConfig(repoPath);
+if (!config) {
+  // Single-project, auto-detected -- build everything
+  await buildAndDeploy(project, commitSha);
+  return;
+}
+
+const changedFiles = getChangedFiles(payload.commits);
+const affected = getAffectedServices(config, changedFiles);
+
+if (affected.length === 0) {
+  logger.info("No services affected by this push, skipping build");
+  return;
+}
+
+for (const { service } of affected) {
+  await buildAndDeployService(project, service, commitSha);
+}
+```
+
+---
+
+## Verification
+
+- [ ] `getChangedFiles()` extracts and deduplicates files from multiple commits
+- [ ] `getChangedFiles()` includes added, modified, and removed files
+- [ ] Single-service config: always returns the service as affected
+- [ ] Multi-service: file in `apps/web/src/page.tsx` only affects `web` service (path: `apps/web`)
+- [ ] Multi-service: file in `services/api/src/index.ts` only affects `api` service (path: `services/api`)
+- [ ] Multi-service: file in root `pnpm-lock.yaml` affects ALL services
+- [ ] Multi-service: file in `packages/shared/` (not a service path) affects ALL services
+- [ ] Multi-service: changes in two different service paths affects both services
+- [ ] Overlapping paths: more specific path takes precedence
+- [ ] Empty commits array returns empty affected services array
+- [ ] Service with `path: "."` matches all files
+- [ ] Paths with trailing slashes handled correctly
+- [ ] `reason` field correctly set to `"direct"` or `"shared"`

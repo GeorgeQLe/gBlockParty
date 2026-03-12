@@ -1,0 +1,264 @@
+# Step 2: Discord Webhook Integration
+
+**Phase:** 12 -- Notifications, Monitoring & Polish
+**Step:** 2 of 6
+**Type:** Backend implementation
+**Depends on:** Step 1 (shares helper functions like `getStatusColor()`, `formatTitle()`)
+**Blocks:** Step 3 (settings page needs to test Discord notifications), Step 4 (trigger integration calls this function)
+
+---
+
+## Objective
+
+Replace the TODO stub in `sendDiscordNotification()` with a working implementation that sends a rich embedded message to a Discord Webhook URL. Messages use Discord's embed format with color coding, structured fields, and a link to the dashboard. The implementation mirrors the Slack integration but uses Discord's API format.
+
+---
+
+## Current State
+
+The stub in `packages/core/src/notifications/notifier.ts`:
+
+```typescript
+export async function sendDiscordNotification(
+  webhookUrl: string,
+  payload: NotificationPayload,
+): Promise<void> {
+  // TODO: Send Discord webhook message
+  logger.info({ projectName: payload.projectName }, "Sending Discord notification");
+  throw new Error("Not implemented");
+}
+```
+
+---
+
+## Discord Webhook API
+
+Discord Webhooks accept a POST request with a JSON body. The URL format is:
+```
+https://discord.com/api/webhooks/{webhook.id}/{webhook.token}
+```
+
+The endpoint returns `204 No Content` on success (not 200).
+
+### Message Format
+
+Discord uses an `embeds` array for rich messages:
+
+```typescript
+interface DiscordWebhookBody {
+  content?: string;           // plain text (optional with embeds)
+  username?: string;          // override bot username
+  avatar_url?: string;        // override bot avatar
+  embeds: DiscordEmbed[];
+}
+
+interface DiscordEmbed {
+  title: string;              // e.g., "Build Failed: my-project"
+  url?: string;               // clickable title link
+  description?: string;       // error message
+  color: number;              // decimal color value (not hex string)
+  fields: DiscordField[];
+  footer: { text: string };
+  timestamp: string;          // ISO 8601 timestamp
+}
+
+interface DiscordField {
+  name: string;
+  value: string;
+  inline: boolean;
+}
+```
+
+**Key difference from Slack:** Discord uses decimal color values (e.g., `0xFF0000` = `16711680`), not hex strings.
+
+---
+
+## Implementation
+
+```typescript
+export async function sendDiscordNotification(
+  webhookUrl: string,
+  payload: NotificationPayload,
+): Promise<void> {
+  const color = getDiscordColor(payload.status);
+  const title = formatTitle(payload);
+  const dashboardUrl = payload.url
+    ? payload.url
+    : `${process.env.NEXT_PUBLIC_DASHBOARD_URL ?? "https://platform.yourdomain.dev"}`;
+
+  const body = {
+    username: "gBlockParty",
+    embeds: [
+      {
+        title,
+        url: dashboardUrl,
+        description: payload.errorMessage ?? undefined,
+        color,
+        fields: [
+          {
+            name: "Project",
+            value: payload.projectName,
+            inline: true,
+          },
+          {
+            name: "Event",
+            value: payload.deploymentType,
+            inline: true,
+          },
+          {
+            name: "Status",
+            value: payload.status,
+            inline: true,
+          },
+        ],
+        footer: { text: "gBlockParty" },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  };
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  // Discord returns 204 on success, but also accepts 200
+  if (!response.ok) {
+    // Handle rate limiting
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("retry-after");
+      logger.warn(
+        { retryAfterSeconds: retryAfter, projectName: payload.projectName },
+        "Discord rate limited",
+      );
+      // Optionally retry after the specified delay
+      if (retryAfter) {
+        const delayMs = parseFloat(retryAfter) * 1000;
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        // Retry once
+        const retryResponse = await fetch(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!retryResponse.ok) {
+          throw new Error(`Discord webhook failed after retry: ${retryResponse.status}`);
+        }
+        logger.info({ projectName: payload.projectName }, "Discord notification sent (after retry)");
+        return;
+      }
+    }
+
+    const responseBody = await response.text().catch(() => "unknown");
+    logger.error(
+      { status: response.status, body: responseBody, projectName: payload.projectName },
+      "Discord notification failed",
+    );
+    throw new Error(`Discord webhook returned ${response.status}: ${responseBody}`);
+  }
+
+  logger.info({ projectName: payload.projectName }, "Discord notification sent");
+}
+```
+
+### Discord Color Mapping
+
+```typescript
+function getDiscordColor(status: string): number {
+  switch (status) {
+    case "failed":
+      return 0xFF0000;        // red (16711680)
+    case "success":
+    case "ready":
+      return 0x36A64F;        // green (3581519)
+    case "rollback":
+      return 0xFFA500;        // orange (16753920)
+    default:
+      return 0x808080;        // gray (8421504)
+  }
+}
+```
+
+---
+
+## Shared Helpers with Slack
+
+The following helpers are shared between Slack and Discord implementations (defined once in the file):
+
+- `formatTitle(payload)`: Returns the message title based on event type.
+- `getStatusColor(status)`: Returns hex string (Slack) -- Discord uses a separate `getDiscordColor()` returning a number.
+
+Consider refactoring: `formatTitle()` is reused as-is. Color functions are separate because of format differences (string vs. number).
+
+---
+
+## Example Discord Embed
+
+```json
+{
+  "username": "gBlockParty",
+  "embeds": [
+    {
+      "title": "Build/Deploy Failed: my-project",
+      "url": "https://platform.yourdomain.dev/projects/abc/deployments/xyz",
+      "description": "Command 'pnpm build' failed with exit code 1",
+      "color": 16711680,
+      "fields": [
+        { "name": "Project", "value": "my-project", "inline": true },
+        { "name": "Event", "value": "production", "inline": true },
+        { "name": "Status", "value": "failed", "inline": true }
+      ],
+      "footer": { "text": "gBlockParty" },
+      "timestamp": "2026-03-02T15:45:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+## Error Handling
+
+- **HTTP 429 (Rate Limited)**: Discord returns a `retry-after` header (in seconds). Retry once after the specified delay. If the retry also fails, throw an error.
+- **HTTP 400 (Bad Request)**: Usually means the embed format is invalid. Log the response body for debugging.
+- **Network timeout**: 10-second timeout via `AbortSignal.timeout()`.
+- **The `notify()` aggregator**: A Discord failure does not prevent Slack from sending (uses `Promise.allSettled()`).
+
+---
+
+## Discord Webhook Limits
+
+| Limit | Value |
+|-------|-------|
+| Max embeds per message | 10 |
+| Max fields per embed | 25 |
+| Max title length | 256 characters |
+| Max description length | 4096 characters |
+| Max field name length | 256 characters |
+| Max field value length | 1024 characters |
+| Rate limit | 30 requests/60s per webhook |
+
+These limits are unlikely to be hit with deployment notifications, but error messages should be truncated if they exceed the description limit.
+
+---
+
+## Verification
+
+- [ ] `sendDiscordNotification()` sends HTTP POST to webhook URL with correct JSON body
+- [ ] Message uses Discord embed format with `embeds` array
+- [ ] Color is a decimal number (not hex string)
+- [ ] Username overridden to "gBlockParty"
+- [ ] Embed fields: project name, event type, status (all inline)
+- [ ] Error message included as embed description when present
+- [ ] Dashboard link included as embed `url`
+- [ ] Footer shows "gBlockParty"
+- [ ] Timestamp in ISO 8601 format
+- [ ] HTTP 204 treated as success (not just 200)
+- [ ] HTTP 429 rate limiting handled with retry
+- [ ] Non-2xx response throws error with status and body details
+- [ ] Network timeout (10s) enforced
+- [ ] No sensitive information in the notification message
+- [ ] Error messages truncated to 4096 characters (Discord limit)

@@ -1,0 +1,229 @@
+# Step 1: Port Allocator
+
+**Phase:** 5 -- Deployment Engine
+**Step:** 1 of 5
+**Status:** Not Started
+**Depends on:** Phase 2 (Database & Migrations) -- `port_allocations` table must exist
+**Blocks:** Step 5 (Deployer Orchestration) -- `Deployer.deploy()` calls `PortAllocator.allocate()` as the first pipeline step
+
+---
+
+## Goal
+
+Implement the `PortAllocator` class so it can allocate the next available port from the correct range (production or preview), persist the allocation in the `port_allocations` database table, and release ports when containers are stopped.
+
+---
+
+## Context
+
+Every deployed container is assigned a unique host port. Caddy routes traffic from the subdomain hostname to `localhost:{port}`. The port ranges are defined in `packages/shared/src/constants/deployment.ts`:
+
+```typescript
+export const PORT_RANGES = {
+  DASHBOARD: 3000,
+  PRODUCTION_MIN: 3001,
+  PRODUCTION_MAX: 3999,
+  PREVIEW_MIN: 4000,
+  PREVIEW_MAX: 4999,
+} as const;
+```
+
+Production deployments get ports 3001-3999 (999 ports). Preview deployments get ports 4000-4999 (1000 ports). The platform dashboard uses port 3000 (reserved, never allocated).
+
+Port allocations are tracked in the `port_allocations` table:
+
+```typescript
+// packages/shared/src/db/schema.ts
+export const portAllocations = pgTable(
+  "port_allocations",
+  {
+    port: integer("port").primaryKey(),
+    deploymentId: uuid("deployment_id")
+      .references(() => deployments.id, { onDelete: "cascade" })
+      .notNull(),
+    allocatedAt: timestamp("allocated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("idx_port_allocations_deployment").on(table.deploymentId),
+  ],
+);
+```
+
+The `port` column is the primary key, which means the database enforces uniqueness -- two deployments cannot share the same port.
+
+---
+
+## File
+
+**`packages/core/src/deploy/port-allocator.ts`**
+
+### Current State (TODO Stub)
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+import { PORT_RANGES } from "@gblockparty/shared/constants";
+
+export class PortAllocator {
+  constructor(private db: Database) {}
+
+  async allocate(
+    deploymentId: string,
+    type: "production" | "preview",
+  ): Promise<number> {
+    // TODO: Find next available port in the appropriate range
+    // Production: 3001-3999
+    // Preview: 4000-4999
+    // Insert into port_allocations table
+    throw new Error("Not implemented");
+  }
+
+  async release(port: number): Promise<void> {
+    // TODO: Remove from port_allocations table
+    throw new Error("Not implemented");
+  }
+
+  async getUsedPorts(): Promise<number[]> {
+    // TODO: Query all allocated ports
+    throw new Error("Not implemented");
+  }
+}
+```
+
+---
+
+## Implementation Requirements
+
+### `allocate(deploymentId, type)`
+
+1. Determine the port range based on `type`:
+   - `"production"`: `PORT_RANGES.PRODUCTION_MIN` (3001) to `PORT_RANGES.PRODUCTION_MAX` (3999)
+   - `"preview"`: `PORT_RANGES.PREVIEW_MIN` (4000) to `PORT_RANGES.PREVIEW_MAX` (4999)
+
+2. Query the `port_allocations` table for all ports currently allocated within the target range:
+   ```sql
+   SELECT port FROM port_allocations WHERE port >= $min AND port <= $max ORDER BY port ASC;
+   ```
+
+3. Find the lowest available port in the range that is not in the used set. The simplest approach: iterate from `min` to `max`, return the first port not in the used set.
+
+4. If no port is available (all ports in the range are allocated), throw an error:
+   ```
+   Error: No available ports in range {min}-{max} (type: {type})
+   ```
+
+5. Insert the allocation into the database:
+   ```sql
+   INSERT INTO port_allocations (port, deployment_id) VALUES ($port, $deploymentId);
+   ```
+
+6. Use a database transaction to prevent race conditions. If two `allocate()` calls run concurrently, the unique constraint on `port` prevents both from succeeding with the same port. The losing call should retry with the next available port or let the error propagate.
+
+7. Return the allocated port number.
+
+### `release(port)`
+
+1. Delete the row from `port_allocations`:
+   ```sql
+   DELETE FROM port_allocations WHERE port = $port;
+   ```
+
+2. If the port was not allocated (no rows deleted), this is a no-op -- do not throw.
+
+3. Log the release for debugging:
+   ```
+   logger.info({ port }, "Port released")
+   ```
+
+### `getUsedPorts()`
+
+1. Query all allocated ports:
+   ```sql
+   SELECT port FROM port_allocations ORDER BY port ASC;
+   ```
+
+2. Return as a plain `number[]` array.
+
+---
+
+## Drizzle ORM Usage
+
+Use Drizzle ORM's query builder, not raw SQL. The schema is already imported in the existing stub:
+
+```typescript
+import { portAllocations } from "@gblockparty/shared/db/schema";
+import { eq, and, gte, lte } from "drizzle-orm";
+
+// Insert
+await db.insert(portAllocations).values({ port, deploymentId });
+
+// Delete
+await db.delete(portAllocations).where(eq(portAllocations.port, port));
+
+// Select in range
+const used = await db.select({ port: portAllocations.port })
+  .from(portAllocations)
+  .where(and(
+    gte(portAllocations.port, min),
+    lte(portAllocations.port, max),
+  ))
+  .orderBy(portAllocations.port);
+```
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| No ports available in range | Throw `Error("No available ports in range {min}-{max} (type: {type})")` |
+| Unique constraint violation (race condition) | Retry allocation with next available port, or let error propagate |
+| Database connection error | Let error propagate (caller handles) |
+| Invalid type parameter | TypeScript union type prevents this at compile time |
+| Port 3000 requested | Never allocated -- it is outside the allocatable ranges |
+
+---
+
+## Logging
+
+Add a logger at the top of the file:
+
+```typescript
+import { createLogger } from "@gblockparty/shared/backend";
+const logger = createLogger("port-allocator");
+```
+
+Log events:
+- `logger.info({ port, deploymentId, type }, "Port allocated")` on successful allocation
+- `logger.info({ port }, "Port released")` on release
+- `logger.warn({ type, min, max }, "No available ports in range")` when range is exhausted
+
+---
+
+## Acceptance Criteria
+
+1. `allocate("dep-1", "production")` returns a port in 3001-3999 and inserts a row into `port_allocations`.
+2. `allocate("dep-2", "preview")` returns a port in 4000-4999 and inserts a row into `port_allocations`.
+3. Two consecutive `allocate()` calls return different ports.
+4. `release(port)` removes the row from `port_allocations`.
+5. After `release(port)`, calling `allocate()` can return the released port.
+6. `getUsedPorts()` returns all currently allocated ports.
+7. When all ports in a range are allocated, `allocate()` throws a descriptive error.
+8. The database unique constraint prevents duplicate port allocations.
+9. Port 3000 is never allocated (outside the allocatable ranges).
+10. `pnpm typecheck` passes with no errors.
+
+---
+
+## Testing Approach
+
+Unit tests with a test database (or mocked Drizzle instance):
+
+1. **Allocate production port**: Call `allocate("d1", "production")`, verify port is in 3001-3999, verify DB row exists.
+2. **Allocate preview port**: Call `allocate("d2", "preview")`, verify port is in 4000-4999, verify DB row exists.
+3. **Sequential allocation**: Allocate multiple ports, verify each is unique and sequential.
+4. **Release and re-allocate**: Allocate port, release it, allocate again -- should get same or lower port.
+5. **Range exhaustion**: Fill all ports in a range, verify next allocation throws.
+6. **getUsedPorts**: Allocate several ports, verify `getUsedPorts()` returns them all.
+7. **Idempotent release**: Releasing a non-allocated port does not throw.

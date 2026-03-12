@@ -1,0 +1,503 @@
+# Step 4: GitHub Webhook Handler
+
+**Phase:** 6, Step 4
+**Status:** Not Started
+**Depends on:** Step 1 (projects API -- project lookup by repo name), Step 2 (deployments API -- creating deployment records), Phase 3 (GitHub App -- signature verification already implemented)
+**Blocks:** Phase 7 (preview deployments -- pull_request event handling)
+
+---
+
+## Goal
+
+Complete the GitHub webhook POST handler to process push events end-to-end: parse the event type, deduplicate by delivery ID, look up the project by installation ID and repository name, create a deployment record, and enqueue a build. Pull request events are acknowledged but routed to a placeholder for Phase 7. Installation events update the `github_installations` table.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/api/webhooks/github/route.ts`
+
+```typescript
+import { NextRequest, NextResponse } from "next/server";
+import { verifySignature } from "@gblockparty/core/github";
+
+export async function POST(request: NextRequest) {
+  const body = await request.text();
+  const signature = request.headers.get("x-hub-signature-256") ?? "";
+  const event = request.headers.get("x-github-event") ?? "";
+  const deliveryId = request.headers.get("x-github-delivery") ?? "";
+
+  const secret = process.env.GITHUB_APP_WEBHOOK_SECRET;
+  if (!secret) {
+    return NextResponse.json({ error: "Webhook secret not configured" }, { status: 500 });
+  }
+
+  if (!verifySignature(body, signature, secret)) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
+  // TODO: Parse payload, call handleWebhook from @gblockparty/core
+  // TODO: Deduplicate by delivery ID
+
+  return NextResponse.json({ received: true });
+}
+```
+
+**Already implemented:** HMAC-SHA256 signature verification via `verifySignature()`.
+
+### `packages/core/src/github/webhooks.ts` (handleWebhook -- TODO stubs)
+
+```typescript
+export async function handleWebhook(ctx: WebhookContext): Promise<void> {
+  const { event, payload, deliveryId } = ctx;
+  switch (event) {
+    case "push":
+      // TODO: Handle push to production branch -> trigger production deployment
+      break;
+    case "pull_request":
+      // TODO: Handle PR opened/synchronize -> preview deployment
+      break;
+    case "installation":
+      // TODO: Handle app installation/uninstallation
+      break;
+    default:
+      logger.debug({ event }, "Unhandled webhook event");
+  }
+}
+```
+
+### `packages/shared/src/types/github.ts` (WebhookPayload type)
+
+```typescript
+export interface WebhookPayload {
+  action: string;
+  installation?: {
+    id: number;
+    account: { login: string; type: string };
+  };
+  repository?: {
+    full_name: string;
+    default_branch: string;
+    clone_url: string;
+  };
+  ref?: string;           // push: "refs/heads/main"
+  after?: string;         // push: new commit SHA
+  before?: string;        // push: previous commit SHA
+  pull_request?: {
+    number: number;
+    head: { sha: string; ref: string };
+    base: { ref: string };
+    merged: boolean;
+  };
+  sender?: {
+    login: string;
+    id: number;
+  };
+}
+```
+
+---
+
+## Implementation Details
+
+The webhook handler has two layers:
+
+1. **Route handler** (`apps/dashboard/src/app/api/webhooks/github/route.ts`) -- HTTP layer: parse body, verify signature, deduplicate, dispatch to core handler, return 200 quickly.
+2. **Core handler** (`packages/core/src/github/webhooks.ts`) -- Business logic: look up project, create deployment, enqueue build.
+
+### Layer 1: Route Handler Updates
+
+#### File: `apps/dashboard/src/app/api/webhooks/github/route.ts`
+
+After the existing signature verification, add:
+
+```typescript
+// 1. Parse the JSON payload
+const payload: WebhookPayload = JSON.parse(body);
+
+// 2. Deduplicate by delivery ID
+const db = getDb();
+const isDuplicate = await checkDeliveryId(db, deliveryId);
+if (isDuplicate) {
+  return NextResponse.json({ received: true, deduplicated: true });
+}
+await recordDeliveryId(db, deliveryId);
+
+// 3. Dispatch to core webhook handler (fire-and-forget for async work)
+// The handler creates the deployment record synchronously, then enqueues the build.
+try {
+  await handleWebhook({
+    db,
+    payload,
+    event,
+    deliveryId,
+  });
+} catch (err) {
+  // Log the error but still return 200 to GitHub.
+  // GitHub will retry on non-2xx, which would cause duplicate processing.
+  logger.error({ err, event, deliveryId }, "Webhook handler error");
+}
+
+return NextResponse.json({ received: true });
+```
+
+**Deduplication strategy:** Use a simple in-memory Set for delivery IDs (suitable for single-instance deployment). If the platform scales to multiple instances, replace with a database table.
+
+```typescript
+// Simple in-memory deduplication (single-instance safe)
+const processedDeliveries = new Set<string>();
+const MAX_DELIVERY_CACHE = 10000;
+
+function checkDeliveryId(_db: Database, deliveryId: string): boolean {
+  return processedDeliveries.has(deliveryId);
+}
+
+function recordDeliveryId(_db: Database, deliveryId: string): void {
+  processedDeliveries.add(deliveryId);
+  // Prevent unbounded memory growth
+  if (processedDeliveries.size > MAX_DELIVERY_CACHE) {
+    const oldest = processedDeliveries.values().next().value;
+    if (oldest) processedDeliveries.delete(oldest);
+  }
+}
+```
+
+**Alternative (database-backed):** If database deduplication is preferred, create a `webhook_deliveries` table with `delivery_id TEXT PRIMARY KEY` and `processed_at TIMESTAMPTZ`. Check existence before processing, insert after. This approach survives server restarts but adds a DB query to every webhook.
+
+### Layer 2: Core Handler Updates
+
+#### File: `packages/core/src/github/webhooks.ts`
+
+Implement the three event handlers:
+
+##### Push Event Handler
+
+```typescript
+case "push":
+  await handlePushEvent(ctx);
+  break;
+```
+
+```typescript
+async function handlePushEvent(ctx: WebhookContext): Promise<void> {
+  const { db, payload } = ctx;
+
+  // 1. Extract branch from ref (e.g., "refs/heads/main" -> "main")
+  if (!payload.ref || !payload.after || !payload.repository || !payload.installation) {
+    logger.warn("Push event missing required fields, skipping");
+    return;
+  }
+
+  const branch = payload.ref.replace("refs/heads/", "");
+  const commitSha = payload.after;
+  const repoFullName = payload.repository.full_name;
+  const installationId = payload.installation.id;
+
+  // 2. Look up the project by installation ID and repo name
+  const [project] = await db
+    .select()
+    .from(projects)
+    .where(
+      and(
+        eq(projects.githubInstallationId, installationId),
+        eq(projects.githubRepoFullName, repoFullName),
+      ),
+    );
+
+  if (!project) {
+    logger.info({ repoFullName, installationId }, "No project found for push event");
+    return;
+  }
+
+  // 3. Check if the push is to the production branch
+  if (branch !== project.productionBranch) {
+    logger.debug(
+      { branch, productionBranch: project.productionBranch },
+      "Push to non-production branch, skipping",
+    );
+    return;
+  }
+
+  // 4. Create deployment record
+  const [deployment] = await db
+    .insert(deployments)
+    .values({
+      projectId: project.id,
+      type: "production",
+      status: "queued",
+      commitSha,
+      branch,
+    })
+    .returning();
+
+  logger.info(
+    { deploymentId: deployment.id, projectId: project.id, commitSha },
+    "Production deployment created from push event",
+  );
+
+  // 5. Enqueue build (async -- the queue processes builds sequentially)
+  const queue = getBuildQueue();
+  await queue.enqueue({
+    id: deployment.id,
+    projectId: project.id,
+    execute: async () => {
+      // Full build+deploy pipeline will be called here.
+      // Updates deployment status through: queued -> building -> deploying -> ready/failed
+    },
+  });
+}
+```
+
+##### Pull Request Event Handler (Phase 7 Placeholder)
+
+```typescript
+case "pull_request":
+  await handlePullRequestEvent(ctx);
+  break;
+```
+
+```typescript
+async function handlePullRequestEvent(ctx: WebhookContext): Promise<void> {
+  const { payload } = ctx;
+  const action = payload.action;
+  const prNumber = payload.pull_request?.number;
+
+  logger.info(
+    { action, prNumber },
+    "Pull request event received (preview deployments not yet implemented -- Phase 7)",
+  );
+
+  // Phase 7 will implement:
+  // - "opened", "synchronize", "reopened": Create/update preview deployment
+  // - "closed": Clean up preview deployment (stop container, remove route)
+}
+```
+
+##### Installation Event Handler
+
+```typescript
+case "installation":
+  await handleInstallationEvent(ctx);
+  break;
+```
+
+```typescript
+async function handleInstallationEvent(ctx: WebhookContext): Promise<void> {
+  const { db, payload } = ctx;
+  const action = payload.action;
+
+  if (!payload.installation) {
+    logger.warn("Installation event missing installation data");
+    return;
+  }
+
+  const { id, account } = payload.installation;
+
+  if (action === "created") {
+    // Upsert the installation record
+    await db
+      .insert(githubInstallations)
+      .values({
+        id,
+        githubAccountLogin: account.login,
+        githubAccountType: account.type,
+      })
+      .onConflictDoNothing();
+
+    logger.info({ installationId: id, account: account.login }, "GitHub App installed");
+  } else if (action === "deleted") {
+    // Remove the installation record
+    await db
+      .delete(githubInstallations)
+      .where(eq(githubInstallations.id, id));
+
+    logger.info({ installationId: id }, "GitHub App uninstalled");
+  }
+}
+```
+
+---
+
+## Webhook Flow Diagram
+
+```
+GitHub sends POST /api/webhooks/github
+    |
+    v
+1. Read body as text, extract headers (signature, event, deliveryId)
+    |
+    v
+2. Verify HMAC-SHA256 signature  -------> 401 if invalid
+    |
+    v
+3. Check delivery ID deduplication -----> 200 { deduplicated: true } if seen before
+    |
+    v
+4. Parse JSON payload
+    |
+    v
+5. Dispatch by event type:
+    |
+    +-- "push" ---------> handlePushEvent()
+    |                         |
+    |                         +-- Extract branch from ref
+    |                         +-- Look up project by installationId + repoFullName
+    |                         +-- Skip if non-production branch
+    |                         +-- Create deployment record (status: "queued")
+    |                         +-- Enqueue build via BuildQueue
+    |
+    +-- "pull_request" -> handlePullRequestEvent()
+    |                         |
+    |                         +-- Log event (placeholder for Phase 7)
+    |
+    +-- "installation" -> handleInstallationEvent()
+    |                         |
+    |                         +-- "created": upsert into github_installations
+    |                         +-- "deleted": delete from github_installations
+    |
+    +-- (other) ---------> Log and ignore
+    |
+    v
+6. Return 200 { received: true }
+```
+
+---
+
+## Response Time Requirement
+
+The webhook handler MUST return a 200 response within 500ms. GitHub's webhook delivery timeout is 10 seconds, but responding quickly prevents queue buildup on GitHub's side.
+
+All slow operations (build, deploy, container management) run asynchronously via the `BuildQueue`. The synchronous path is:
+1. Signature verification (~1ms)
+2. Deduplication check (~1ms for in-memory, ~5ms for DB)
+3. JSON parsing (~1ms)
+4. Project lookup (~5ms database query)
+5. Deployment record insert (~5ms database query)
+6. Queue enqueue (~1ms, in-memory)
+
+Total synchronous time: ~15ms.
+
+---
+
+## Dependencies
+
+### Imports Required (Route Handler)
+
+```typescript
+import { NextRequest, NextResponse } from "next/server";
+import { verifySignature, handleWebhook } from "@gblockparty/core/github";
+import type { WebhookPayload } from "@gblockparty/shared/types";
+import { getDb } from "@/lib/db";
+```
+
+### Imports Required (Core Handler)
+
+```typescript
+import type { Database } from "@gblockparty/shared/db";
+import { projects, deployments, githubInstallations } from "@gblockparty/shared/db";
+import { eq, and } from "drizzle-orm";
+import type { WebhookPayload } from "@gblockparty/shared/types";
+import { createLogger } from "@gblockparty/shared/backend";
+import { getBuildQueue } from "./build-queue-ref"; // or passed via context
+```
+
+---
+
+## Event Types and Actions
+
+| Event | Action | Behavior |
+|-------|--------|----------|
+| `push` | -- (no action field) | Check branch, create deployment, enqueue build |
+| `pull_request` | `opened` | Phase 7: create preview deployment |
+| `pull_request` | `synchronize` | Phase 7: update preview deployment |
+| `pull_request` | `reopened` | Phase 7: re-create preview deployment |
+| `pull_request` | `closed` | Phase 7: cleanup preview (stop container, remove route) |
+| `installation` | `created` | Insert into `github_installations` |
+| `installation` | `deleted` | Delete from `github_installations` |
+| (any other) | -- | Log and return 200 |
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Invalid signature | Return 401 (already implemented) |
+| Webhook secret not configured | Return 500 (already implemented) |
+| Duplicate delivery ID | Return 200 `{ received: true, deduplicated: true }` |
+| Missing required fields in payload | Log warning, return 200 (no processing) |
+| Project not found for push event | Log info, return 200 (not an error -- repo may not be connected) |
+| Push to non-production branch | Log debug, return 200 (expected behavior) |
+| Database error during processing | Log error, return 200 (prevent GitHub retry loops) |
+| Build queue error | Log error, return 200 (deployment record already created, can be retried manually) |
+
+**Critical design decision:** Always return 200 after signature verification succeeds. Returning non-2xx causes GitHub to retry the webhook, which could lead to duplicate processing. Errors are logged and can be investigated via server logs.
+
+---
+
+## Testing
+
+### Manual Tests
+
+1. **Push to production branch:** Send a POST with valid signature, `x-github-event: push`, payload with `ref: "refs/heads/main"`, `after: "abc123"`, matching `repository.full_name` and `installation.id`. Verify a deployment record is created with status `"queued"`.
+
+2. **Push to non-production branch:** Same as above but with `ref: "refs/heads/feature-branch"`. Verify no deployment record is created.
+
+3. **Duplicate delivery:** Send the same request with the same `x-github-delivery` header twice. Verify the second request returns `{ received: true, deduplicated: true }` and no duplicate deployment is created.
+
+4. **Unknown repository:** Send a push event for a repo that is not connected to any project. Verify 200 response with no deployment created.
+
+5. **Pull request event:** Send with `x-github-event: pull_request`. Verify 200 response and log message about Phase 7 placeholder.
+
+6. **Installation created:** Send with `x-github-event: installation`, `action: "created"`. Verify a record is inserted into `github_installations`.
+
+7. **Installation deleted:** Send with `x-github-event: installation`, `action: "deleted"`. Verify the record is removed from `github_installations`.
+
+8. **Invalid signature:** Send with wrong signature. Verify 401 response. (Already tested.)
+
+9. **Unknown event type:** Send with `x-github-event: star`. Verify 200 response.
+
+### Test Payload Examples
+
+**Push event:**
+```json
+{
+  "ref": "refs/heads/main",
+  "after": "a1b2c3d4e5f6789012345678901234567890abcd",
+  "before": "0000000000000000000000000000000000000000",
+  "repository": {
+    "full_name": "georgele/my-app",
+    "default_branch": "main",
+    "clone_url": "https://github.com/georgele/my-app.git"
+  },
+  "installation": {
+    "id": 12345,
+    "account": {
+      "login": "georgele",
+      "type": "User"
+    }
+  },
+  "sender": {
+    "login": "georgele",
+    "id": 67890
+  }
+}
+```
+
+**Installation event:**
+```json
+{
+  "action": "created",
+  "installation": {
+    "id": 12345,
+    "account": {
+      "login": "georgele",
+      "type": "User"
+    }
+  },
+  "sender": {
+    "login": "georgele",
+    "id": 67890
+  }
+}
+```

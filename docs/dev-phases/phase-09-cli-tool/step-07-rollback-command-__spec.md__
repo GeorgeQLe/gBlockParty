@@ -1,0 +1,301 @@
+# Step 7: Rollback Command
+
+**Phase:** 9 -- CLI Tool
+**Step:** 7 of 7
+**Status:** Not Started
+**Depends on:** Step 2 (Login), Step 3 (Link), Phase 8 (Rollback API endpoint)
+**Depends on this step:** None
+
+---
+
+## Goal
+
+Implement `gblockparty rollback` so the user can roll back to a previous deployment from the terminal. The command fetches recent successful deployments, presents an interactive selection (or accepts a deployment ID as an argument), asks for confirmation, and sends a rollback request to the API.
+
+---
+
+## Background
+
+Rollback in gBlockParty is conceptually simple: re-deploy a previous Docker image that is already stored in the VPS's local Docker image cache. The platform keeps the last 10 Docker images per project, so any of those deployments can be rolled back to.
+
+The rollback endpoint `POST /api/projects/:id/deployments/:did/rollback` creates a new deployment record with `type: "rollback"` and `sourceDeploymentId` pointing to the target deployment. It starts a container from the old image, health-checks it, updates Caddy routing, and stops the current container.
+
+---
+
+## File to Modify
+
+### `packages/cli/src/commands/rollback.ts`
+
+**Current state:** Prints "Rollback not yet implemented". Accepts optional `[deploymentId]` argument.
+
+**Target implementation:**
+
+```typescript
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+import inquirer from "inquirer";
+import { ApiClient } from "../lib/api-client";
+import { getGlobalConfig, getProjectConfig } from "../lib/config";
+
+interface Deployment {
+  id: string;
+  type: string;
+  status: string;
+  commitSha: string | null;
+  branch: string | null;
+  url: string | null;
+  createdAt: string;
+  buildDurationMs: number | null;
+}
+
+interface RollbackResponse {
+  deploymentId: string;
+  status: string;
+  url?: string;
+}
+
+export const rollbackCommand = new Command("rollback")
+  .description("Rollback to a previous deployment")
+  .argument("[deploymentId]", "Target deployment ID")
+  .action(async (deploymentId?: string) => {
+    // Auth check
+    const config = getGlobalConfig();
+    if (!config.token) {
+      console.error(chalk.red("Not authenticated. Run `gblockparty login` first."));
+      process.exit(1);
+    }
+
+    // Project check
+    const projectConfig = getProjectConfig();
+    if (!projectConfig) {
+      console.error(chalk.red("No project linked. Run `gblockparty link` first."));
+      process.exit(1);
+    }
+
+    const client = new ApiClient();
+
+    // If no deployment ID provided, show interactive selection
+    if (!deploymentId) {
+      deploymentId = await selectDeployment(client, projectConfig.projectId);
+      if (!deploymentId) {
+        process.exit(0);
+      }
+    }
+
+    // Confirm rollback
+    const { confirm } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "confirm",
+        message: `Roll back to deployment ${deploymentId.slice(0, 8)}? This will replace the current production deployment.`,
+        default: false,
+      },
+    ]);
+
+    if (!confirm) {
+      console.log(chalk.dim("Cancelled."));
+      process.exit(0);
+    }
+
+    // Execute rollback
+    const spinner = ora("Rolling back...").start();
+
+    try {
+      const response = await client.post<RollbackResponse>(
+        `/api/projects/${projectConfig.projectId}/deployments/${deploymentId}/rollback`
+      );
+
+      spinner.succeed(chalk.green("Rollback successful!"));
+      console.log(chalk.dim(`New deployment ID: ${response.deploymentId}`));
+
+      if (response.url) {
+        console.log(chalk.green(`\n  ${chalk.bold(response.url)}\n`));
+      }
+    } catch (error) {
+      spinner.fail(chalk.red("Rollback failed"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    }
+  });
+
+async function selectDeployment(
+  client: ApiClient,
+  projectId: string
+): Promise<string | null> {
+  const spinner = ora("Fetching recent deployments...").start();
+
+  let deployments: Deployment[];
+  try {
+    deployments = await client.get<Deployment[]>(
+      `/api/projects/${projectId}/deployments?limit=10`
+    );
+    spinner.stop();
+  } catch (error) {
+    spinner.fail(chalk.red("Failed to fetch deployments"));
+    if (error instanceof Error) {
+      console.error(chalk.red(error.message));
+    }
+    process.exit(1);
+  }
+
+  // Filter to only successful/ready deployments that can be rolled back to
+  const rollbackCandidates = deployments.filter(
+    (d) => d.status === "ready" || d.status === "archived"
+  );
+
+  if (rollbackCandidates.length === 0) {
+    console.log(chalk.yellow("No deployments available to rollback to."));
+    return null;
+  }
+
+  // Mark the current production deployment
+  const currentProd = deployments.find(
+    (d) => d.status === "ready" && d.type === "production"
+  );
+
+  const { selectedId } = await inquirer.prompt([
+    {
+      type: "list",
+      name: "selectedId",
+      message: "Select a deployment to rollback to:",
+      choices: rollbackCandidates.map((d) => {
+        const sha = d.commitSha?.slice(0, 7) ?? "unknown";
+        const branch = d.branch ?? "unknown";
+        const time = new Date(d.createdAt).toLocaleString();
+        const isCurrent = d.id === currentProd?.id;
+        const label = isCurrent
+          ? `${sha} on ${branch} (${time}) ${chalk.green("[current]")}`
+          : `${sha} on ${branch} (${time})`;
+
+        return {
+          name: label,
+          value: d.id,
+          disabled: isCurrent ? "current deployment" : false,
+        };
+      }),
+    },
+  ]);
+
+  return selectedId;
+}
+```
+
+---
+
+## Interactive Selection
+
+When no deployment ID is provided, the command shows a list of recent deployments:
+
+```
+? Select a deployment to rollback to: (Use arrow keys)
+  a1b2c3d on main (3/2/2026, 12:00:00 PM) [current]  (current deployment)
+> e5f6g7h on main (3/1/2026, 3:30:00 PM)
+  i9j0k1l on main (2/28/2026, 10:15:00 AM)
+  m3n4o5p on fix/bug (2/27/2026, 5:45:00 PM)
+```
+
+Key features:
+- Lists up to 10 recent deployments that have status `ready` or `archived`
+- The current production deployment is marked with `[current]` and is disabled (cannot rollback to it since it is already live)
+- Each entry shows the commit SHA (7 chars), branch, and timestamp
+- Arrow keys navigate, Enter selects
+
+---
+
+## Confirmation Prompt
+
+After selection, the user is asked to confirm:
+
+```
+? Roll back to deployment e5f6g7h8? This will replace the current production deployment. (y/N)
+```
+
+Default is `N` (no) to prevent accidental rollbacks.
+
+---
+
+## API Dependencies
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/projects/:id/deployments?limit=10` | GET | Fetch recent deployments for interactive selection |
+| `/api/projects/:id/deployments/:did/rollback` | POST | Execute the rollback |
+
+The rollback endpoint is implemented in Phase 8 and Phase 6. It creates a new deployment record, starts the old container image, health-checks it, updates Caddy, and stops the current container.
+
+**Rollback POST response:**
+
+```typescript
+{
+  deploymentId: string;    // ID of the new rollback deployment record
+  status: string;          // "ready" on success
+  url?: string;            // Production URL
+}
+```
+
+---
+
+## Output Format
+
+### Successful rollback:
+
+```
+? Select a deployment to rollback to: e5f6g7h on main (3/1/2026, 3:30:00 PM)
+? Roll back to deployment e5f6g7h8? This will replace the current production deployment. Yes
+✔ Rollback successful!
+New deployment ID: f9a0b1c2
+
+  https://myapp.yourdomain.dev
+```
+
+### Cancelled rollback:
+
+```
+? Select a deployment to rollback to: e5f6g7h on main (3/1/2026, 3:30:00 PM)
+? Roll back to deployment e5f6g7h8? This will replace the current production deployment. No
+Cancelled.
+```
+
+### Failed rollback:
+
+```
+? Roll back to deployment e5f6g7h8? This will replace the current production deployment. Yes
+✖ Rollback failed
+API error: 500 Container health check failed
+```
+
+---
+
+## Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Not authenticated | Print auth error, exit with code 1 |
+| Not linked to a project | Print link error, exit with code 1 |
+| No deployments exist | Print "No deployments available to rollback to", exit with code 0 |
+| All deployments are failed (none are ready/archived) | Print "No deployments available to rollback to", exit with code 0 |
+| Only one deployment exists (the current one) | All candidates are disabled; print message, exit with code 0 |
+| Invalid deployment ID passed as argument | API returns 404; CLI prints error and exits |
+| Rollback deployment fails health check | API returns error; CLI prints failure message and exits |
+| User cancels confirmation | Print "Cancelled" and exit with code 0 |
+
+---
+
+## Verification Checklist
+
+- [ ] `gblockparty rollback` requires authentication and a linked project
+- [ ] Without an argument, fetches recent deployments and shows interactive selection
+- [ ] Deployments are filtered to `ready` and `archived` status only
+- [ ] Current production deployment is marked as `[current]` and disabled
+- [ ] Each deployment shows commit SHA (short), branch, and timestamp
+- [ ] With a `[deploymentId]` argument, skips interactive selection
+- [ ] Confirmation prompt defaults to No
+- [ ] Cancelling prints "Cancelled" and exits with code 0
+- [ ] Confirming sends `POST /api/projects/:id/deployments/:did/rollback`
+- [ ] Success message includes new deployment ID and URL
+- [ ] Failure message includes error details from the API
+- [ ] No deployments scenario exits gracefully
+- [ ] `pnpm typecheck` passes

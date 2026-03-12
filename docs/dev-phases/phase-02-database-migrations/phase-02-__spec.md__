@@ -1,0 +1,259 @@
+# Phase 2: Database & Migrations
+
+**Phase:** 2 of 4
+**Status:** Not Started
+**Depends on:** Phase 1 (Infrastructure & Terraform) -- RDS PostgreSQL instance must be provisioned and accessible
+**Blocks:** Phase 3 (GitHub Integration & Build Pipeline), Phase 4 (Preview Deployments, CLI & Polish)
+
+---
+
+## Goal
+
+Database migrations are generated from the existing Drizzle ORM schema and successfully applied to the RDS PostgreSQL instance. Database connectivity is verified from the VPS with proper connection pooling, SSL, and singleton management.
+
+---
+
+## Context
+
+The gBlockParty platform stores all state in a PostgreSQL database hosted on AWS RDS (`db.t4g.micro`). The Drizzle ORM schema is already fully implemented in `packages/shared/src/db/schema.ts`. This phase takes that schema definition and turns it into a running, verified database.
+
+### Why This Phase Exists
+
+The schema file is TypeScript code that describes tables, but the database itself has no tables yet. Drizzle Kit generates SQL migration files from the schema, and the migration runner applies them. Until this phase is complete, no API routes, webhook handlers, or dashboard pages can read or write data.
+
+---
+
+## Existing Schema Overview
+
+**File:** `packages/shared/src/db/schema.ts`
+
+The schema defines 7 tables with full Drizzle ORM column types, defaults, foreign keys, indexes, and unique constraints:
+
+### Tables
+
+#### `projects`
+The central entity. Each project maps to one GitHub repository.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `uuid` | PK, `defaultRandom()` |
+| `name` | `text` | NOT NULL |
+| `slug` | `text` | NOT NULL, UNIQUE |
+| `github_installation_id` | `bigint` | -- |
+| `github_repo_full_name` | `text` | UNIQUE |
+| `framework` | `text` | nullable (`'nextjs'`, `'dockerfile'`, `'static'`) |
+| `next_mode` | `text` | nullable (`'static'`, `'server'`) |
+| `build_command` | `text` | nullable |
+| `output_dir` | `text` | nullable |
+| `production_branch` | `text` | NOT NULL, default `'main'` |
+| `production_deployment_id` | `uuid` | nullable |
+| `created_at` | `timestamptz` | NOT NULL, default `now()` |
+| `updated_at` | `timestamptz` | NOT NULL, default `now()` |
+
+#### `deployments`
+Each row is one build+deploy attempt (production, preview, or rollback).
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `uuid` | PK, `defaultRandom()` |
+| `project_id` | `uuid` | NOT NULL, FK -> `projects.id` ON DELETE CASCADE |
+| `type` | `text` | NOT NULL (`'production'`, `'preview'`, `'rollback'`) |
+| `status` | `text` | NOT NULL, default `'queued'` |
+| `commit_sha` | `text` | nullable |
+| `branch` | `text` | nullable |
+| `pr_number` | `integer` | nullable |
+| `docker_image_tag` | `text` | nullable |
+| `container_id` | `text` | nullable |
+| `port` | `integer` | nullable |
+| `url` | `text` | nullable |
+| `build_duration_ms` | `integer` | nullable |
+| `build_log_s3_key` | `text` | nullable |
+| `error_message` | `text` | nullable |
+| `source_deployment_id` | `uuid` | nullable |
+| `created_at` | `timestamptz` | NOT NULL, default `now()` |
+| `updated_at` | `timestamptz` | NOT NULL, default `now()` |
+
+**Indexes:**
+- `idx_deployments_project_created` on `(project_id, created_at)`
+- `idx_deployments_status` on `(status)`
+
+#### `env_vars`
+Per-project environment variables scoped to production or preview.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `uuid` | PK, `defaultRandom()` |
+| `project_id` | `uuid` | NOT NULL, FK -> `projects.id` ON DELETE CASCADE |
+| `scope` | `text` | NOT NULL (`'production'`, `'preview'`) |
+| `key` | `text` | NOT NULL |
+| `value` | `text` | NOT NULL (encrypted for secrets) |
+| `is_secret` | `boolean` | NOT NULL, default `false` |
+| `created_at` | `timestamptz` | NOT NULL, default `now()` |
+| `updated_at` | `timestamptz` | NOT NULL, default `now()` |
+
+**Indexes:**
+- `idx_env_vars_project_scope` on `(project_id, scope)`
+
+**Unique constraints:**
+- `env_vars_project_scope_key` on `(project_id, scope, key)`
+
+#### `managed_databases`
+App databases provisioned on the shared RDS instance.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `uuid` | PK, `defaultRandom()` |
+| `project_id` | `uuid` | NOT NULL, FK -> `projects.id` ON DELETE CASCADE |
+| `db_name` | `text` | NOT NULL, UNIQUE |
+| `db_user` | `text` | NOT NULL |
+| `db_password_encrypted` | `text` | NOT NULL |
+| `size_bytes` | `bigint` | NOT NULL, default `0` |
+| `created_at` | `timestamptz` | NOT NULL, default `now()` |
+
+#### `github_installations`
+Tracks GitHub App installations for token management.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `bigint` | PK (GitHub's installation ID) |
+| `github_account_login` | `text` | NOT NULL |
+| `github_account_type` | `text` | NOT NULL (`'User'` or `'Organization'`) |
+| `created_at` | `timestamptz` | NOT NULL, default `now()` |
+
+#### `port_allocations`
+Maps ports to active deployments. Ports 3001-3999 for production, 4000-4999 for previews.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `port` | `integer` | PK |
+| `deployment_id` | `uuid` | NOT NULL, FK -> `deployments.id` ON DELETE CASCADE |
+| `allocated_at` | `timestamptz` | NOT NULL, default `now()` |
+
+**Indexes:**
+- `idx_port_allocations_deployment` on `(deployment_id)`
+
+#### `notification_settings`
+Platform-wide notification configuration (single row).
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `uuid` | PK, `defaultRandom()` |
+| `slack_webhook_url` | `text` | nullable |
+| `discord_webhook_url` | `text` | nullable |
+| `notify_on_failure` | `boolean` | NOT NULL, default `true` |
+| `notify_on_rollback` | `boolean` | NOT NULL, default `true` |
+| `updated_at` | `timestamptz` | NOT NULL, default `now()` |
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `packages/shared/src/db/schema.ts` | Drizzle ORM table definitions (source of truth) |
+| `packages/shared/drizzle.config.ts` | Drizzle Kit config (schema path, output dir, dialect, credentials) |
+| `packages/shared/src/db/migrate.ts` | Migration runner script (creates pool, runs migrations, exits) |
+| `packages/shared/src/db/index.ts` | `createDb()` factory and schema re-exports |
+| `apps/dashboard/src/lib/db.ts` | Dashboard singleton (`getDb()` with lazy init) |
+| `packages/shared/src/db/migrations/` | Generated SQL migration files (output of `drizzle-kit generate`) |
+
+---
+
+## Drizzle Configuration
+
+**File:** `packages/shared/drizzle.config.ts`
+
+```typescript
+import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./src/db/schema.ts",
+  out: "./src/db/migrations",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+```
+
+- Schema source: `./src/db/schema.ts` (relative to `packages/shared/`)
+- Migration output: `./src/db/migrations/` (relative to `packages/shared/`)
+- Dialect: `postgresql`
+- Credentials: `DATABASE_URL` env var (RDS connection string with `?sslmode=require`)
+
+---
+
+## Monorepo Script Chain
+
+Migration commands are invoked from the workspace root and routed via Turborepo:
+
+```
+pnpm db:generate   -->  turbo run db:generate --filter=@gblockparty/shared
+                         -->  drizzle-kit generate
+                               reads: packages/shared/src/db/schema.ts
+                               writes: packages/shared/src/db/migrations/*.sql
+
+pnpm db:migrate    -->  turbo run db:migrate --filter=@gblockparty/shared
+                         -->  tsx src/db/migrate.ts
+                               reads: packages/shared/src/db/migrations/*.sql
+                               writes: RDS PostgreSQL tables
+```
+
+---
+
+## Steps
+
+### Step 1: Generate Drizzle Migrations
+Run `pnpm db:generate` to produce SQL migration files from the existing schema. Review the generated SQL for correctness -- verify all 7 tables, all columns with correct types, all indexes, all foreign keys, all unique constraints. The output lands in `packages/shared/src/db/migrations/`.
+
+**Spec:** `step-01-generate-migrations-__spec.md__`
+
+### Step 2: Run Migrations & Verify Schema
+Execute `pnpm db:migrate` against the RDS instance. Verify every table exists with correct columns, types, and constraints. Verify indexes are created. Test basic CRUD operations (insert, select, update, delete) on each of the 7 tables.
+
+**Spec:** `step-02-run-migrations-__spec.md__`
+
+### Step 3: Database Connection Pool Configuration
+Configure the `pg` connection pool for production use (max connections, idle timeout, SSL enforcement). Verify the `getDb()` singleton in `apps/dashboard/src/lib/db.ts` works correctly. Test the connection from the VPS to RDS over SSL.
+
+**Spec:** `step-03-connection-pool-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+1. `pnpm db:generate` produces migration SQL files in `packages/shared/src/db/migrations/` that create all 7 tables with correct structure.
+2. `pnpm db:migrate` applies migrations to the RDS instance without errors.
+3. All 7 tables exist in the `gblockparty` database on RDS with correct columns, types, defaults, constraints, and indexes.
+4. Basic CRUD operations succeed on every table.
+5. The dashboard `getDb()` singleton connects to RDS over SSL and can execute queries.
+6. Connection pooling is configured with appropriate limits for the `db.t4g.micro` instance (max ~10 connections, idle timeout, SSL required).
+7. The connection works from the VPS (not just local dev).
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On (Phase 1)
+- RDS PostgreSQL instance is provisioned via Terraform and accessible.
+- Security group allows inbound connections from the VPS IP and local dev IP on port 5432.
+- `DATABASE_URL` is available (stored in AWS Secrets Manager or `.env`).
+- The `gblockparty` database exists on the RDS instance.
+
+### Enables (Phase 3+)
+- Phase 3 (GitHub Integration & Build Pipeline) needs the `projects`, `deployments`, and `github_installations` tables to store webhook state and build records.
+- Phase 3 also needs `env_vars` for injecting environment variables into builds.
+- Phase 4 (Preview Deployments, CLI & Polish) needs `port_allocations` for preview port management and `notification_settings` for alerts.
+- All API routes in `apps/dashboard` use `getDb()` to access the database.
+
+---
+
+## Risk & Mitigation
+
+| Risk | Mitigation |
+|------|-----------|
+| Schema diff between Drizzle definition and spec SQL | Review generated SQL line-by-line against the spec's Data Model section |
+| RDS not reachable from local dev | Verify security group includes local dev IP; use SSH tunnel as fallback |
+| Connection pool exhaustion on `db.t4g.micro` (max ~85 connections) | Set pool max to 10; platform is single-tenant so this is plenty |
+| SSL certificate validation failure | Use `?sslmode=require` in connection string; RDS uses AWS-issued certs trusted by default |
+| Migration runner fails mid-way | Drizzle migrations are transactional per file; re-running is safe |

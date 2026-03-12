@@ -1,0 +1,365 @@
+# Step 3: Docker & Caddy Setup
+
+**Phase:** 1 - Infrastructure Provisioning
+**Step:** 3 of 5
+**Dependencies:** Step 2 (VPS provisioned with Docker installed)
+**Depends on this step:** Step 5 (verification), Phase 5 (deployment engine routes traffic via Caddy)
+
+---
+
+## Objective
+
+Configure the Docker environment and Caddy reverse proxy on the VPS for production use. This includes creating the Docker network used by all platform containers, installing Caddy with the Cloudflare DNS challenge plugin (for wildcard TLS certificates), configuring the base Caddyfile, and setting up systemd service files for reliable operation.
+
+---
+
+## Architecture Context
+
+Caddy serves as the single entry point for all HTTP/HTTPS traffic on the VPS. It routes requests by hostname to the correct Docker container:
+
+```
+Internet --> Cloudflare --> VPS:443 --> Caddy
+                                         |
+                                         +--> platform.yourdomain.dev   --> localhost:3000 (dashboard)
+                                         +--> myapp.yourdomain.dev      --> localhost:3001 (production app)
+                                         +--> pr-42--myapp.yourdomain.dev --> localhost:4001 (preview)
+```
+
+Caddy's admin API (`localhost:2019`) is used by the deployment engine (Phase 5) to dynamically update routes when containers start or stop, without restarting Caddy.
+
+The Docker network `gblockparty` provides a shared network namespace for all platform containers. Containers communicate via this network using container names as hostnames.
+
+---
+
+## Docker Network Setup
+
+### Create Platform Network
+
+```bash
+docker network create gblockparty
+```
+
+This network will be used by:
+- The dashboard container (Phase 6)
+- All deployed app containers (Phase 5)
+- Any future sidecar services
+
+Containers join this network via `docker run --network gblockparty` or `docker-compose.yml` network configuration.
+
+---
+
+## Caddy Installation
+
+### Why a Custom Caddy Build
+
+The default Caddy binary does not include the Cloudflare DNS challenge module, which is required for obtaining wildcard TLS certificates (`*.yourdomain.dev`). Wildcard certificates require DNS-01 challenge verification, and Caddy needs the Cloudflare plugin to automate this.
+
+### Build Caddy with Cloudflare DNS Plugin
+
+Use `xcaddy` to build a custom Caddy binary:
+
+```bash
+# Install Go (required for xcaddy)
+apt install -y golang-go
+
+# Install xcaddy
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+# Build Caddy with Cloudflare DNS module
+~/go/bin/xcaddy build \
+  --with github.com/caddy-dns/cloudflare
+
+# Move to system path
+mv caddy /usr/bin/caddy
+chmod +x /usr/bin/caddy
+
+# Verify
+caddy version
+caddy list-modules | grep cloudflare
+```
+
+Alternative: Use the official Caddy Docker image with the Cloudflare module pre-built, but running Caddy natively as a systemd service is preferred for the reverse proxy role (simpler networking, direct port binding).
+
+---
+
+## Caddy Configuration
+
+### Production Caddyfile
+
+The existing Caddyfile at `/infra/docker/Caddyfile` has a minimal configuration. It needs to be expanded for production use with wildcard TLS.
+
+**File to modify:** `/infra/docker/Caddyfile`
+
+The production Caddyfile deployed to the VPS at `/etc/caddy/Caddyfile`:
+
+```caddyfile
+{
+	# Global options
+	admin localhost:2019
+
+	# Use Cloudflare DNS challenge for wildcard certs
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+}
+
+# Platform dashboard
+platform.{$PLATFORM_DOMAIN} {
+	reverse_proxy localhost:3000
+}
+
+# Catch-all for wildcard: returns 503 for unconfigured subdomains
+*.{$PLATFORM_DOMAIN} {
+	respond "Service not found" 503
+}
+```
+
+**Key design decisions:**
+- `admin localhost:2019` -- Admin API only on localhost; the deployment engine uses this to add/remove routes dynamically
+- `acme_dns cloudflare` -- Uses Cloudflare DNS-01 challenge for wildcard cert issuance (Let's Encrypt)
+- `{$PLATFORM_DOMAIN}` -- Environment variable for the domain (e.g., `yourdomain.dev`), avoids hardcoding
+- The catch-all `*.{$PLATFORM_DOMAIN}` returns 503 for any subdomain not yet configured; the deployment engine adds specific routes as containers start
+- No explicit TLS block needed; Caddy auto-provisions certificates when it sees HTTPS hostnames
+
+### How Dynamic Routes Work
+
+When the deployment engine (Phase 5) deploys a new app, it uses Caddy's admin API to add a route:
+
+```bash
+# Example: Add route for myapp.yourdomain.dev -> localhost:3001
+curl -X POST http://localhost:2019/config/apps/http/servers/srv0/routes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "match": [{"host": ["myapp.yourdomain.dev"]}],
+    "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "localhost:3001"}]}]
+  }'
+```
+
+Alternatively, the platform can POST the entire Caddy config via `/load`:
+
+```bash
+curl -X POST http://localhost:2019/load \
+  -H "Content-Type: application/json" \
+  -d @caddy-config.json
+```
+
+The deployment engine in `packages/core/src/routing/` will implement this. For Phase 1, we only need the base Caddyfile working.
+
+---
+
+## systemd Service Files
+
+### Caddy Service
+
+**File to create:** `/infra/systemd/caddy.service`
+
+This file is deployed to `/etc/systemd/system/caddy.service` on the VPS.
+
+```ini
+[Unit]
+Description=Caddy web server (gBlockParty)
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+EnvironmentFile=/etc/caddy/caddy.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Caddy Environment File
+
+**File to create:** `/infra/systemd/caddy.env.example`
+
+Deployed to `/etc/caddy/caddy.env` on the VPS (with actual values):
+
+```bash
+PLATFORM_DOMAIN=yourdomain.dev
+CLOUDFLARE_API_TOKEN=your-cloudflare-api-token-here
+```
+
+### Docker Cleanup Timer
+
+A systemd timer to prune unused Docker images weekly.
+
+**File to create:** `/infra/systemd/docker-cleanup.service`
+
+```ini
+[Unit]
+Description=Docker image and container cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker system prune -af --filter "until=168h"
+```
+
+**File to create:** `/infra/systemd/docker-cleanup.timer`
+
+```ini
+[Unit]
+Description=Run Docker cleanup weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+---
+
+## Files to Create
+
+| File | Location on VPS | Description |
+|------|----------------|-------------|
+| `/infra/systemd/caddy.service` | `/etc/systemd/system/caddy.service` | Caddy systemd unit |
+| `/infra/systemd/caddy.env.example` | `/etc/caddy/caddy.env` (actual values) | Caddy environment variables |
+| `/infra/systemd/docker-cleanup.service` | `/etc/systemd/system/docker-cleanup.service` | Docker prune service |
+| `/infra/systemd/docker-cleanup.timer` | `/etc/systemd/system/docker-cleanup.timer` | Weekly timer for cleanup |
+| `/infra/scripts/setup-caddy.sh` | N/A (run locally) | Script to install and configure Caddy on VPS |
+
+---
+
+## Files to Modify
+
+### `/infra/docker/Caddyfile`
+
+Update the existing minimal Caddyfile to the full production version with:
+- Cloudflare DNS challenge configuration
+- Wildcard catch-all route
+- Environment variable for domain
+
+**Current content:**
+```caddyfile
+{
+	admin localhost:2019
+}
+
+platform.{$PLATFORM_DOMAIN} {
+	reverse_proxy localhost:3000
+}
+```
+
+**Updated content:**
+```caddyfile
+{
+	admin localhost:2019
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+}
+
+platform.{$PLATFORM_DOMAIN} {
+	reverse_proxy localhost:3000
+}
+
+*.{$PLATFORM_DOMAIN} {
+	respond "Service not found" 503
+}
+```
+
+### `/infra/docker/docker-compose.yml`
+
+Add the `gblockparty` network to the existing docker-compose for local development consistency:
+
+```yaml
+networks:
+  gblockparty:
+    name: gblockparty
+    driver: bridge
+
+services:
+  postgres:
+    # ... existing config ...
+    networks:
+      - gblockparty
+
+  dashboard:
+    # ... existing config ...
+    networks:
+      - gblockparty
+```
+
+---
+
+## VPS Setup Commands
+
+After files are created, run on the VPS:
+
+```bash
+# Create caddy user and group
+groupadd --system caddy
+useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
+
+# Create Caddy config directory
+mkdir -p /etc/caddy
+cp Caddyfile /etc/caddy/Caddyfile
+cp caddy.env /etc/caddy/caddy.env
+chown -R caddy:caddy /etc/caddy
+chmod 600 /etc/caddy/caddy.env
+
+# Install systemd services
+cp caddy.service /etc/systemd/system/
+cp docker-cleanup.service /etc/systemd/system/
+cp docker-cleanup.timer /etc/systemd/system/
+
+# Reload systemd and start services
+systemctl daemon-reload
+systemctl enable caddy
+systemctl start caddy
+systemctl enable docker-cleanup.timer
+systemctl start docker-cleanup.timer
+
+# Verify
+systemctl status caddy
+caddy validate --config /etc/caddy/Caddyfile
+
+# Create Docker network
+docker network create gblockparty || true
+```
+
+---
+
+## Expected Behavior After Completion
+
+1. `systemctl status caddy` shows `active (running)`
+2. `curl -s http://localhost:2019/config/` returns JSON (Caddy admin API working)
+3. `curl -s http://localhost:80` returns a response (Caddy serving)
+4. `caddy validate --config /etc/caddy/Caddyfile` succeeds
+5. `docker network ls` shows `gblockparty` network
+6. `systemctl list-timers` shows `docker-cleanup.timer` as active
+7. Caddy obtains a wildcard TLS certificate from Let's Encrypt via Cloudflare DNS challenge (visible in Caddy logs)
+
+---
+
+## Security Considerations
+
+- Caddy admin API is bound to `localhost:2019` and is NOT accessible externally
+- The Cloudflare API token should have minimal permissions: Zone.DNS:Edit for the target domain only
+- The `caddy.env` file on VPS has permission 600 (readable only by caddy user)
+- Caddy runs as a dedicated `caddy` system user with minimal privileges
+- `CAP_NET_BIND_SERVICE` allows Caddy to bind ports 80/443 without running as root
+
+---
+
+## Cloudflare API Token Requirements
+
+Create a Cloudflare API token with the following scopes:
+
+- **Permissions:** Zone > DNS > Edit
+- **Zone Resources:** Include > Specific zone > `yourdomain.dev`
+
+This token is used by Caddy for DNS-01 challenge only. It does not need broader Cloudflare access.

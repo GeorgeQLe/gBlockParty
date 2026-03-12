@@ -1,0 +1,211 @@
+# Step 1: S3 Dependency Cache
+
+**Phase:** 8 -- Build Caching, Log Streaming & Rollback
+**Step:** 1 of 8
+**Status:** Not Started
+**Depends on:** Phase 4 (BuildRunner), S3 client implemented in `packages/shared/src/backend/aws/s3.ts`
+
+---
+
+## Goal
+
+Implement `saveCache()` and `restoreCache()` in `packages/core/src/build/cache.ts` to cache `node_modules/` as a compressed tarball in S3. When a build starts, restore the dependency cache if the lockfile hash matches. After a successful install, save the cache if the lockfile changed. This eliminates redundant `pnpm install` work when dependencies haven't changed.
+
+---
+
+## Background
+
+Every build currently runs a full `pnpm install --frozen-lockfile`, which downloads and extracts all dependencies from scratch. For a typical Next.js project, this takes 30-60 seconds. By caching the `node_modules/` directory in S3, keyed by the hash of `pnpm-lock.yaml`, subsequent builds with unchanged dependencies can skip the full install entirely.
+
+### Cache Key Format
+
+```
+{projectId}/deps/{sha256-of-pnpm-lock.yaml}
+```
+
+Example: `a1b2c3d4-e5f6-7890-abcd-ef1234567890/deps/8f14e45fceea167a5a36dedd4bea2543`
+
+The key is scoped to the project (not the branch) because `pnpm-lock.yaml` is the same across branches unless dependencies differ. If a PR changes dependencies, its lockfile hash will differ, causing a cache miss and a fresh install.
+
+### Cache Flow
+
+```
+Build starts
+  |
+  v
+Compute SHA-256 of pnpm-lock.yaml
+  |
+  v
+restoreCache(bucket, projectId, branch, lockfileHash)
+  |-- Cache hit:  Download tarball from S3, extract to node_modules/
+  |-- Cache miss: Continue (node_modules/ stays empty)
+  |
+  v
+Run pnpm install --frozen-lockfile
+  (If cache was restored, pnpm verifies and no-ops quickly)
+  |
+  v
+saveCache(bucket, projectId, branch, lockfileHash, tarball)
+  |-- Only if lockfile hash differs from the previously cached hash
+  |-- Skip if tarball exceeds BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES (1 GB)
+  |
+  v
+Continue to build step
+```
+
+---
+
+## Implementation
+
+### File: `packages/core/src/build/cache.ts`
+
+The file currently has TODO stubs for `saveCache()` and `restoreCache()`. Both functions accept `bucket`, `projectId`, `branch`, `lockfileHash`, and (for save) `data: Buffer`.
+
+#### `saveDepsCache(bucket, projectId, lockfileHash, data)`
+
+1. Construct the S3 key: `${projectId}/deps/${lockfileHash}`
+2. Validate the tarball size does not exceed `BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES` (1 GB). If it does, log a warning and return without uploading.
+3. Call `uploadToS3(bucket, key, data)`.
+4. Log the upload with project ID and tarball size.
+
+#### `restoreDepsCache(bucket, projectId, lockfileHash)`
+
+1. Construct the S3 key: `${projectId}/deps/${lockfileHash}`
+2. Call `downloadFromS3(bucket, key)`.
+3. If the result is `null` (cache miss), log the miss and return `null`.
+4. If a buffer is returned (cache hit), log the hit with size and return the buffer.
+
+### Function Signatures
+
+The existing stub uses a single `saveCache` / `restoreCache` pair for both deps and framework cache. This step should refactor into separate functions for clarity:
+
+```typescript
+// Dependency cache
+export async function saveDepsCache(
+  bucket: string,
+  projectId: string,
+  lockfileHash: string,
+  data: Buffer,
+): Promise<void>;
+
+export async function restoreDepsCache(
+  bucket: string,
+  projectId: string,
+  lockfileHash: string,
+): Promise<Buffer | null>;
+```
+
+Alternatively, keep the existing signatures and differentiate by the `lockfileHash` parameter -- when saving deps, the key uses `deps/{lockfileHash}`; when saving framework cache (Step 2), it uses `build/{branch}`.
+
+### Lockfile Hashing
+
+The lockfile hash is computed by the caller (`BuildRunner`) before invoking cache functions:
+
+```typescript
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
+async function hashLockfile(lockfilePath: string): Promise<string> {
+  const content = await readFile(lockfilePath);
+  return createHash("sha256").update(content).digest("hex");
+}
+```
+
+### Tarball Creation and Extraction
+
+The caller is responsible for creating and extracting the tarball. Use Node.js `tar` package (already available in most Node.js setups via `node:zlib` + `tar` npm package or `child_process` with system `tar`):
+
+```typescript
+import tar from "tar";
+
+// Create tarball from node_modules
+async function createTarball(sourceDir: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  const stream = tar.create({ gzip: true, cwd: sourceDir }, ["node_modules"]);
+  for await (const chunk of stream) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+// Extract tarball to target directory
+async function extractTarball(data: Buffer, targetDir: string): Promise<void> {
+  const { Readable } = await import("node:stream");
+  const readable = Readable.from(data);
+  await new Promise<void>((resolve, reject) => {
+    readable
+      .pipe(tar.extract({ cwd: targetDir }))
+      .on("finish", resolve)
+      .on("error", reject);
+  });
+}
+```
+
+### Integration with BuildRunner
+
+In `packages/core/src/build/builder.ts`, the `BuildRunner.run()` method should call cache functions at the appropriate points:
+
+```
+Step 1: Clone repo
+Step 2: Detect framework
+Step 3: Hash pnpm-lock.yaml
+Step 4: restoreDepsCache() -> extract if hit
+Step 5: pnpm install --frozen-lockfile
+Step 6: saveDepsCache() -> only if hash changed
+Step 7: (framework cache restore - Step 2)
+Step 8: Build
+Step 9: (framework cache save - Step 2)
+Step 10: Build Docker image
+```
+
+---
+
+## S3 Bucket Configuration
+
+The S3 bucket used for caching should already be provisioned (Phase 1 Terraform). The bucket name is provided via the `S3_CACHE_BUCKET` environment variable.
+
+No special bucket configuration is needed for dependency caching. The 7-day S3 lifecycle rule (configured in Step 2 for framework cache) also covers dependency cache objects under the same bucket.
+
+---
+
+## Edge Cases
+
+1. **First build for a project**: Cache miss. `restoreDepsCache()` returns `null`. Full `pnpm install` runs. Cache is saved after install.
+2. **Lockfile unchanged across builds**: Cache hit. `restoreDepsCache()` returns the tarball. `pnpm install` verifies existing `node_modules/` and completes quickly (1-2 seconds vs. 30-60 seconds).
+3. **Lockfile changed (new dependency added)**: Cache miss for the new hash. Full `pnpm install` runs. New cache saved. Old cache object remains in S3 until lifecycle expiry.
+4. **Tarball exceeds 1 GB**: Log warning, skip cache save. The project's dependencies are too large to cache cost-effectively.
+5. **S3 upload fails**: Log error, continue build. Cache is a performance optimization -- failure should not block the build.
+6. **S3 download fails (non-404 error)**: Log error, continue with full install. Do not fail the build.
+7. **Corrupted cache tarball**: `tar.extract` throws an error. Catch, log, delete the `node_modules/` directory, and continue with full install.
+
+---
+
+## Testing Approach
+
+1. **Unit test `saveDepsCache`**: Mock `uploadToS3`, verify correct S3 key, verify size check.
+2. **Unit test `restoreDepsCache`**: Mock `downloadFromS3`, verify cache hit returns buffer, cache miss returns `null`.
+3. **Integration test**: Build a project twice with the same lockfile. Verify second build's `pnpm install` step is significantly faster. Verify S3 object exists with expected key.
+4. **Edge case test**: Verify build succeeds when S3 is unreachable (cache operations fail gracefully).
+
+---
+
+## Verification Checklist
+
+- [ ] `saveDepsCache()` uploads tarball to `{projectId}/deps/{lockfileHash}` in S3
+- [ ] `restoreDepsCache()` downloads and returns tarball buffer on cache hit
+- [ ] `restoreDepsCache()` returns `null` on cache miss (no S3 error thrown)
+- [ ] Tarball size validated against `BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES` before upload
+- [ ] S3 errors during cache operations are logged but do not fail the build
+- [ ] Lockfile hash is SHA-256 of `pnpm-lock.yaml` file content
+- [ ] `BuildRunner` integrates cache restore before install and cache save after install
+- [ ] Second build with unchanged lockfile is measurably faster than the first
+
+---
+
+## Output
+
+After this step:
+
+- `packages/core/src/build/cache.ts` has working `saveDepsCache()` and `restoreDepsCache()` functions.
+- `packages/core/src/build/builder.ts` calls cache functions in the build pipeline.
+- Builds with unchanged `pnpm-lock.yaml` restore `node_modules` from S3 and skip the full install.

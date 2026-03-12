@@ -1,0 +1,380 @@
+# Step 3: Database Connection Pool Configuration
+
+**Phase:** 2 -- Database & Migrations
+**Step:** 3 of 3
+**Status:** Not Started
+**Depends on:** Step 2 (tables must exist on RDS to test queries)
+
+---
+
+## Goal
+
+Configure the `pg` connection pool for production use with appropriate limits for the `db.t4g.micro` RDS instance. Ensure SSL is enforced, connection limits are sane, and idle connections are reclaimed. Verify the `getDb()` singleton in the dashboard works correctly. Test connectivity from both local dev and the VPS.
+
+---
+
+## Background
+
+### Current Implementation
+
+**`packages/shared/src/db/index.ts`** (current):
+
+```typescript
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
+import * as schema from "./schema";
+
+export * from "./schema";
+
+export function createDb(connectionString: string) {
+  const pool = new pg.Pool({ connectionString });
+  return drizzle(pool, { schema });
+}
+
+export type Database = ReturnType<typeof createDb>;
+```
+
+**`apps/dashboard/src/lib/db.ts`** (current):
+
+```typescript
+import { createDb, type Database } from "@gblockparty/shared/db";
+
+let db: Database | null = null;
+
+export function getDb(): Database {
+  if (!db) {
+    const url = process.env.DATABASE_URL;
+    if (!url) {
+      throw new Error("DATABASE_URL environment variable is required");
+    }
+    db = createDb(url);
+  }
+  return db;
+}
+```
+
+### What Needs to Change
+
+The `createDb()` function currently passes only the `connectionString` to `pg.Pool`. For production, the pool needs explicit configuration:
+
+1. **Max connections**: Cap at 10 to avoid exhausting the RDS instance.
+2. **Idle timeout**: Release idle connections after 30 seconds.
+3. **Connection timeout**: Fail fast if a connection cannot be acquired in 10 seconds.
+4. **SSL**: Enforce SSL for RDS connections.
+
+---
+
+## RDS Instance Constraints
+
+The `db.t4g.micro` instance has the following relevant limits:
+
+| Parameter | Value |
+|-----------|-------|
+| Instance class | db.t4g.micro |
+| vCPU | 2 |
+| RAM | 1 GB |
+| `max_connections` | ~85 (calculated from memory by RDS) |
+| SSL | Required (enforced by RDS parameter group) |
+
+Since gBlockParty is a single-tenant platform with one dashboard process and one migration runner, a pool max of 10 connections is more than sufficient. This leaves 75+ connections available for managed app databases and direct psql access.
+
+---
+
+## Implementation
+
+### Update `packages/shared/src/db/index.ts`
+
+Add pool configuration options to `createDb()`:
+
+```typescript
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
+import * as schema from "./schema";
+
+export * from "./schema";
+
+export interface DbPoolOptions {
+  /** Maximum number of connections in the pool. Default: 10. */
+  max?: number;
+  /** Milliseconds a connection can sit idle before being closed. Default: 30000 (30s). */
+  idleTimeoutMillis?: number;
+  /** Milliseconds to wait for a connection from the pool. Default: 10000 (10s). */
+  connectionTimeoutMillis?: number;
+}
+
+export function createDb(connectionString: string, options?: DbPoolOptions) {
+  const pool = new pg.Pool({
+    connectionString,
+    max: options?.max ?? 10,
+    idleTimeoutMillis: options?.idleTimeoutMillis ?? 30_000,
+    connectionTimeoutMillis: options?.connectionTimeoutMillis ?? 10_000,
+    ssl: connectionString.includes("sslmode=")
+      ? undefined  // Let the connection string handle SSL mode
+      : { rejectUnauthorized: false },
+  });
+
+  return drizzle(pool, { schema });
+}
+
+export type Database = ReturnType<typeof createDb>;
+```
+
+### Key Design Decisions
+
+**`max: 10`**: The dashboard runs as a single Next.js server process. With 10 pool connections, it can handle 10 concurrent database operations. Given the single-tenant nature (one user), this is ample. It also leaves ~75 connections free on the `db.t4g.micro` for app databases and admin access.
+
+**`idleTimeoutMillis: 30_000`**: Idle connections are closed after 30 seconds. This prevents connection leaks while keeping connections warm during active use (e.g., navigating between dashboard pages). The pool will re-create connections as needed.
+
+**`connectionTimeoutMillis: 10_000`**: If the pool is full and a connection cannot be acquired within 10 seconds, the query fails with a clear timeout error rather than hanging indefinitely. This is a safety valve -- it should never trigger in practice with max=10 and a single user.
+
+**SSL handling**: If the connection string already contains `sslmode=` (which it should -- `?sslmode=require`), let `pg` parse it from the URL. Otherwise, fall back to `ssl: { rejectUnauthorized: false }` which enables SSL but does not verify the server certificate. RDS uses AWS-issued certificates that are trusted by default in most environments, but `rejectUnauthorized: false` is a safe fallback for environments where the AWS CA bundle is not installed.
+
+### No Changes to `apps/dashboard/src/lib/db.ts`
+
+The dashboard's `getDb()` singleton does not need changes. It already:
+1. Lazily initializes on first call
+2. Caches the instance in module scope (survives across requests in Next.js server components and API routes)
+3. Throws a clear error if `DATABASE_URL` is missing
+4. Calls `createDb()` which now has the pool configuration
+
+The singleton pattern is correct for Next.js: the `db` variable persists for the lifetime of the server process. Hot module replacement in dev mode may create multiple instances, but this is acceptable for development.
+
+---
+
+## SSL Configuration Details
+
+### How SSL Works with RDS
+
+1. The `DATABASE_URL` includes `?sslmode=require`, which tells the `pg` driver to use SSL.
+2. RDS provides an SSL certificate signed by the Amazon RDS Certificate Authority.
+3. The `pg` driver establishes a TLS connection to RDS.
+4. With `sslmode=require`, the connection is encrypted but the server certificate is not verified against a CA bundle. This is acceptable because:
+   - The RDS endpoint is unique and DNS-resolved to the correct instance
+   - The security group restricts who can even attempt a connection
+   - For a single-tenant platform, the threat model does not include MITM attacks on the AWS internal network
+
+### If Certificate Verification Is Desired (Optional)
+
+For stricter security, you can use `sslmode=verify-full` with the RDS CA bundle:
+
+```
+DATABASE_URL=postgresql://...?sslmode=verify-full&sslrootcert=/path/to/rds-combined-ca-bundle.pem
+```
+
+Download the bundle from: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
+This is not required for the MVP but can be added later.
+
+---
+
+## Verification
+
+### Test 1: Pool Configuration Takes Effect
+
+Write a small test script (or run in a REPL) to verify the pool is configured:
+
+```typescript
+import pg from "pg";
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
+});
+
+// Verify pool settings
+console.log("Pool max:", pool.options.max);                        // 10
+console.log("Idle timeout:", pool.options.idleTimeoutMillis);      // 30000
+console.log("Connection timeout:", pool.options.connectionTimeoutMillis); // 10000
+
+// Test a query
+const result = await pool.query("SELECT current_database(), current_user, version()");
+console.log("Database:", result.rows[0].current_database);
+console.log("User:", result.rows[0].current_user);
+console.log("Version:", result.rows[0].version);
+
+// Check SSL
+const sslResult = await pool.query("SHOW ssl");
+console.log("SSL:", sslResult.rows[0].ssl);  // "on"
+
+await pool.end();
+```
+
+### Test 2: Singleton Behavior
+
+Verify `getDb()` returns the same instance:
+
+```typescript
+import { getDb } from "./lib/db";
+
+const db1 = getDb();
+const db2 = getDb();
+console.log("Same instance:", db1 === db2);  // true
+```
+
+### Test 3: Query Through Drizzle ORM
+
+Verify the full stack works (Drizzle ORM -> pg Pool -> RDS):
+
+```typescript
+import { getDb } from "./lib/db";
+import { projects } from "@gblockparty/shared/db";
+
+const db = getDb();
+
+// Simple select (should return empty array on a fresh database)
+const allProjects = await db.select().from(projects);
+console.log("Projects:", allProjects.length);  // 0
+
+// Insert and retrieve
+const [inserted] = await db.insert(projects).values({
+  name: "Connection Test",
+  slug: "connection-test",
+}).returning();
+
+console.log("Inserted project:", inserted.id, inserted.slug);
+
+// Clean up
+await db.delete(projects).where(eq(projects.slug, "connection-test"));
+```
+
+### Test 4: Connection from VPS
+
+SSH into the VPS and run the same connectivity test:
+
+```bash
+ssh vps
+
+# Set DATABASE_URL
+export DATABASE_URL="postgresql://..."
+
+# Test with psql
+psql "$DATABASE_URL" -c "SELECT 1 AS connected;"
+
+# Test with the application
+cd /path/to/gblockparty
+pnpm db:migrate  # Should print "Migrations complete." (no new migrations to apply)
+```
+
+### Test 5: Pool Exhaustion Behavior
+
+Verify the pool handles connection exhaustion gracefully:
+
+```typescript
+import pg from "pg";
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 2,  // Small pool for testing
+  connectionTimeoutMillis: 3_000,
+});
+
+// Acquire all connections
+const client1 = await pool.connect();
+const client2 = await pool.connect();
+
+// Third connection should timeout after 3 seconds
+try {
+  const client3 = await pool.connect();
+  console.log("ERROR: Should not reach here");
+  client3.release();
+} catch (err) {
+  console.log("Expected timeout error:", err.message);
+  // Expected: "timeout expired" or similar
+}
+
+client1.release();
+client2.release();
+await pool.end();
+```
+
+### Test 6: Idle Connection Release
+
+Verify idle connections are released:
+
+```typescript
+import pg from "pg";
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  idleTimeoutMillis: 5_000,  // 5 seconds for testing
+});
+
+// Create a connection
+await pool.query("SELECT 1");
+console.log("Total connections:", pool.totalCount);   // 1
+console.log("Idle connections:", pool.idleCount);      // 1
+
+// Wait 6 seconds
+await new Promise(resolve => setTimeout(resolve, 6_000));
+
+console.log("Total connections after idle:", pool.totalCount);  // 0
+console.log("Idle connections after idle:", pool.idleCount);     // 0
+
+await pool.end();
+```
+
+---
+
+## Error Handling
+
+### Missing DATABASE_URL
+
+The `getDb()` function already throws a clear error:
+
+```
+Error: DATABASE_URL environment variable is required
+```
+
+This will surface immediately on the first database query attempt in the dashboard, making it easy to diagnose.
+
+### Connection Failure
+
+If the RDS instance is unreachable, `pg.Pool` will throw on the first query:
+
+```
+Error: connect ECONNREFUSED <ip>:5432
+```
+
+or
+
+```
+Error: getaddrinfo ENOTFOUND <hostname>
+```
+
+These errors propagate to the API route handler, which should return a 500 response. The Pino logger will capture the error.
+
+### Pool Exhaustion
+
+If all pool connections are in use and `connectionTimeoutMillis` expires:
+
+```
+Error: timeout expired
+```
+
+This should not happen in practice with max=10 and a single user, but it provides a safety net against connection leaks.
+
+---
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `packages/shared/src/db/index.ts` | Add `DbPoolOptions` interface and pool configuration to `createDb()` |
+| `apps/dashboard/src/lib/db.ts` | No changes needed (already correct) |
+
+---
+
+## Acceptance Criteria
+
+1. `createDb()` accepts optional pool configuration parameters.
+2. Default pool settings: max=10, idle timeout=30s, connection timeout=10s.
+3. SSL is enforced for RDS connections.
+4. `getDb()` returns the same Drizzle instance on repeated calls (singleton verified).
+5. Drizzle ORM queries work end-to-end: dashboard -> pool -> RDS.
+6. Connection works from local dev machine.
+7. Connection works from the VPS.
+8. Pool releases idle connections after timeout.
+9. Pool handles exhaustion with a clear timeout error (not an infinite hang).

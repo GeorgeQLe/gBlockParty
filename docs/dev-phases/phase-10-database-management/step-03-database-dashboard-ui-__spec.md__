@@ -1,0 +1,215 @@
+# Step 3: Database Management Dashboard UI
+
+**Phase:** 10 -- Database Management
+**Step:** 3 of 4
+**Type:** Frontend implementation
+**Depends on:** Step 2 (API routes must be implemented for the UI to fetch and mutate data)
+**Blocks:** None (Step 4 is complementary, not sequential)
+
+---
+
+## Objective
+
+Replace the placeholder database page with a full-featured UI that handles three states: loading, no database (create prompt), and database exists (info panel with stats, connection string, and delete option). The page uses SWR for data fetching and provides a responsive, polished experience consistent with the rest of the dashboard.
+
+---
+
+## Current State
+
+The file `apps/dashboard/src/app/projects/[id]/database/page.tsx` exists as a placeholder:
+
+```tsx
+import { Placeholder } from "@/components/ui/placeholder";
+
+export default function DatabasePage() {
+  return <Placeholder title="Database Management" />;
+}
+```
+
+This page is part of the project detail view, accessible via the "Database" tab at `/projects/:id/database`.
+
+---
+
+## Page States
+
+### State 1: Loading
+Display a skeleton UI while `GET /api/projects/:id/database` is in flight. Show skeleton shapes for the database info panel (name, connection string, stats area) to prevent layout shift.
+
+### State 2: No Database (GET returns `null`)
+Display an empty state with:
+- Heading: "No Database"
+- Description: "Create a PostgreSQL database for this project. A connection string will be automatically configured as the DATABASE_URL environment variable."
+- "Create Database" primary button
+- Info note: "The database will be created on the shared RDS instance with a dedicated user and random password."
+
+### State 3: Database Exists
+Display the `DatabasePanel` component with:
+- Database name and user (read-only display)
+- Connection string with show/hide password toggle (Step 4 component)
+- Stats: database size (formatted), active connections
+- Creation date
+- Info badge: "DATABASE_URL is set for production and preview"
+- "Delete Database" danger button (at bottom, in a "Danger Zone" section)
+
+---
+
+## Components to Create
+
+### 1. `apps/dashboard/src/components/database/database-panel.tsx`
+
+Main panel that displays all database info. Receives the database info object as props.
+
+```typescript
+interface DatabaseInfo {
+  dbName: string;
+  dbUser: string;
+  sizeBytes: number;
+  activeConnections: number;
+  connectionString: string;
+  createdAt: string;
+}
+
+interface DatabasePanelProps {
+  database: DatabaseInfo;
+  onDelete: () => void;
+}
+```
+
+**Layout:**
+```
++-----------------------------------------------+
+| Database: app_myproject                        |
+| User: app_myproject_user                       |
++-----------------------------------------------+
+| Connection String                              |
+| [postgresql://...****...?sslmode=require]  [Copy] |
+|                                    [Show/Hide] |
++-----------------------------------------------+
+| Stats                                          |
+| Size: 8.2 MB  |  Connections: 2               |
+| Created: March 1, 2026                         |
++-----------------------------------------------+
+| [i] DATABASE_URL is set for production and     |
+|     preview environments                       |
++-----------------------------------------------+
+|                                                |
+| Danger Zone                                    |
+| [Delete Database]                              |
++-----------------------------------------------+
+```
+
+### 2. `apps/dashboard/src/components/database/connection-string.tsx`
+
+Displays the connection string with:
+- Monospace font
+- Password masked by default (replaced with `********`)
+- Eye icon button to toggle password visibility
+- Copy button that copies the FULL connection string (with real password)
+- Visual feedback on copy (checkmark icon + "Copied!" text for 2 seconds)
+
+See Step 4 spec for full details on this component.
+
+### 3. `apps/dashboard/src/components/database/create-database-dialog.tsx`
+
+Confirmation dialog for creating a database.
+
+**Content:**
+- Title: "Create Database"
+- Body: "This will create a PostgreSQL database named `app_{slug}` on the shared RDS instance. A `DATABASE_URL` environment variable will be automatically set for both production and preview environments."
+- Cancel button
+- "Create Database" primary button with loading state
+
+**Behavior:**
+- On confirm: `POST /api/projects/:id/database`
+- Show loading spinner on the confirm button
+- On success: close dialog, trigger SWR revalidation
+- On error: display error message in the dialog (keep it open)
+
+### 4. `apps/dashboard/src/components/database/delete-database-dialog.tsx`
+
+Double-confirmation dialog for deleting a database.
+
+**Content:**
+- Title: "Delete Database"
+- Warning: "This action is irreversible. The database `{dbName}` and all its data will be permanently deleted. The DATABASE_URL environment variable will be removed."
+- Input field: "Type the database name to confirm" with placeholder `{dbName}`
+- Cancel button
+- "Delete Database" danger button (disabled until input matches `dbName`)
+
+**Behavior:**
+- Delete button enabled only when input exactly matches `dbName`
+- On confirm: `DELETE /api/projects/:id/database` with body `{ confirmName: inputValue }`
+- Show loading spinner on the confirm button
+- On success: close dialog, trigger SWR revalidation
+- On error: display error message in the dialog
+
+---
+
+## Page Implementation
+
+### Data Fetching
+
+Use SWR for the database info:
+
+```typescript
+import useSWR from "swr";
+
+const { data, error, isLoading, mutate } = useSWR(
+  `/api/projects/${projectId}/database`,
+  fetcher,
+);
+```
+
+### Size Formatting
+
+Format `sizeBytes` into a human-readable string:
+- `< 1024` -> `"X bytes"`
+- `< 1024 * 1024` -> `"X.X KB"`
+- `< 1024 * 1024 * 1024` -> `"X.X MB"`
+- Otherwise -> `"X.X GB"`
+
+### Date Formatting
+
+Format `createdAt` as a readable date: "March 1, 2026" using `Intl.DateTimeFormat` or a date library.
+
+---
+
+## Styling
+
+- Use Tailwind CSS classes consistent with the existing dashboard design
+- Cards use rounded borders with subtle shadow
+- Danger zone uses red/destructive color scheme
+- Connection string area uses monospace font (`font-mono`)
+- Dialogs use the existing dialog/modal component from the dashboard's component library
+- Responsive: single-column on mobile, two-column stats on desktop
+
+---
+
+## Error Handling
+
+- API fetch error: display an error alert with retry button
+- Create error: display error in dialog, keep dialog open for retry
+- Delete error: display error in dialog, keep dialog open for retry
+- Network error: display "Unable to connect. Check your network connection."
+
+---
+
+## Verification
+
+- [ ] Page renders loading skeleton while fetching
+- [ ] Page renders "Create Database" prompt when no database exists
+- [ ] Page renders database info panel when database exists
+- [ ] Create Database dialog opens on button click
+- [ ] Create Database dialog calls POST API and refreshes on success
+- [ ] Database info appears after creation without page reload (SWR revalidation)
+- [ ] Connection string displayed with masked password by default
+- [ ] Show/hide toggle reveals/hides password
+- [ ] Copy button copies full connection string to clipboard
+- [ ] Database size displayed in human-readable format
+- [ ] Active connections count displayed
+- [ ] Creation date displayed in readable format
+- [ ] Delete Database dialog requires typing database name to enable delete button
+- [ ] Delete Database calls DELETE API with confirmation body
+- [ ] Page reverts to "Create Database" state after deletion (SWR revalidation)
+- [ ] API errors displayed in dialogs without closing them
+- [ ] Responsive layout works on mobile viewports

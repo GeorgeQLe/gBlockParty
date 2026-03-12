@@ -1,0 +1,364 @@
+# Step 6: Project Detail Page UI
+
+**Phase:** 6, Step 6
+**Status:** Not Started
+**Depends on:** Step 1 (projects API -- `GET /api/projects/:id`), Step 2 (deployments API -- `POST /api/projects/:id/deployments`), Step 5 (StatusBadge component)
+**Blocks:** Steps 7-8 (child pages rendered inside this layout)
+
+---
+
+## Goal
+
+Build the project overview page and update the project layout with interactive tab navigation. The overview page shows the current production URL, the 5 most recent deployments with status and commit info, and quick action buttons (Deploy, View Logs). The layout fetches project data and passes context to child pages via React context or props.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/projects/[id]/layout.tsx`
+
+```typescript
+export default function ProjectLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-6 border-b">
+        <nav className="flex gap-4 pb-2 text-sm">
+          <span className="font-medium">Deployments</span>
+          <span className="text-gray-500">Settings</span>
+          <span className="text-gray-500">Environment</span>
+          <span className="text-gray-500">Database</span>
+        </nav>
+      </div>
+      {children}
+    </div>
+  );
+}
+```
+
+### `apps/dashboard/src/app/projects/[id]/page.tsx`
+
+```typescript
+import { Placeholder } from "@/components/ui/placeholder";
+
+export default function ProjectPage() {
+  return <Placeholder title="Project Overview" />;
+}
+```
+
+---
+
+## Implementation Details
+
+### Layout: `apps/dashboard/src/app/projects/[id]/layout.tsx`
+
+Convert to a client component that fetches project data and provides interactive tab navigation.
+
+**Responsibilities:**
+1. Extract `id` from the URL via `useParams()`.
+2. Fetch project details via `useSWR` calling `GET /api/projects/${id}`.
+3. Display the project header (name, GitHub repo, status).
+4. Render tab navigation with `<Link>` components and active state detection.
+5. Render children (the page content).
+
+```typescript
+"use client";
+
+import { useParams, usePathname } from "next/navigation";
+import Link from "next/link";
+import useSWR from "swr";
+import { fetcher } from "@/lib/swr";
+import { StatusBadge } from "@/components/projects/status-badge";
+
+export default function ProjectLayout({ children }: { children: React.ReactNode }) {
+  const params = useParams();
+  const pathname = usePathname();
+  const id = params.id as string;
+
+  const { data: project, error, isLoading } = useSWR(`/api/projects/${id}`, fetcher);
+
+  const tabs = [
+    { name: "Overview", href: `/projects/${id}` },
+    { name: "Deployments", href: `/projects/${id}/deployments` },
+    { name: "Environment", href: `/projects/${id}/environment` },
+    { name: "Settings", href: `/projects/${id}/settings` },
+  ];
+
+  function isActiveTab(href: string): boolean {
+    if (href === `/projects/${id}`) {
+      return pathname === href;
+    }
+    return pathname.startsWith(href);
+  }
+
+  if (isLoading) {
+    return <ProjectLayoutSkeleton />;
+  }
+
+  if (error || !project) {
+    return <ProjectNotFound />;
+  }
+
+  return (
+    <div>
+      {/* Project Header */}
+      <div className="mb-6">
+        <div className="flex items-center gap-3">
+          <h2 className="text-2xl font-bold text-gray-900">{project.name}</h2>
+          {project.recentDeployments?.[0] && (
+            <StatusBadge status={project.recentDeployments[0].status} />
+          )}
+        </div>
+        {project.githubRepoFullName && (
+          <a
+            href={`https://github.com/${project.githubRepoFullName}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1 text-sm text-gray-500 hover:text-gray-700"
+          >
+            {project.githubRepoFullName}
+          </a>
+        )}
+      </div>
+
+      {/* Tab Navigation */}
+      <div className="mb-6 border-b border-gray-200">
+        <nav className="-mb-px flex gap-6">
+          {tabs.map((tab) => (
+            <Link
+              key={tab.href}
+              href={tab.href}
+              className={`border-b-2 pb-3 text-sm font-medium transition-colors ${
+                isActiveTab(tab.href)
+                  ? "border-gray-900 text-gray-900"
+                  : "border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700"
+              }`}
+            >
+              {tab.name}
+            </Link>
+          ))}
+        </nav>
+      </div>
+
+      {/* Page Content */}
+      {children}
+    </div>
+  );
+}
+```
+
+**Tab active state logic:**
+- The "Overview" tab is active only when the pathname is exactly `/projects/:id`.
+- All other tabs are active when the pathname starts with their `href` (e.g., `/projects/:id/deployments` and `/projects/:id/deployments/abc123` both activate the "Deployments" tab).
+
+### Page: `apps/dashboard/src/app/projects/[id]/page.tsx`
+
+The project overview page. Converts to a client component that uses the project data from the SWR cache (or fetches its own).
+
+**Layout:**
+
+```
++------------------------------------------------------------------+
+|                                                                    |
+| Production URL                                                     |
+| https://my-app.yourdomain.dev  [open link icon]                   |
+|                                                                    |
++------------------------------------------------------------------+
+
++------------------------------------------------------------------+
+| Quick Actions                                                      |
+|                                                                    |
+| [ Deploy ]   [ View Logs ]                                        |
++------------------------------------------------------------------+
+
++------------------------------------------------------------------+
+| Recent Deployments                                                 |
+|                                                                    |
+| [ready]  a1b2c3d  main    2 hours ago    34s                      |
+| [failed] e5f6g7h  main    5 hours ago    12s                      |
+| [ready]  i9j0k1l  main    1 day ago      45s                     |
+| [ready]  m3n4o5p  main    2 days ago     38s                     |
+| [ready]  q7r8s9t  main    3 days ago     41s                     |
+|                                                                    |
+| View all deployments →                                            |
++------------------------------------------------------------------+
+```
+
+**Sections:**
+
+#### 1. Production URL Section
+- Show the current production URL from the latest `ready` deployment.
+- URL is clickable and opens in a new tab.
+- If no production deployment exists, show "No production deployment yet."
+
+#### 2. Quick Actions Section
+- **Deploy button:** Triggers `POST /api/projects/:id/deployments` with empty body (defaults to production branch).
+  - On click: show a confirmation dialog ("Deploy from main branch?")
+  - On confirm: send POST, show loading state, navigate to the deployment detail page on success
+  - On error: show error toast
+- **View Logs button:** Links to the latest deployment's detail page (`/projects/:id/deployments/:latestDeploymentId`).
+  - Disabled if no deployments exist.
+
+#### 3. Recent Deployments Section
+- Show the 5 most recent deployments (from `project.recentDeployments` returned by the GET API).
+- Each row shows:
+  - Status badge (from StatusBadge component)
+  - Commit SHA (first 7 characters, monospace font)
+  - Branch name
+  - Relative timestamp ("2 hours ago")
+  - Build duration (formatted as seconds, e.g., "34s")
+- Each row is clickable, navigates to `/projects/:id/deployments/:deploymentId`.
+- "View all deployments" link at the bottom navigates to `/projects/:id/deployments`.
+
+---
+
+## New Components
+
+### 1. `apps/dashboard/src/components/projects/project-header.tsx`
+
+Extracted header component (optional -- could be inline in layout). Displays project name, GitHub link, and status.
+
+### 2. `apps/dashboard/src/components/projects/production-url.tsx`
+
+Displays the production URL in a styled box.
+
+**Props:**
+```typescript
+interface ProductionUrlProps {
+  url: string | null;
+}
+```
+
+### 3. `apps/dashboard/src/components/projects/quick-actions.tsx`
+
+Deploy and View Logs buttons.
+
+**Props:**
+```typescript
+interface QuickActionsProps {
+  projectId: string;
+  latestDeploymentId: string | null;
+  onDeploy: () => void;
+  isDeploying: boolean;
+}
+```
+
+### 4. `apps/dashboard/src/components/deployments/deployment-row.tsx`
+
+A single row in the recent deployments list. Reused in Step 7's full deployments page.
+
+**Props:**
+```typescript
+interface DeploymentRowProps {
+  deployment: {
+    id: string;
+    status: string;
+    commitSha: string | null;
+    branch: string | null;
+    buildDurationMs: number | null;
+    createdAt: string;
+  };
+  projectId: string;
+}
+```
+
+**Visual layout:**
+```
+[status badge]  a1b2c3d  main  ·  2 hours ago  ·  34s
+```
+
+### 5. `apps/dashboard/src/components/projects/project-layout-skeleton.tsx`
+
+Loading skeleton for the project layout (header + tabs placeholder).
+
+### 6. `apps/dashboard/src/components/projects/project-not-found.tsx`
+
+404 state when the project ID does not match any project.
+
+---
+
+## Deploy Button Flow
+
+```
+User clicks "Deploy"
+    |
+    v
+Confirmation dialog: "Deploy from main branch?"
+    |
+    +--> [Cancel] --> close dialog
+    |
+    +--> [Confirm]
+           |
+           v
+         POST /api/projects/:id/deployments
+         Body: {} (empty -- defaults to production branch)
+           |
+           +--> Success (201)
+           |      |
+           |      v
+           |    Navigate to /projects/:id/deployments/:newDeploymentId
+           |    Show success toast: "Deployment triggered"
+           |
+           +--> Error
+                  |
+                  v
+                Show error toast: "Failed to trigger deployment"
+```
+
+**Deploy button states:**
+- Default: gray/dark button "Deploy"
+- Loading: disabled, spinner icon, "Deploying..."
+- Success: brief green flash, then navigation
+
+---
+
+## Formatting Utilities
+
+Add to `apps/dashboard/src/lib/format.ts`:
+
+```typescript
+export function formatCommitSha(sha: string | null): string {
+  return sha ? sha.substring(0, 7) : "-------";
+}
+
+export function formatDuration(ms: number | null): string {
+  if (ms === null) return "--";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}m ${remainingSeconds}s`;
+}
+```
+
+---
+
+## File Summary
+
+| File | Action | Description |
+|------|--------|-------------|
+| `apps/dashboard/src/app/projects/[id]/layout.tsx` | Modify | Interactive tab navigation with SWR data fetching |
+| `apps/dashboard/src/app/projects/[id]/page.tsx` | Modify | Project overview with URL, actions, recent deployments |
+| `apps/dashboard/src/components/projects/production-url.tsx` | Create | Production URL display component |
+| `apps/dashboard/src/components/projects/quick-actions.tsx` | Create | Deploy and View Logs buttons |
+| `apps/dashboard/src/components/deployments/deployment-row.tsx` | Create | Single deployment row (reusable) |
+| `apps/dashboard/src/components/projects/project-layout-skeleton.tsx` | Create | Loading skeleton for layout |
+| `apps/dashboard/src/components/projects/project-not-found.tsx` | Create | 404 state |
+| `apps/dashboard/src/lib/format.ts` | Modify | Add `formatCommitSha` and `formatDuration` |
+
+---
+
+## Testing
+
+### Visual Tests
+
+1. **Tab navigation:** Clicking each tab navigates to the correct page. Active tab has border and dark text.
+2. **Active tab detection:** Visiting `/projects/:id/deployments/abc123` highlights the "Deployments" tab.
+3. **Production URL:** Displayed correctly, opens in new tab on click.
+4. **No deployments:** "No production deployment yet" shown. View Logs button is disabled.
+5. **Recent deployments:** Shows up to 5 deployments with correct status, commit, branch, time, and duration.
+6. **Deploy button:** Shows confirmation dialog, triggers POST, navigates on success.
+7. **Deploy error:** Error toast appears on API failure.
+8. **Loading state:** Skeleton shows while project data loads.
+9. **404 state:** Invalid project ID shows "Project not found" message.
+10. **Deployment row click:** Clicking a deployment navigates to its detail page.
+11. **"View all deployments" link:** Navigates to `/projects/:id/deployments`.

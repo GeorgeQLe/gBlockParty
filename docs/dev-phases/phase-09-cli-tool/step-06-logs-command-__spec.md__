@@ -1,0 +1,339 @@
+# Step 6: Logs Command
+
+**Phase:** 9 -- CLI Tool
+**Step:** 6 of 7
+**Status:** Not Started
+**Depends on:** Step 2 (Login), Step 3 (Link), Phase 8 (Build log streaming endpoint)
+**Depends on this step:** None
+
+---
+
+## Goal
+
+Implement `gblockparty logs` so the user can view build logs for the latest deployment of the linked project. The command supports limiting output to the last N lines and real-time streaming of logs from an in-progress build.
+
+---
+
+## Background
+
+Build logs are stored in S3 after a build completes and are streamed in real-time during the build via WebSocket or SSE. The logs command provides access to both:
+
+1. **Static logs**: Fetch completed build logs from `GET /api/projects/:id/deployments/:did/logs`
+2. **Streaming logs**: Connect to `WS /api/projects/:id/deployments/:did/logs/stream` for real-time output from in-progress builds
+
+The command first fetches the latest deployment to determine its status, then either displays the stored logs (if the build is complete) or connects to the stream (if the build is in progress and `-f` is specified).
+
+---
+
+## File to Modify
+
+### `packages/cli/src/commands/logs.ts`
+
+**Current state:** Prints "Logs not yet implemented". Has `-n/--lines` and `-f/--follow` options defined.
+
+**Target implementation:**
+
+```typescript
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+import { ApiClient } from "../lib/api-client";
+import { getGlobalConfig, getProjectConfig } from "../lib/config";
+
+interface Deployment {
+  id: string;
+  status: string;
+  commitSha: string | null;
+  branch: string | null;
+  createdAt: string;
+  buildDurationMs: number | null;
+}
+
+interface LogsResponse {
+  logs: string;
+}
+
+export const logsCommand = new Command("logs")
+  .description("Tail deployment logs")
+  .option("-n, --lines <number>", "Number of lines to show", "100")
+  .option("-f, --follow", "Follow log output")
+  .action(async (options: { lines: string; follow?: boolean }) => {
+    // Auth check
+    const config = getGlobalConfig();
+    if (!config.token) {
+      console.error(chalk.red("Not authenticated. Run `gblockparty login` first."));
+      process.exit(1);
+    }
+
+    // Project check
+    const projectConfig = getProjectConfig();
+    if (!projectConfig) {
+      console.error(chalk.red("No project linked. Run `gblockparty link` first."));
+      process.exit(1);
+    }
+
+    const client = new ApiClient();
+    const lineLimit = parseInt(options.lines, 10);
+
+    // Fetch latest deployment
+    const spinner = ora("Fetching latest deployment...").start();
+
+    let latestDeployment: Deployment;
+    try {
+      const deployments = await client.get<Deployment[]>(
+        `/api/projects/${projectConfig.projectId}/deployments?limit=1`
+      );
+
+      if (deployments.length === 0) {
+        spinner.info(chalk.yellow("No deployments found for this project."));
+        process.exit(0);
+      }
+
+      latestDeployment = deployments[0];
+      spinner.stop();
+    } catch (error) {
+      spinner.fail(chalk.red("Failed to fetch deployments"));
+      if (error instanceof Error) {
+        console.error(chalk.red(error.message));
+      }
+      process.exit(1);
+    }
+
+    // Print deployment header
+    const sha = latestDeployment.commitSha?.slice(0, 7) ?? "unknown";
+    const branch = latestDeployment.branch ?? "unknown";
+    const status = formatStatus(latestDeployment.status);
+    const time = new Date(latestDeployment.createdAt).toLocaleString();
+
+    console.log(
+      chalk.dim(
+        `Deployment ${chalk.bold(sha)} on ${branch} | ${status} | ${time}`
+      )
+    );
+    console.log(chalk.dim("---"));
+    console.log("");
+
+    // Determine whether to stream or fetch static logs
+    const isInProgress =
+      latestDeployment.status === "building" ||
+      latestDeployment.status === "deploying" ||
+      latestDeployment.status === "queued";
+
+    if (options.follow && isInProgress) {
+      // Stream logs in real-time
+      await streamLogs(config, projectConfig.projectId, latestDeployment.id);
+    } else {
+      // Fetch completed logs
+      await fetchStaticLogs(
+        client,
+        projectConfig.projectId,
+        latestDeployment.id,
+        lineLimit
+      );
+
+      if (options.follow && !isInProgress) {
+        console.log(
+          chalk.dim("\nBuild is complete. Use -f with an in-progress build to stream logs.")
+        );
+      }
+    }
+  });
+
+async function fetchStaticLogs(
+  client: ApiClient,
+  projectId: string,
+  deploymentId: string,
+  lineLimit: number
+): Promise<void> {
+  try {
+    const response = await client.get<LogsResponse>(
+      `/api/projects/${projectId}/deployments/${deploymentId}/logs`
+    );
+
+    if (!response.logs) {
+      console.log(chalk.dim("No logs available for this deployment."));
+      return;
+    }
+
+    const lines = response.logs.split("\n");
+    const output = lineLimit > 0 ? lines.slice(-lineLimit) : lines;
+
+    for (const line of output) {
+      process.stdout.write(line + "\n");
+    }
+
+    if (lineLimit > 0 && lines.length > lineLimit) {
+      console.log(
+        chalk.dim(`\n(showing last ${lineLimit} of ${lines.length} lines)`)
+      );
+    }
+  } catch (error) {
+    console.error(chalk.red("Failed to fetch logs"));
+    if (error instanceof Error) {
+      console.error(chalk.red(error.message));
+    }
+    process.exit(1);
+  }
+}
+
+async function streamLogs(
+  config: { apiUrl?: string; token?: string },
+  projectId: string,
+  deploymentId: string
+): Promise<void> {
+  const apiUrl = config.apiUrl ?? "http://localhost:3000";
+  const streamUrl = `${apiUrl}/api/projects/${projectId}/deployments/${deploymentId}/logs/stream`;
+
+  try {
+    const response = await fetch(streamUrl, {
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        Accept: "text/event-stream",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Stream error: ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("No response body");
+    }
+
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") {
+            console.log(chalk.dim("\n--- Build complete ---"));
+            return;
+          }
+          process.stdout.write(data + "\n");
+        }
+      }
+    }
+  } catch (error) {
+    console.error(chalk.yellow("\nLog streaming interrupted."));
+    if (error instanceof Error && error.message !== "Stream error: 404") {
+      console.error(chalk.dim(error.message));
+    }
+  }
+}
+
+function formatStatus(status: string): string {
+  switch (status) {
+    case "ready":
+      return chalk.green(status);
+    case "failed":
+      return chalk.red(status);
+    case "building":
+    case "deploying":
+      return chalk.yellow(status);
+    case "queued":
+      return chalk.blue(status);
+    default:
+      return chalk.dim(status);
+  }
+}
+```
+
+---
+
+## Command Flags
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--lines` | `-n` | Number of lines to display | `100` |
+| `--follow` | `-f` | Stream logs in real-time (for in-progress builds) | `false` |
+
+---
+
+## Output Format
+
+### Static logs (completed build):
+
+```
+Deployment a1b2c3d on main | ready | 3/2/2026, 12:00:00 PM
+---
+
+Cloning repository...
+Installing dependencies...
+added 1423 packages in 12s
+Building project...
+Creating optimized production build...
+Compiled successfully
+Building Docker image...
+Image built: myapp:a1b2c3d4 (145 MB)
+Starting container...
+Health check passed
+
+(showing last 100 of 247 lines)
+```
+
+### Streaming logs (in-progress build with `-f`):
+
+```
+Deployment e5f6g7h on feature/new | building | 3/2/2026, 12:05:00 PM
+---
+
+Cloning repository...
+Installing dependencies...
+added 1423 packages in 12s
+Building project...
+(lines appear in real-time as the build progresses)
+
+--- Build complete ---
+```
+
+---
+
+## API Dependencies
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/projects/:id/deployments?limit=1` | GET | Fetch the latest deployment for the project |
+| `/api/projects/:id/deployments/:did/logs` | GET | Fetch completed build logs (full text) |
+| `/api/projects/:id/deployments/:did/logs/stream` | GET (SSE) or WS | Stream build logs in real-time |
+
+These endpoints are implemented in Phase 6 (dashboard API routes) and Phase 8 (log streaming).
+
+---
+
+## Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| No deployments exist | Print "No deployments found for this project" and exit |
+| No logs available for the deployment | Print "No logs available for this deployment" |
+| `-f` used with a completed build | Show static logs, then print message that `-f` only works with in-progress builds |
+| `-f` used with an in-progress build | Stream logs until `[DONE]` or stream ends |
+| `-n 0` (zero lines) | Show all lines (no limit) |
+| `-n 10` with fewer than 10 lines available | Show all available lines |
+| Stream connection drops | Print warning "Log streaming interrupted" and exit gracefully |
+| Build transitions from building to ready during streaming | Stream emits `[DONE]`, CLI prints "Build complete" |
+
+---
+
+## Verification Checklist
+
+- [ ] `gblockparty logs` fetches and displays logs for the latest deployment
+- [ ] Deployment header shows commit SHA (short), branch, status, and timestamp
+- [ ] Status is color-coded (green=ready, red=failed, yellow=building, blue=queued)
+- [ ] `-n 50` limits output to the last 50 lines
+- [ ] Default line limit is 100
+- [ ] "(showing last N of M lines)" message is shown when output is truncated
+- [ ] `-f` streams logs in real-time for in-progress builds
+- [ ] ANSI colors in log output are preserved
+- [ ] `[DONE]` sentinel from SSE stream triggers clean exit
+- [ ] Stream interruption is handled gracefully
+- [ ] No deployments scenario exits with informative message
+- [ ] Auth and project link guards work
+- [ ] `pnpm typecheck` passes

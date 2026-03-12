@@ -1,0 +1,450 @@
+# Step 8: Environment Variables Page UI
+
+**Phase:** 6, Step 8
+**Status:** Not Started
+**Depends on:** Step 3 (env vars API -- all CRUD endpoints), Step 6 (project layout with tab navigation)
+**Blocks:** None directly
+
+---
+
+## Goal
+
+Build the environment variables management page with production/preview scope toggle, a key-value pair editor with add/edit/delete operations, secret toggle per variable, and bulk edit mode for pasting KEY=VALUE lines. After this step, users can fully manage environment variables through the dashboard UI.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/projects/[id]/environment/page.tsx`
+
+```typescript
+import { Placeholder } from "@/components/ui/placeholder";
+
+export default function EnvironmentPage() {
+  return <Placeholder title="Environment Variables" />;
+}
+```
+
+---
+
+## Implementation Details
+
+### Page: `apps/dashboard/src/app/projects/[id]/environment/page.tsx`
+
+Convert to a client component with SWR data fetching. The page manages the scope toggle state and coordinates all CRUD operations.
+
+```typescript
+"use client";
+
+import { useParams } from "next/navigation";
+import { useState } from "react";
+import useSWR from "swr";
+import { fetcher } from "@/lib/swr";
+import { ScopeToggle } from "@/components/env/scope-toggle";
+import { EnvVarList } from "@/components/env/env-var-list";
+import { AddEnvVarForm } from "@/components/env/add-env-var-form";
+import { BulkEditMode } from "@/components/env/bulk-edit-mode";
+
+export default function EnvironmentPage() {
+  const params = useParams();
+  const projectId = params.id as string;
+  const [scope, setScope] = useState<"production" | "preview">("production");
+  const [isBulkEdit, setIsBulkEdit] = useState(false);
+
+  const { data: envVars, error, isLoading, mutate } = useSWR(
+    `/api/projects/${projectId}/env?scope=${scope}`,
+    fetcher,
+  );
+
+  // ... render components
+}
+```
+
+#### Page Layout
+
+```
++------------------------------------------------------------------+
+| Environment Variables                                              |
+|                                                                    |
+| [Production] [Preview]        [ Bulk Edit ]                      |
+|                                                                    |
++------------------------------------------------------------------+
+| Add Variable                                                       |
+|                                                                    |
+| Key:    [________________]                                        |
+| Value:  [________________]  [ ] Secret                            |
+|                              [ Add Variable ]                     |
++------------------------------------------------------------------+
+| Variables                                                          |
+|                                                                    |
+| DATABASE_URL        ***                      [Edit] [Delete]      |
+| NEXT_PUBLIC_API_URL https://api.example.com  [Edit] [Delete]      |
+| NODE_ENV            production               [Edit] [Delete]      |
+| SECRET_KEY          ***                      [Edit] [Delete]      |
+|                                                                    |
++------------------------------------------------------------------+
+```
+
+---
+
+## New Components
+
+### 1. `apps/dashboard/src/components/env/scope-toggle.tsx`
+
+A segmented control to switch between Production and Preview scopes.
+
+**Props:**
+```typescript
+interface ScopeToggleProps {
+  activeScope: "production" | "preview";
+  onScopeChange: (scope: "production" | "preview") => void;
+}
+```
+
+**Visual:**
+```
+[Production] [Preview]
+```
+
+Active scope has a filled background (`bg-gray-900 text-white`). Inactive scope has a border/outline style (`bg-white text-gray-700 border`). Both are rounded buttons sitting side by side as a button group.
+
+### 2. `apps/dashboard/src/components/env/env-var-list.tsx`
+
+The list of environment variables with edit and delete actions.
+
+**Props:**
+```typescript
+interface EnvVarListProps {
+  envVars: Array<{
+    id: string;
+    key: string;
+    value: string;
+    isSecret: boolean;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  projectId: string;
+  scope: "production" | "preview";
+  onMutate: () => void; // trigger SWR revalidation
+}
+```
+
+**Each row layout:**
+```
++------------------------------------------------------------------+
+| DATABASE_URL                                                       |
+| ***                                     [Lock icon]  [Edit] [Del] |
++------------------------------------------------------------------+
+```
+
+Or for non-secrets:
+```
++------------------------------------------------------------------+
+| NEXT_PUBLIC_API_URL                                                |
+| https://api.example.com                          [Edit] [Delete]  |
++------------------------------------------------------------------+
+```
+
+**Row details:**
+- Key: `font-mono text-sm font-medium text-gray-900`
+- Value: `font-mono text-sm text-gray-600` (or `text-gray-400` for masked `***`)
+- Secret indicator: small lock icon next to masked value
+- Edit button: pencil icon or "Edit" text, opens inline edit mode
+- Delete button: trash icon or "Delete" text, opens confirmation dialog
+
+### 3. `apps/dashboard/src/components/env/env-var-row.tsx`
+
+Individual environment variable row with view/edit modes.
+
+**Props:**
+```typescript
+interface EnvVarRowProps {
+  envVar: {
+    id: string;
+    key: string;
+    value: string;
+    isSecret: boolean;
+  };
+  projectId: string;
+  onMutate: () => void;
+}
+```
+
+**View mode:** Displays key, value (or `***` for secrets), and action buttons.
+
+**Edit mode:** Inline editing with:
+- Value textarea (pre-filled with current value for non-secrets, empty for secrets since we cannot retrieve the actual value)
+- Secret toggle checkbox
+- Save and Cancel buttons
+
+**Edit mode layout:**
+```
++------------------------------------------------------------------+
+| DATABASE_URL                                                       |
+| [____________________________]                                     |
+| [ ] Secret                                                         |
+| [Save] [Cancel]                                                    |
++------------------------------------------------------------------+
+```
+
+**Edit flow:**
+1. User clicks "Edit" on a row.
+2. Row expands to show edit form.
+3. For non-secret vars: value textarea is pre-filled with current value.
+4. For secret vars: value textarea is empty with placeholder "Enter new value (leave empty to keep current)".
+5. User modifies value and/or secret toggle.
+6. User clicks "Save": sends `PATCH /api/projects/:id/env/:varId` with updated fields.
+7. On success: row collapses back to view mode, SWR revalidates.
+8. On error: inline error message shown.
+9. User clicks "Cancel": row collapses without changes.
+
+**Important UX for secrets:** When editing a secret variable and the user leaves the value field empty, the PATCH request should only update the `isSecret` flag (if changed), not send an empty value. The API interprets omitted `value` as "keep existing".
+
+### 4. `apps/dashboard/src/components/env/add-env-var-form.tsx`
+
+Form for adding a new environment variable.
+
+**Props:**
+```typescript
+interface AddEnvVarFormProps {
+  projectId: string;
+  scope: "production" | "preview";
+  onMutate: () => void;
+}
+```
+
+**Layout:**
+```
++------------------------------------------------------------------+
+| Key:    [________________]                                        |
+| Value:  [                ]                                        |
+|         [                ]  [ ] Secret                            |
+|                              [ Add Variable ]                     |
++------------------------------------------------------------------+
+```
+
+**Fields:**
+- **Key input**: text input, validates `^[A-Z_][A-Z0-9_]*$` on the client side before submit. Shows inline validation error for invalid format.
+- **Value textarea**: multi-line text area for the value. Allows paste.
+- **Secret checkbox**: toggles `isSecret` flag.
+- **Submit button**: "Add Variable"
+
+**Flow:**
+1. User fills in key and value.
+2. Client-side validation checks key format.
+3. User clicks "Add Variable".
+4. POST to `/api/projects/:id/env` with `{ key, value, scope, isSecret }`.
+5. On success (201): clear form, trigger SWR revalidation, show success toast.
+6. On conflict (409): show error "Variable already exists for this scope."
+7. On validation error (400): show Zod error details.
+
+### 5. `apps/dashboard/src/components/env/bulk-edit-mode.tsx`
+
+Bulk edit mode for pasting multiple KEY=VALUE lines at once.
+
+**Props:**
+```typescript
+interface BulkEditModeProps {
+  projectId: string;
+  scope: "production" | "preview";
+  onComplete: () => void; // exit bulk edit mode and revalidate
+}
+```
+
+**Layout:**
+```
++------------------------------------------------------------------+
+| Bulk Edit                                                          |
+|                                                                    |
+| Paste KEY=VALUE pairs (one per line):                             |
+| +--------------------------------------------------------------+ |
+| | DATABASE_URL=postgresql://...                                   | |
+| | API_KEY=sk-1234567890                                          | |
+| | NODE_ENV=production                                             | |
+| +--------------------------------------------------------------+ |
+|                                                                    |
+| [ ] Mark all as secret                                            |
+|                                                                    |
+| [Import X Variables] [Cancel]                                     |
++------------------------------------------------------------------+
+```
+
+**Parsing rules:**
+- One `KEY=VALUE` per line
+- Lines starting with `#` are treated as comments (ignored)
+- Empty lines are ignored
+- The first `=` sign separates key from value (value can contain `=`)
+- Keys are validated against `^[A-Z_][A-Z0-9_]*$`
+- Invalid keys show as errors below the textarea
+- Leading/trailing whitespace is trimmed from keys and values
+- Quoted values (`VALUE="something"` or `VALUE='something'`) have quotes stripped
+
+**Flow:**
+1. User clicks "Bulk Edit" button in the page header.
+2. The add form and variable list are replaced by the bulk edit textarea.
+3. User pastes KEY=VALUE content.
+4. Client-side parsing shows a preview: "X variables to import, Y errors."
+5. User clicks "Import X Variables".
+6. For each parsed line, POST to `/api/projects/:id/env`. Requests are sequential to handle conflicts gracefully.
+7. Results shown: "X imported, Y skipped (already exist), Z errors."
+8. User clicks "Done" to exit bulk edit mode.
+
+**Alternative approach (batch):** Instead of sequential POSTs, consider a future batch endpoint. For Phase 6, sequential POSTs are acceptable given the low volume.
+
+### 6. `apps/dashboard/src/components/env/delete-env-var-dialog.tsx`
+
+Confirmation dialog before deleting an environment variable.
+
+**Props:**
+```typescript
+interface DeleteEnvVarDialogProps {
+  envVar: { id: string; key: string };
+  projectId: string;
+  isOpen: boolean;
+  onClose: () => void;
+  onDeleted: () => void; // trigger revalidation
+}
+```
+
+**Visual:**
+```
++------------------------------------------+
+| Delete Environment Variable              |
+|                                          |
+| Are you sure you want to delete          |
+| DATABASE_URL?                            |
+|                                          |
+| This action cannot be undone.            |
+|                                          |
+| [Cancel]            [Delete]             |
++------------------------------------------+
+```
+
+The delete button is red (`bg-red-600 hover:bg-red-700`). The dialog is a modal overlay with backdrop blur.
+
+---
+
+## Notifications
+
+Use a simple toast notification system for feedback on mutations. Create a lightweight toast component or use a simple inline message approach.
+
+### `apps/dashboard/src/components/ui/toast.tsx` (optional)
+
+A minimal toast notification that appears briefly at the bottom of the screen.
+
+**Types:**
+- `success`: green background, checkmark icon
+- `error`: red background, X icon
+
+**Behavior:**
+- Appears with a slide-up animation
+- Auto-dismisses after 3 seconds
+- Can be manually dismissed
+
+If a full toast system is too complex for this step, use inline success/error messages within the form components instead.
+
+---
+
+## Client-Side Validation
+
+The key format validation should happen on the client side before the form is submitted, providing instant feedback:
+
+```typescript
+function isValidEnvKey(key: string): boolean {
+  return /^[A-Z_][A-Z0-9_]*$/.test(key);
+}
+```
+
+Show validation messages:
+- Empty key: "Key is required"
+- Invalid format: "Key must contain only uppercase letters, digits, and underscores. Must start with a letter or underscore."
+- Empty value: Allowed (some env vars are intentionally empty)
+
+---
+
+## SWR Cache Management
+
+When the scope changes (production <-> preview), SWR fetches new data from the API with the updated `scope` query parameter. The SWR key changes, so previous scope data remains cached:
+
+```typescript
+// These are independent cache entries:
+"/api/projects/uuid/env?scope=production"
+"/api/projects/uuid/env?scope=preview"
+```
+
+After any mutation (create, update, delete), call `mutate()` to revalidate the current scope's data:
+
+```typescript
+const { data, mutate } = useSWR(`/api/projects/${projectId}/env?scope=${scope}`, fetcher);
+
+// After a successful mutation:
+await mutate(); // refetches from API
+```
+
+---
+
+## File Summary
+
+| File | Action | Description |
+|------|--------|-------------|
+| `apps/dashboard/src/app/projects/[id]/environment/page.tsx` | Modify | Full env vars management page |
+| `apps/dashboard/src/components/env/scope-toggle.tsx` | Create | Production/Preview scope toggle |
+| `apps/dashboard/src/components/env/env-var-list.tsx` | Create | List of env vars with actions |
+| `apps/dashboard/src/components/env/env-var-row.tsx` | Create | Individual row with view/edit modes |
+| `apps/dashboard/src/components/env/add-env-var-form.tsx` | Create | Add new env var form |
+| `apps/dashboard/src/components/env/bulk-edit-mode.tsx` | Create | Bulk paste KEY=VALUE editor |
+| `apps/dashboard/src/components/env/delete-env-var-dialog.tsx` | Create | Delete confirmation dialog |
+| `apps/dashboard/src/components/ui/toast.tsx` | Create (optional) | Toast notification component |
+
+---
+
+## Testing
+
+### Scope Toggle
+
+1. **Default scope:** Page loads with "Production" scope selected.
+2. **Scope switch:** Clicking "Preview" switches to preview env vars. API call updates to `?scope=preview`.
+3. **Independent data:** Production and preview scopes show different variables.
+4. **Back to production:** Clicking "Production" shows production vars again (cached by SWR).
+
+### Add Variable
+
+5. **Valid add:** Enter "API_URL", "https://api.example.com", non-secret. Submit. Variable appears in list.
+6. **Secret add:** Enter "DB_PASSWORD", "secret123", check "Secret". Submit. Variable appears with `***` value.
+7. **Invalid key:** Enter "lowercase-key". Inline validation error shown before submit.
+8. **Duplicate key:** Add a variable that already exists. 409 error shown: "Variable already exists."
+9. **Empty value:** Adding a variable with an empty value succeeds.
+10. **Form clear:** After successful add, form fields are cleared.
+
+### Edit Variable
+
+11. **Edit non-secret:** Click edit. Value pre-filled. Change value. Save. New value shown.
+12. **Edit secret:** Click edit. Value field empty with placeholder. Enter new value. Save. Still shows `***`.
+13. **Toggle to secret:** Edit a non-secret var, check "Secret". Save. Value now shows `***`.
+14. **Toggle from secret:** Edit a secret var, uncheck "Secret". Save. Actual value now visible.
+15. **Cancel edit:** Click edit, make changes, click Cancel. Original value unchanged.
+16. **Edit error:** Simulate API failure. Error message shown inline.
+
+### Delete Variable
+
+17. **Delete flow:** Click delete. Confirmation dialog appears with variable name.
+18. **Confirm delete:** Click "Delete" in dialog. Variable removed from list.
+19. **Cancel delete:** Click "Cancel" in dialog. Variable still present.
+20. **Delete error:** Simulate API failure. Error message shown.
+
+### Bulk Edit
+
+21. **Enter bulk edit:** Click "Bulk Edit" button. Textarea appears.
+22. **Parse valid input:** Paste `API_URL=https://api.example.com\nNODE_ENV=production`. Preview shows "2 variables to import."
+23. **Parse with errors:** Include `invalid-key=value`. Preview shows "1 variable to import, 1 error."
+24. **Import:** Click "Import". Variables created sequentially. Results shown.
+25. **Comments and blanks:** Lines starting with `#` and empty lines are ignored.
+26. **Duplicate handling:** Importing a key that already exists shows as "skipped."
+27. **Exit bulk edit:** Click "Cancel" or "Done" to return to normal view.
+28. **Mark all as secret:** Check the "Mark all as secret" checkbox. All imported variables are secrets.
+
+### Error States
+
+29. **API failure:** Simulate `/api/projects/:id/env` returning 500. Error banner shown.
+30. **Loading state:** Skeleton or loading indicator shown while fetching env vars.
+31. **Empty state:** No variables for the selected scope. Message: "No environment variables for this scope."

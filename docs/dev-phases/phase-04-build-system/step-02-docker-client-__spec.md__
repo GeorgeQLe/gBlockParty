@@ -1,0 +1,421 @@
+# Step 2: Docker Client Operations
+
+**Phase:** 4 -- Build System
+**Step:** 2 of 5
+**Type:** Code implementation
+**Depends on:** Phase 1 (Docker installed on VPS, Docker socket accessible)
+**Blocks:** Step 3 (DockerProvider uses these client functions), Step 4 (BuildRunner calls `buildImage()`), Phase 5 (Deployment engine calls `runContainer()`, `stopContainer()`)
+
+---
+
+## Objective
+
+Implement all Docker client operations in `packages/core/src/providers/docker/client.ts` and `packages/core/src/providers/docker/container.ts` using the `dockerode` library. These are the low-level building blocks that the `DockerProvider` (Step 3) and `BuildRunner` (Step 4) depend on.
+
+---
+
+## Current State
+
+### client.ts
+
+```typescript
+import Dockerode from "dockerode";
+
+let client: Dockerode | null = null;
+
+export function createDockerClient(): Dockerode {
+  if (!client) {
+    client = new Dockerode({
+      socketPath: process.env.DOCKER_SOCKET ?? "/var/run/docker.sock",
+    });
+  }
+  return client;
+}
+
+export async function buildImage(docker, contextPath, tag, dockerfile?): Promise<void> {
+  // TODO: Build Docker image from context directory
+  throw new Error("Not implemented");
+}
+
+export async function runContainer(docker, image, name, port, envVars): Promise<string> {
+  // TODO: Create and start container, return container ID
+  throw new Error("Not implemented");
+}
+
+export async function stopContainer(docker, containerId, timeoutSeconds = 30): Promise<void> {
+  // TODO: Graceful stop with SIGTERM, then SIGKILL after timeout
+  throw new Error("Not implemented");
+}
+
+export async function getContainerLogs(docker, containerId, tail?): Promise<string> {
+  // TODO: Fetch container logs
+  throw new Error("Not implemented");
+}
+
+export async function pruneImages(docker, projectName, keepCount): Promise<void> {
+  // TODO: Remove old images, keep latest N
+  throw new Error("Not implemented");
+}
+```
+
+### container.ts
+
+```typescript
+import type Dockerode from "dockerode";
+import { HEALTH_CHECK } from "@gblockparty/shared/constants";
+
+export async function waitForHealthy(docker, containerId, healthCheckPath, port): Promise<boolean> {
+  // TODO: Poll health check endpoint with retries
+  throw new Error("Not implemented");
+}
+
+export async function isContainerRunning(docker, containerId): Promise<boolean> {
+  // TODO: Inspect container and check state
+  throw new Error("Not implemented");
+}
+
+export async function getContainerPort(docker, containerId): Promise<number | null> {
+  // TODO: Get mapped host port from container
+  throw new Error("Not implemented");
+}
+```
+
+The `createDockerClient()` singleton is already implemented and connects to the Docker daemon via the Unix socket.
+
+---
+
+## Implementation Plan
+
+### `buildImage(docker, contextPath, tag, dockerfile?): Promise<void>`
+
+Use dockerode's `docker.buildImage()` method:
+
+1. Pack the context directory into a tar stream using the `tar-fs` package (or dockerode's built-in tar packing).
+2. Call `docker.buildImage(tarStream, { t: tag, dockerfile: dockerfile ?? "Dockerfile" })`.
+3. The `buildImage()` call returns a stream. Follow the stream to completion:
+   - Parse each chunk for JSON messages from the Docker daemon.
+   - Look for `{ "error": "..." }` messages and reject the promise if found.
+   - Look for `{ "stream": "..." }` messages for build output (useful for logging in Step 5).
+4. Resolve the promise when the stream ends without errors.
+
+**Important:** The `contextPath` is the directory containing the Dockerfile and source code. For Next.js apps, this is the clone directory where the generated Dockerfile has been written.
+
+```typescript
+import tar from "tar-fs";
+
+export async function buildImage(
+  docker: Dockerode,
+  contextPath: string,
+  tag: string,
+  dockerfile?: string,
+): Promise<void> {
+  const tarStream = tar.pack(contextPath);
+  const stream = await docker.buildImage(tarStream, {
+    t: tag,
+    dockerfile: dockerfile ?? "Dockerfile",
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    docker.modem.followProgress(
+      stream,
+      (err: Error | null, output: Array<{ error?: string }>) => {
+        if (err) return reject(err);
+        const errorMsg = output.find((o) => o.error);
+        if (errorMsg) return reject(new Error(errorMsg.error));
+        resolve();
+      },
+    );
+  });
+}
+```
+
+### `runContainer(docker, image, name, port, envVars): Promise<string>`
+
+Use dockerode's `docker.createContainer()` and `container.start()`:
+
+1. Format environment variables as an array of `KEY=VALUE` strings.
+2. Create container with:
+   - `Image: image`
+   - `name: name`
+   - `Env: ["KEY1=val1", "KEY2=val2", ...]`
+   - `ExposedPorts: { "3000/tcp": {} }` (the container's internal port, default 3000)
+   - `HostConfig.PortBindings: { "3000/tcp": [{ HostPort: String(port) }] }` (map to assigned host port)
+   - `HostConfig.RestartPolicy: { Name: "on-failure", MaximumRetryCount: 3 }`
+3. Call `container.start()`.
+4. Return `container.id`.
+
+```typescript
+export async function runContainer(
+  docker: Dockerode,
+  image: string,
+  name: string,
+  port: number,
+  envVars: Record<string, string>,
+): Promise<string> {
+  const env = Object.entries(envVars).map(([k, v]) => `${k}=${v}`);
+  const container = await docker.createContainer({
+    Image: image,
+    name,
+    Env: env,
+    ExposedPorts: { "3000/tcp": {} },
+    HostConfig: {
+      PortBindings: { "3000/tcp": [{ HostPort: String(port) }] },
+      RestartPolicy: { Name: "on-failure", MaximumRetryCount: 3 },
+    },
+  });
+  await container.start();
+  return container.id;
+}
+```
+
+**Note on internal port:** The default internal port is 3000 (standard for Next.js). For custom Dockerfile services, the port may differ. The `ServiceConfig.port` in the provider types represents the container's internal port. This should be parameterized in Step 3 when the `DockerProvider` calls `runContainer()`.
+
+### `stopContainer(docker, containerId, timeoutSeconds = 30): Promise<void>`
+
+Graceful shutdown sequence:
+
+1. Get the container object: `docker.getContainer(containerId)`.
+2. Call `container.stop({ t: timeoutSeconds })` which sends SIGTERM and waits.
+3. Docker automatically sends SIGKILL after the timeout.
+4. Call `container.remove({ force: true })` to clean up the container.
+5. Catch and log `"container not found"` errors (container may have already been removed).
+
+```typescript
+export async function stopContainer(
+  docker: Dockerode,
+  containerId: string,
+  timeoutSeconds = 30,
+): Promise<void> {
+  const container = docker.getContainer(containerId);
+  try {
+    await container.stop({ t: timeoutSeconds });
+  } catch (err: unknown) {
+    // Container may already be stopped -- that is fine
+    if (err instanceof Error && !err.message.includes("not running")) {
+      throw err;
+    }
+  }
+  try {
+    await container.remove({ force: true });
+  } catch (err: unknown) {
+    // Container may already be removed -- that is fine
+    if (err instanceof Error && !err.message.includes("No such container")) {
+      throw err;
+    }
+  }
+}
+```
+
+### `getContainerLogs(docker, containerId, tail?): Promise<string>`
+
+Fetch container stdout and stderr:
+
+1. Get the container: `docker.getContainer(containerId)`.
+2. Call `container.logs({ stdout: true, stderr: true, tail: tail ?? 100 })`.
+3. The response is a stream with Docker's multiplexed format (8-byte header per frame).
+4. Use dockerode's `docker.modem.demuxStream()` to separate stdout/stderr, or collect as a single string.
+5. Return the combined log output as a string.
+
+```typescript
+export async function getContainerLogs(
+  docker: Dockerode,
+  containerId: string,
+  tail?: number,
+): Promise<string> {
+  const container = docker.getContainer(containerId);
+  const logBuffer = await container.logs({
+    stdout: true,
+    stderr: true,
+    tail: tail ?? 100,
+    follow: false,
+  });
+  // logBuffer is a Buffer with Docker's stream multiplexing headers
+  // For simplicity, convert to string and strip the 8-byte headers
+  return logBuffer.toString("utf-8");
+}
+```
+
+### `pruneImages(docker, projectName, keepCount): Promise<void>`
+
+Remove old images for a project, keeping the most recent `keepCount`:
+
+1. List all images: `docker.listImages()`.
+2. Filter images whose `RepoTags` include `{projectName}:*`.
+3. Sort by creation date (newest first).
+4. Skip the first `keepCount` images.
+5. Remove the rest: `docker.getImage(id).remove({ force: true })`.
+6. Log each removal.
+
+```typescript
+export async function pruneImages(
+  docker: Dockerode,
+  projectName: string,
+  keepCount: number,
+): Promise<void> {
+  const images = await docker.listImages();
+  const projectImages = images
+    .filter((img) =>
+      img.RepoTags?.some((tag) => tag.startsWith(`${projectName}:`)),
+    )
+    .sort((a, b) => b.Created - a.Created);
+
+  const toRemove = projectImages.slice(keepCount);
+  for (const img of toRemove) {
+    await docker.getImage(img.Id).remove({ force: true });
+  }
+}
+```
+
+### `waitForHealthy(docker, containerId, healthCheckPath, port): Promise<boolean>`
+
+Poll the container's health endpoint:
+
+1. Use the constants from `HEALTH_CHECK` (`MAX_RETRIES = 10`, `RETRY_INTERVAL_MS = 2000`).
+2. For each attempt (up to `MAX_RETRIES`):
+   - First check if the container is still running (`isContainerRunning()`).
+   - Make an HTTP GET request to `http://localhost:{port}{healthCheckPath}`.
+   - If the response status is 2xx, return `true`.
+   - If the request fails (connection refused, timeout, non-2xx), wait `RETRY_INTERVAL_MS` and retry.
+3. After all retries exhausted, return `false`.
+4. Use Node.js built-in `fetch()` (available in Node 18+) or `http.get()` for the HTTP request.
+
+```typescript
+import { HEALTH_CHECK } from "@gblockparty/shared/constants";
+
+export async function waitForHealthy(
+  docker: Dockerode,
+  containerId: string,
+  healthCheckPath: string,
+  port: number,
+): Promise<boolean> {
+  for (let i = 0; i < HEALTH_CHECK.MAX_RETRIES; i++) {
+    try {
+      const running = await isContainerRunning(docker, containerId);
+      if (!running) return false;
+
+      const res = await fetch(`http://localhost:${port}${healthCheckPath}`);
+      if (res.ok) return true;
+    } catch {
+      // Connection refused or timeout -- retry
+    }
+    await new Promise((r) => setTimeout(r, HEALTH_CHECK.RETRY_INTERVAL_MS));
+  }
+  return false;
+}
+```
+
+### `isContainerRunning(docker, containerId): Promise<boolean>`
+
+Inspect the container and check its state:
+
+```typescript
+export async function isContainerRunning(
+  docker: Dockerode,
+  containerId: string,
+): Promise<boolean> {
+  try {
+    const container = docker.getContainer(containerId);
+    const info = await container.inspect();
+    return info.State.Running === true;
+  } catch {
+    return false;
+  }
+}
+```
+
+### `getContainerPort(docker, containerId): Promise<number | null>`
+
+Get the mapped host port from a container's port bindings:
+
+```typescript
+export async function getContainerPort(
+  docker: Dockerode,
+  containerId: string,
+): Promise<number | null> {
+  try {
+    const container = docker.getContainer(containerId);
+    const info = await container.inspect();
+    const bindings = info.NetworkSettings.Ports["3000/tcp"];
+    if (bindings && bindings.length > 0) {
+      return parseInt(bindings[0].HostPort, 10);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+```
+
+---
+
+## Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `dockerode` | Already in `packages/core/package.json` | Docker Engine API client |
+| `tar-fs` | Needs to be added | Pack directories into tar streams for `docker.buildImage()` |
+| `@types/dockerode` | Already in devDependencies | TypeScript types for dockerode |
+
+Check if `tar-fs` needs to be installed:
+```bash
+pnpm --filter @gblockparty/core add tar-fs
+pnpm --filter @gblockparty/core add -D @types/tar-fs
+```
+
+---
+
+## Files Affected
+
+| File | Change |
+|------|--------|
+| `packages/core/src/providers/docker/client.ts` | Implement `buildImage()`, `runContainer()`, `stopContainer()`, `getContainerLogs()`, `pruneImages()` |
+| `packages/core/src/providers/docker/container.ts` | Implement `waitForHealthy()`, `isContainerRunning()`, `getContainerPort()` |
+| `packages/core/package.json` | Add `tar-fs` dependency (if not already present) |
+
+---
+
+## Error Handling
+
+| Scenario | Handling |
+|----------|---------|
+| Docker daemon not running | `buildImage()` / `runContainer()` reject with connection error -- caller catches and marks deployment as FAILED |
+| Image build fails (e.g., `RUN npm build` returns non-zero) | `buildImage()` rejects with the Docker error message from the build output |
+| Container port already in use | `runContainer()` rejects with port conflict error -- caller should retry with a different port (handled by PortAllocator in Phase 5) |
+| Container exits immediately after start | `waitForHealthy()` detects via `isContainerRunning()` returning `false` and returns `false` |
+| `stopContainer()` called on already-stopped container | Caught gracefully -- no error thrown |
+| `pruneImages()` tries to remove an image in use by a running container | `force: true` flag handles this, or catch and skip |
+| `getContainerLogs()` on a container that no longer exists | Catch error and return empty string or re-throw |
+
+---
+
+## Verification
+
+### client.ts
+
+- [ ] `buildImage()` builds an image from a directory with a Dockerfile and the image appears in `docker images`
+- [ ] `buildImage()` uses a custom Dockerfile path when the `dockerfile` parameter is provided
+- [ ] `buildImage()` rejects when the Dockerfile has a syntax error or a build step fails
+- [ ] `runContainer()` starts a container and returns a valid container ID
+- [ ] `runContainer()` maps the specified host port to the container's internal port 3000
+- [ ] `runContainer()` sets environment variables accessible inside the container
+- [ ] `runContainer()` sets the restart policy to `on-failure` with max 3 retries
+- [ ] `stopContainer()` stops a running container (SIGTERM followed by SIGKILL after timeout)
+- [ ] `stopContainer()` does not throw when called on an already-stopped container
+- [ ] `stopContainer()` removes the container after stopping it
+- [ ] `getContainerLogs()` returns log output from a container's stdout/stderr
+- [ ] `getContainerLogs()` respects the `tail` parameter
+- [ ] `pruneImages()` removes old images while keeping the specified count
+- [ ] `pruneImages()` only removes images matching the project name
+
+### container.ts
+
+- [ ] `waitForHealthy()` returns `true` when the container responds with HTTP 2xx
+- [ ] `waitForHealthy()` returns `false` after exhausting all retries (10 attempts)
+- [ ] `waitForHealthy()` returns `false` immediately if the container stops during health checks
+- [ ] `waitForHealthy()` uses `HEALTH_CHECK.MAX_RETRIES` (10) and `HEALTH_CHECK.RETRY_INTERVAL_MS` (2000)
+- [ ] `isContainerRunning()` returns `true` for running containers
+- [ ] `isContainerRunning()` returns `false` for stopped/exited containers
+- [ ] `isContainerRunning()` returns `false` for non-existent container IDs (no throw)
+- [ ] `getContainerPort()` returns the mapped host port number
+- [ ] `getContainerPort()` returns `null` if no port is mapped
+- [ ] `pnpm typecheck` passes with no errors

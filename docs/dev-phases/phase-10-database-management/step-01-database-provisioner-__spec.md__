@@ -1,0 +1,211 @@
+# Step 1: Database Provisioning Logic
+
+**Phase:** 10 -- Database Management
+**Step:** 1 of 4
+**Type:** Backend implementation
+**Depends on:** Phase 1 (RDS instance with admin credentials), Phase 2 (`managed_databases` and `env_vars` tables in schema)
+**Blocks:** Steps 2-4 (API routes, UI, and credential management all depend on the provisioner)
+
+---
+
+## Objective
+
+Implement the `DatabaseProvisioner` class that handles the full lifecycle of app databases on the shared RDS instance. It provisions a new PostgreSQL database and user, generates and stores encrypted credentials, and automatically injects `DATABASE_URL` into the project's environment variables. It also handles deprovisioning (dropping the database and user) and querying database stats.
+
+---
+
+## Current State
+
+The following infrastructure and code already exist:
+
+- **RDS instance** (`db.t4g.micro`): Running PostgreSQL 16 on AWS, accessible from the VPS via SSL.
+- **`managed_databases` table** (`packages/shared/src/db/schema.ts`, lines 97-109): Drizzle schema with `id`, `projectId`, `dbName`, `dbUser`, `dbPasswordEncrypted`, `sizeBytes`, `createdAt`.
+- **`env_vars` table** (`packages/shared/src/db/schema.ts`, lines 69-95): Drizzle schema with `projectId`, `scope`, `key`, `value`, `isSecret`.
+- **Encryption module** (`packages/shared/src/backend/encryption.ts`): Working `encrypt()` and `decrypt()` functions using AES-256-GCM with key from `ENCRYPTION_KEY` env var.
+- **API route stub** (`apps/dashboard/src/app/api/projects/[id]/database/route.ts`): TODO stubs returning `null` or 501.
+
+**What does not exist yet:**
+- `packages/core/src/database/provisioner.ts` (new file)
+- `packages/core/src/database/index.ts` (new barrel export)
+
+---
+
+## File to Create: `packages/core/src/database/provisioner.ts`
+
+### Class: `DatabaseProvisioner`
+
+```typescript
+import { Client } from "pg";
+import { randomBytes } from "node:crypto";
+import { eq, and } from "drizzle-orm";
+import type { Database } from "@gblockparty/shared/db";
+import { managedDatabases, envVars } from "@gblockparty/shared/db/schema";
+import { encrypt, decrypt } from "@gblockparty/shared/backend";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("database-provisioner");
+```
+
+### Constructor
+
+The provisioner needs two database connections:
+1. **Drizzle `db`** -- for reading/writing to `managed_databases` and `env_vars` tables (the platform database).
+2. **Admin `pg.Client`** -- for executing `CREATE DATABASE`, `CREATE USER`, `DROP DATABASE`, `DROP USER` on the RDS instance (these are DDL commands that can't run inside a Drizzle transaction on the platform database).
+
+```typescript
+interface DatabaseProvisionerOptions {
+  db: Database;
+  rdsEndpoint: string;      // e.g., "gblockparty.xxxx.us-east-1.rds.amazonaws.com"
+  rdsPort: number;           // default 5432
+  rdsAdminUser: string;      // e.g., "postgres" or "gblockparty_admin"
+  rdsAdminPassword: string;  // admin password from Secrets Manager
+}
+```
+
+The admin connection is created on-demand for each operation and closed after the operation completes. Do not keep a persistent admin connection.
+
+### Method: `provision(projectId: string, projectSlug: string)`
+
+**Steps:**
+
+1. **Sanitize slug**: Replace any non-alphanumeric characters with underscore. Truncate to 50 characters. Ensure it starts with a letter.
+2. **Generate names**:
+   - Database name: `app_{sanitized_slug}`
+   - Username: `app_{sanitized_slug}_user`
+3. **Check for existing database**: Query `managed_databases` where `projectId` matches. If found, throw `DatabaseAlreadyExistsError`.
+4. **Generate password**: `randomBytes(24).toString('base64url')` produces a 32-character URL-safe password.
+5. **Create admin connection**: Connect to the RDS instance using admin credentials.
+6. **Execute DDL**:
+   ```sql
+   CREATE USER "app_myproject_user" WITH PASSWORD 'generated-password';
+   CREATE DATABASE "app_myproject" OWNER "app_myproject_user";
+   GRANT ALL PRIVILEGES ON DATABASE "app_myproject" TO "app_myproject_user";
+   ```
+   Use double-quoted identifiers for database and user names to handle any special characters.
+7. **Close admin connection**.
+8. **Build connection string**: `postgresql://app_myproject_user:password@{rdsEndpoint}:5432/app_myproject?sslmode=require`
+9. **Encrypt password**: Call `encrypt(password)`.
+10. **Insert into `managed_databases`**: `{ projectId, dbName, dbUser, dbPasswordEncrypted }`.
+11. **Upsert `DATABASE_URL` into `env_vars`** for both scopes:
+    - `{ projectId, scope: 'production', key: 'DATABASE_URL', value: connectionString, isSecret: true }`
+    - `{ projectId, scope: 'preview', key: 'DATABASE_URL', value: connectionString, isSecret: true }`
+    Use Drizzle's `onConflictDoUpdate` on the `(project_id, scope, key)` unique constraint.
+12. **Return**: `{ dbName, dbUser, connectionString }`.
+
+**Error handling:**
+- If DDL fails after CREATE USER but before CREATE DATABASE, attempt DROP USER in the catch block.
+- If `managed_databases` insert fails after DDL succeeds, attempt DROP DATABASE and DROP USER in the catch block.
+- Log all errors with structured logging (project ID, operation, error message).
+- Never log passwords or connection strings containing passwords.
+
+### Method: `deprovision(projectId: string)`
+
+**Steps:**
+
+1. **Look up existing database**: Query `managed_databases` where `projectId` matches. If not found, throw `DatabaseNotFoundError`.
+2. **Create admin connection**.
+3. **Terminate active connections**:
+   ```sql
+   SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+   WHERE datname = '{dbName}' AND pid <> pg_backend_pid();
+   ```
+4. **Drop database**: `DROP DATABASE IF EXISTS "{dbName}";`
+5. **Drop user**: `DROP USER IF EXISTS "{dbUser}";`
+6. **Close admin connection**.
+7. **Delete from `managed_databases`**: Delete the row by `projectId`.
+8. **Delete `DATABASE_URL` from `env_vars`**: Delete rows where `projectId`, `key = 'DATABASE_URL'` for both scopes.
+9. **Return**: `void`.
+
+### Method: `getDatabaseInfo(projectId: string)`
+
+**Steps:**
+
+1. **Look up database**: Query `managed_databases` where `projectId` matches. If not found, return `null`.
+2. **Create admin connection** to the app's database (or the admin database for stats).
+3. **Query size**: `SELECT pg_database_size('{dbName}') AS size_bytes;`
+4. **Query connections**: `SELECT count(*) FROM pg_stat_activity WHERE datname = '{dbName}';`
+5. **Close admin connection**.
+6. **Update `sizeBytes`** in `managed_databases` (cache the latest size).
+7. **Decrypt password**: Call `decrypt(dbPasswordEncrypted)`.
+8. **Build connection string** (with decrypted password).
+9. **Return**: `{ dbName, dbUser, sizeBytes, activeConnections, connectionString, createdAt }`.
+
+### Helper: `generatePassword()`
+
+```typescript
+function generatePassword(): string {
+  return randomBytes(24).toString("base64url"); // 32 chars, URL-safe
+}
+```
+
+### Helper: `sanitizeSlug(slug: string)`
+
+```typescript
+function sanitizeSlug(slug: string): string {
+  let sanitized = slug.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+  if (!/^[a-z]/.test(sanitized)) {
+    sanitized = "db_" + sanitized;
+  }
+  return sanitized.slice(0, 50);
+}
+```
+
+---
+
+## File to Create: `packages/core/src/database/index.ts`
+
+```typescript
+export { DatabaseProvisioner } from "./provisioner";
+export type { DatabaseProvisionerOptions } from "./provisioner";
+```
+
+---
+
+## Environment Variables Required
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `RDS_ENDPOINT` | Terraform output / Secrets Manager | The RDS instance hostname |
+| `RDS_PORT` | Default `5432` | The RDS instance port |
+| `RDS_ADMIN_USER` | Secrets Manager | Admin username for DDL operations |
+| `RDS_ADMIN_PASSWORD` | Secrets Manager | Admin password for DDL operations |
+| `ENCRYPTION_KEY` | Secrets Manager | AES-256 key for password encryption (already used by existing encryption module) |
+
+---
+
+## Security Considerations
+
+- **SQL injection**: Database and user names are derived from project slugs, which are validated. All identifiers are double-quoted in SQL. No user-supplied strings are interpolated into SQL without sanitization.
+- **Password generation**: Uses `crypto.randomBytes()`, which is cryptographically secure.
+- **Password storage**: Encrypted with AES-256-GCM before storage. Key is in AWS Secrets Manager.
+- **Password logging**: Never log passwords. Use structured logging that excludes sensitive fields.
+- **Admin connection**: Created on-demand and closed immediately after use. Admin credentials are never exposed to the client.
+- **Connection string scope**: The connection string is returned via authenticated API endpoints only. It is not cached client-side.
+
+---
+
+## Expected Behavior After Completion
+
+1. `DatabaseProvisioner.provision("uuid-123", "myproject")` creates database `app_myproject` and user `app_myproject_user` on RDS.
+2. A `psql` connection with the generated credentials succeeds: `psql "postgresql://app_myproject_user:password@rds-endpoint:5432/app_myproject?sslmode=require"`
+3. The `managed_databases` table has a row with encrypted password.
+4. The `env_vars` table has `DATABASE_URL` rows for both `production` and `preview` scopes.
+5. `DatabaseProvisioner.deprovision("uuid-123")` drops the database and user, and removes all related rows.
+6. `DatabaseProvisioner.getDatabaseInfo("uuid-123")` returns stats including size and active connections.
+
+---
+
+## Verification
+
+- [ ] `provision()` creates database and user on RDS
+- [ ] Generated password is 32 characters and URL-safe
+- [ ] Password is encrypted in `managed_databases.db_password_encrypted`
+- [ ] `DATABASE_URL` inserted for both production and preview scopes
+- [ ] Connection string is valid and app can connect
+- [ ] `deprovision()` drops database and user
+- [ ] `deprovision()` removes `managed_databases` row and `env_vars` rows
+- [ ] `deprovision()` terminates active connections before dropping
+- [ ] `getDatabaseInfo()` returns accurate size and connection count
+- [ ] Duplicate provision attempt throws `DatabaseAlreadyExistsError`
+- [ ] No passwords appear in log output
+- [ ] Partial failure during provision triggers cleanup

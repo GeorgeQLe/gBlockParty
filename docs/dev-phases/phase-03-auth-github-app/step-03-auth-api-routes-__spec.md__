@@ -1,0 +1,286 @@
+# Step 3: Auth API Routes
+
+**Phase:** 3 -- Authentication & GitHub App Integration
+**Step:** 3 of 5
+**Type:** Code verification + hardening
+**Depends on:** Step 2 (OAuth callback creates sessions that these routes consume)
+**Blocks:** Phase 6 (dashboard API routes use `withAuth` which depends on `getSession()`)
+
+---
+
+## Objective
+
+Verify that the `/api/auth/me` and `/api/auth/logout` routes work correctly end-to-end. Both routes already have basic implementations that appear functional. This step ensures they handle edge cases, are properly tested, and integrate cleanly with the session system from Step 2.
+
+---
+
+## Current State
+
+### `apps/dashboard/src/app/api/auth/me/route.ts`
+
+```typescript
+import { NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+
+export async function GET() {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  return NextResponse.json({
+    userId: session.userId,
+    githubLogin: session.githubLogin,
+    githubId: session.githubId,
+  });
+}
+```
+
+**Assessment:** This implementation looks correct. It calls `getSession()` which reads the `gblockparty-session` cookie, verifies the JWT, and returns the session payload. If no valid session exists, it returns 401.
+
+### `apps/dashboard/src/app/api/auth/logout/route.ts`
+
+```typescript
+import { NextResponse } from "next/server";
+import { clearSessionCookie } from "@/lib/auth";
+
+export async function POST() {
+  await clearSessionCookie();
+  return NextResponse.json({ ok: true });
+}
+```
+
+**Assessment:** This implementation looks correct. It calls `clearSessionCookie()` which deletes the `gblockparty-session` cookie, then returns `{ ok: true }`.
+
+### `apps/dashboard/src/lib/auth.ts` (backing implementation, FULLY IMPLEMENTED)
+
+- `getSession()`: reads cookie store, gets `gblockparty-session`, calls `jwtVerify()` with the `JWT_SECRET`, returns the payload as `Session` or `null` on any error
+- `clearSessionCookie()`: calls `cookieStore.delete(COOKIE_NAME)`
+
+### `apps/dashboard/src/lib/api-helpers.ts` (FULLY IMPLEMENTED)
+
+- `withAuth(handler)`: wraps any API route handler; calls `getSession()` and returns 401 if null, otherwise passes `session` to the inner handler
+- Used by all authenticated API routes in Phase 6+
+
+---
+
+## Analysis
+
+Both routes are already implemented and appear correct. The work for this step is:
+
+1. **Verify edge cases** in the existing code
+2. **Write tests** to confirm behavior
+3. **Document the API contract** for consumers (dashboard frontend, CLI)
+
+---
+
+## Edge Cases to Verify
+
+### `/api/auth/me` (GET)
+
+| Scenario | Expected Behavior | Status |
+|----------|-------------------|--------|
+| Valid session cookie | Returns `{ userId, githubLogin, githubId }` with 200 | Covered |
+| No cookie present | Returns `{ error: "Unauthorized" }` with 401 | Covered |
+| Expired JWT (>7 days old) | `jwtVerify()` throws, `getSession()` returns null, route returns 401 | Covered (jose throws on expired JWT) |
+| Malformed JWT string | `jwtVerify()` throws, `getSession()` returns null, route returns 401 | Covered (catch block in getSession) |
+| Wrong JWT_SECRET (rotated key) | `jwtVerify()` throws, `getSession()` returns null, route returns 401 | Covered |
+| Cookie present but empty string | `jwtVerify()` throws on empty string, returns 401 | Covered |
+
+### `/api/auth/logout` (POST)
+
+| Scenario | Expected Behavior | Status |
+|----------|-------------------|--------|
+| Logged-in user calls POST | Cookie deleted, returns `{ ok: true }` | Covered |
+| Not-logged-in user calls POST | Cookie deletion is a no-op, returns `{ ok: true }` | Covered (delete on non-existent cookie is safe) |
+| GET request to /logout | Next.js returns 405 Method Not Allowed (only POST exported) | Covered by framework |
+
+---
+
+## API Contract
+
+### GET /api/auth/me
+
+**Authentication:** Required (session cookie)
+
+**Success Response (200):**
+```json
+{
+  "userId": "12345678",
+  "githubLogin": "octocat",
+  "githubId": 12345678
+}
+```
+
+**Error Response (401):**
+```json
+{
+  "error": "Unauthorized"
+}
+```
+
+**Notes:**
+- The `userId` is a string representation of the GitHub numeric user ID
+- `githubId` is the same value as a number
+- This endpoint is called by the dashboard frontend on page load to check if the user is logged in
+- The CLI calls this endpoint after `gblockparty login` to verify the stored token works
+
+### POST /api/auth/logout
+
+**Authentication:** Not required (idempotent -- safe to call even if not logged in)
+
+**Success Response (200):**
+```json
+{
+  "ok": true
+}
+```
+
+**Notes:**
+- Always returns 200, regardless of whether a session existed
+- Deletes the `gblockparty-session` cookie
+- The dashboard frontend calls this when the user clicks "Logout"
+- After logout, subsequent calls to `/api/auth/me` will return 401
+
+---
+
+## `withAuth` Middleware Usage
+
+The `withAuth` wrapper from `api-helpers.ts` is the primary way Phase 6+ API routes enforce authentication:
+
+```typescript
+// Example usage in a protected API route
+import { withAuth, jsonResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (request, session, context) => {
+  // session is guaranteed to be non-null here
+  // session.userId, session.githubLogin, session.githubId are available
+  return jsonResponse({ projects: [...] });
+});
+```
+
+**Current implementation:**
+```typescript
+export function withAuth(handler: AuthenticatedHandler) {
+  return async (
+    request: NextRequest,
+    context: { params: Promise<Record<string, string>> },
+  ): Promise<NextResponse> => {
+    const session = await getSession();
+    if (!session) {
+      return errorResponse("Unauthorized", 401);
+    }
+    return handler(request, session, context);
+  };
+}
+```
+
+This is correct and ready for use. No changes needed.
+
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `apps/dashboard/src/app/api/auth/me/route.ts` | **No changes needed** -- implementation is correct |
+| `apps/dashboard/src/app/api/auth/logout/route.ts` | **No changes needed** -- implementation is correct |
+
+Both routes rely on the already-implemented `auth.ts` and `api-helpers.ts` libraries.
+
+---
+
+## Testing
+
+### Unit Tests
+
+```typescript
+describe("GET /api/auth/me", () => {
+  it("returns user data when session cookie is valid", async () => {
+    // Set up: create a valid JWT and set it as the session cookie
+    const token = await createSession({
+      userId: "12345",
+      githubLogin: "testuser",
+      githubId: 12345,
+    });
+    // Mock cookies().get() to return the token
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toEqual({
+      userId: "12345",
+      githubLogin: "testuser",
+      githubId: 12345,
+    });
+  });
+
+  it("returns 401 when no session cookie exists", async () => {
+    // Mock cookies().get() to return undefined
+    const res = await GET();
+    expect(res.status).toBe(401);
+    const data = await res.json();
+    expect(data.error).toBe("Unauthorized");
+  });
+
+  it("returns 401 when JWT is expired", async () => {
+    // Create a JWT with past expiration
+    // Mock cookies to return it
+    const res = await GET();
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 when JWT is malformed", async () => {
+    // Mock cookies to return "not-a-jwt"
+    const res = await GET();
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /api/auth/logout", () => {
+  it("clears session cookie and returns ok", async () => {
+    const res = await POST();
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toEqual({ ok: true });
+    // Verify cookie was deleted
+  });
+
+  it("returns ok even when no session exists", async () => {
+    const res = await POST();
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toEqual({ ok: true });
+  });
+});
+
+describe("withAuth middleware", () => {
+  it("passes session to handler when authenticated", async () => {
+    const handler = vi.fn().mockResolvedValue(NextResponse.json({ ok: true }));
+    const wrapped = withAuth(handler);
+    // Mock valid session
+    await wrapped(mockRequest, mockContext);
+    expect(handler).toHaveBeenCalledWith(
+      mockRequest,
+      expect.objectContaining({ userId: "12345" }),
+      mockContext,
+    );
+  });
+
+  it("returns 401 without calling handler when not authenticated", async () => {
+    const handler = vi.fn();
+    const wrapped = withAuth(handler);
+    // Mock no session
+    const res = await wrapped(mockRequest, mockContext);
+    expect(res.status).toBe(401);
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
+```
+
+### Manual Verification
+
+1. After completing Step 2 (OAuth login), visit `/api/auth/me` in the browser
+2. Verify the JSON response contains correct user data
+3. Call `POST /api/auth/logout` (can use curl or browser console)
+4. Verify `/api/auth/me` now returns 401
+5. Verify the `gblockparty-session` cookie is gone from browser dev tools

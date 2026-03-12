@@ -1,0 +1,228 @@
+# Step 2: Database Management API Routes
+
+**Phase:** 10 -- Database Management
+**Step:** 2 of 4
+**Type:** API implementation
+**Depends on:** Step 1 (DatabaseProvisioner must be implemented)
+**Blocks:** Step 3 (Dashboard UI calls these API routes)
+
+---
+
+## Objective
+
+Implement the GET, POST, and DELETE handlers at `/api/projects/:id/database` that allow the dashboard (and CLI) to create, query, and delete managed databases for projects. Each route is protected by `withAuth`, validates the project ID, and delegates to the `DatabaseProvisioner` for actual database operations.
+
+---
+
+## Current State
+
+The file `apps/dashboard/src/app/api/projects/[id]/database/route.ts` exists with TODO stubs:
+
+```typescript
+import { NextRequest } from "next/server";
+import { withAuth, jsonResponse, errorResponse } from "@/lib/api-helpers";
+
+export const GET = withAuth(async (_request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Get managed database info for project
+  return jsonResponse(null);
+});
+
+export const POST = withAuth(async (_request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Create managed database (app_{slug}), set DATABASE_URL env var
+  return errorResponse("Not implemented", 501);
+});
+
+export const DELETE = withAuth(async (_request, _session, context) => {
+  const { id } = await context.params;
+  // TODO: Drop managed database, remove env var
+  return errorResponse("Not implemented", 501);
+});
+```
+
+The `withAuth` wrapper (`apps/dashboard/src/lib/api-helpers.ts`) handles authentication and provides the session and context parameters.
+
+---
+
+## Implementation Details
+
+### GET `/api/projects/:id/database`
+
+**Purpose:** Return database info and stats for a project, or `null` if no database exists.
+
+**Flow:**
+1. Extract project `id` from `context.params`.
+2. Validate `id` is a valid UUID format.
+3. Query `projects` table to verify the project exists (return 404 if not).
+4. Call `DatabaseProvisioner.getDatabaseInfo(projectId)`.
+5. If `null`, return `jsonResponse(null)` with 200 status.
+6. If database exists, return:
+
+```typescript
+{
+  dbName: string;          // e.g., "app_myproject"
+  dbUser: string;          // e.g., "app_myproject_user"
+  sizeBytes: number;       // from pg_database_size()
+  activeConnections: number; // from pg_stat_activity
+  connectionString: string; // full connection string with decrypted password
+  createdAt: string;       // ISO 8601 timestamp
+}
+```
+
+**Security:** The connection string includes the decrypted password. This is acceptable because:
+- The route is behind `withAuth` (only the authenticated owner can access it).
+- The password is needed for the dashboard UI's copy-to-clipboard feature.
+- The response is never cached (no `Cache-Control` header).
+
+### POST `/api/projects/:id/database`
+
+**Purpose:** Create a new managed database for the project.
+
+**Flow:**
+1. Extract project `id` from `context.params`.
+2. Validate `id` is a valid UUID format.
+3. Query `projects` table to get the project (return 404 if not found).
+4. Call `DatabaseProvisioner.provision(projectId, project.slug)`.
+5. On success, return `jsonResponse(result, 201)` with:
+
+```typescript
+{
+  dbName: string;
+  dbUser: string;
+  connectionString: string;
+  message: "Database created successfully. DATABASE_URL has been set for production and preview."
+}
+```
+
+6. On `DatabaseAlreadyExistsError`, return `errorResponse("Database already exists for this project", 409)`.
+7. On other errors, return `errorResponse("Failed to create database", 500)` and log the error.
+
+### DELETE `/api/projects/:id/database`
+
+**Purpose:** Drop the managed database and clean up all related resources.
+
+**Flow:**
+1. Extract project `id` from `context.params`.
+2. Parse request body: `{ confirmName: string }`.
+3. Validate `id` is a valid UUID format.
+4. Query `managed_databases` table to get the database record (return 404 if not found).
+5. Compare `confirmName` with the actual `dbName`. If they don't match, return `errorResponse("Confirmation name does not match", 400)`.
+6. Call `DatabaseProvisioner.deprovision(projectId)`.
+7. On success, return `jsonResponse({ message: "Database deleted successfully" })`.
+8. On error, return `errorResponse("Failed to delete database", 500)` and log the error.
+
+**Body validation:**
+```typescript
+import { z } from "zod";
+
+const deleteSchema = z.object({
+  confirmName: z.string().min(1),
+});
+```
+
+---
+
+## Helper: DatabaseProvisioner Instantiation
+
+The provisioner needs to be instantiated with the database connection and RDS admin credentials. Create a helper to construct it from environment variables:
+
+```typescript
+import { DatabaseProvisioner } from "@gblockparty/core/database";
+import { getDb } from "@gblockparty/shared/db";
+
+function getProvisioner(): DatabaseProvisioner {
+  return new DatabaseProvisioner({
+    db: getDb(),
+    rdsEndpoint: process.env.RDS_ENDPOINT!,
+    rdsPort: parseInt(process.env.RDS_PORT ?? "5432"),
+    rdsAdminUser: process.env.RDS_ADMIN_USER!,
+    rdsAdminPassword: process.env.RDS_ADMIN_PASSWORD!,
+  });
+}
+```
+
+This helper can live in the route file itself or in a shared API utility file (e.g., `apps/dashboard/src/lib/provisioner.ts`).
+
+---
+
+## Response Formats
+
+### GET (database exists)
+```json
+{
+  "dbName": "app_myproject",
+  "dbUser": "app_myproject_user",
+  "sizeBytes": 8421376,
+  "activeConnections": 2,
+  "connectionString": "postgresql://app_myproject_user:xxxx@rds-endpoint:5432/app_myproject?sslmode=require",
+  "createdAt": "2026-03-01T12:00:00.000Z"
+}
+```
+
+### GET (no database)
+```json
+null
+```
+
+### POST (success, 201)
+```json
+{
+  "dbName": "app_myproject",
+  "dbUser": "app_myproject_user",
+  "connectionString": "postgresql://app_myproject_user:xxxx@rds-endpoint:5432/app_myproject?sslmode=require",
+  "message": "Database created successfully. DATABASE_URL has been set for production and preview."
+}
+```
+
+### POST (conflict, 409)
+```json
+{
+  "error": "Database already exists for this project"
+}
+```
+
+### DELETE (success, 200)
+```json
+{
+  "message": "Database deleted successfully"
+}
+```
+
+### DELETE (bad confirmation, 400)
+```json
+{
+  "error": "Confirmation name does not match"
+}
+```
+
+---
+
+## Error Handling
+
+| Error Scenario | HTTP Status | Response |
+|----------------|-------------|----------|
+| Invalid project UUID | 400 | `{ "error": "Invalid project ID" }` |
+| Project not found | 404 | `{ "error": "Project not found" }` |
+| Database already exists (POST) | 409 | `{ "error": "Database already exists for this project" }` |
+| No database exists (DELETE) | 404 | `{ "error": "No database exists for this project" }` |
+| Confirmation name mismatch (DELETE) | 400 | `{ "error": "Confirmation name does not match" }` |
+| RDS connection failure | 500 | `{ "error": "Failed to create/delete database" }` |
+| Unauthenticated | 401 | `{ "error": "Unauthorized" }` (handled by `withAuth`) |
+
+---
+
+## Verification
+
+- [ ] GET returns `null` (200) for project with no database
+- [ ] GET returns database info with stats for project with database
+- [ ] GET returns connection string with decrypted password
+- [ ] GET returns 404 for non-existent project
+- [ ] POST creates database and returns 201
+- [ ] POST returns 409 if database already exists
+- [ ] POST sets `DATABASE_URL` env vars (verify via `GET /api/projects/:id/env?scope=production`)
+- [ ] DELETE returns 200 on successful deletion
+- [ ] DELETE returns 400 if `confirmName` doesn't match
+- [ ] DELETE returns 404 if no database exists
+- [ ] All routes return 401 for unauthenticated requests
+- [ ] Invalid UUID returns 400

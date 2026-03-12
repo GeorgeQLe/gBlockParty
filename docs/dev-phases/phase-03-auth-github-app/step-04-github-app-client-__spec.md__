@@ -1,0 +1,435 @@
+# Step 4: GitHub App Client Implementation
+
+**Phase:** 3 -- Authentication & GitHub App Integration
+**Step:** 4 of 5
+**Type:** Code implementation
+**Depends on:** Step 1 (GitHub App credentials available)
+**Blocks:** Step 5 (webhook handlers need Octokit for commit status + PR comments), Phase 4 (build system needs installation tokens for cloning), Phase 5 (deployment engine uses commit status)
+
+---
+
+## Objective
+
+Implement the `GitHubAppClient` class with `getInstallationOctokit()` and `getInstallationToken()` methods. Installation tokens are cached in memory with a ~55-minute TTL (GitHub's 1-hour expiry minus a 5-minute buffer). The client is a singleton -- one instance shared across the entire process.
+
+---
+
+## Current State
+
+**File:** `packages/core/src/github/app.ts`
+
+```typescript
+import { App } from "@octokit/app";
+import type { Octokit } from "@octokit/rest";
+
+let app: App | null = null;
+
+export class GitHubAppClient {
+  private app: App;
+
+  constructor() {
+    if (!app) {
+      app = new App({
+        appId: process.env.GITHUB_APP_ID!,
+        privateKey: process.env.GITHUB_APP_PRIVATE_KEY!,
+        webhooks: {
+          secret: process.env.GITHUB_APP_WEBHOOK_SECRET!,
+        },
+      });
+    }
+    this.app = app;
+  }
+
+  async getInstallationOctokit(installationId: number): Promise<Octokit> {
+    // TODO: Get installation-scoped Octokit with cached token
+    throw new Error("Not implemented");
+  }
+
+  async getInstallationToken(installationId: number): Promise<string> {
+    // TODO: Get or refresh installation token (1-hour expiry)
+    throw new Error("Not implemented");
+  }
+}
+```
+
+**What exists:**
+- Singleton `App` instance using `@octokit/app` library
+- Constructor reads credentials from environment variables
+- Both methods have correct signatures but throw "Not implemented"
+
+**What's missing:**
+- Token caching mechanism
+- `getInstallationOctokit()` implementation
+- `getInstallationToken()` implementation
+- Cache invalidation on error
+
+---
+
+## Implementation Plan
+
+### Token Cache Design
+
+```typescript
+interface CachedToken {
+  token: string;
+  expiresAt: number; // Unix timestamp in milliseconds
+}
+
+// In-memory Map: installationId -> CachedToken
+private tokenCache: Map<number, CachedToken> = new Map();
+
+// Cache duration: 55 minutes (5-minute buffer before GitHub's 1-hour expiry)
+private static TOKEN_TTL_MS = 55 * 60 * 1000;
+```
+
+GitHub installation tokens expire after exactly 1 hour. We cache them for 55 minutes to avoid race conditions where a token expires between when we check and when we use it.
+
+### `getInstallationToken()` Implementation
+
+```typescript
+async getInstallationToken(installationId: number): Promise<string> {
+  // 1. Check cache
+  const cached = this.tokenCache.get(installationId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token;
+  }
+
+  // 2. Request new token from GitHub
+  const octokit = await this.app.getInstallationOctokit(installationId);
+  const { data } = await octokit.request(
+    "POST /app/installations/{installation_id}/access_tokens",
+    {
+      installation_id: installationId,
+    },
+  );
+
+  // 3. Cache the token
+  const token = data.token;
+  this.tokenCache.set(installationId, {
+    token,
+    expiresAt: Date.now() + GitHubAppClient.TOKEN_TTL_MS,
+  });
+
+  return token;
+}
+```
+
+**Alternative approach using `@octokit/app` built-in:**
+
+The `@octokit/app` library has its own installation token management. The simpler approach leverages it:
+
+```typescript
+async getInstallationToken(installationId: number): Promise<string> {
+  // Check our explicit cache first
+  const cached = this.tokenCache.get(installationId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token;
+  }
+
+  // Use @octokit/auth-app under the hood -- it creates a fresh installation token
+  const installationOctokit = await this.app.getInstallationOctokit(installationId);
+  const { token } = await (installationOctokit.auth as Function)({
+    type: "installation",
+    installationId,
+  }) as { token: string };
+
+  this.tokenCache.set(installationId, {
+    token,
+    expiresAt: Date.now() + GitHubAppClient.TOKEN_TTL_MS,
+  });
+
+  return token;
+}
+```
+
+### `getInstallationOctokit()` Implementation
+
+```typescript
+async getInstallationOctokit(installationId: number): Promise<Octokit> {
+  // @octokit/app handles token management internally for Octokit instances
+  // Each call returns an Octokit that automatically refreshes its auth token
+  return await this.app.getInstallationOctokit(installationId) as unknown as Octokit;
+}
+```
+
+**Note:** The `@octokit/app` library's `getInstallationOctokit()` returns an Octokit instance that automatically handles token creation and refresh. The returned Octokit's `auth()` hook will create a new installation access token when needed and cache it for the lifetime of the Octokit instance. We still maintain our own token cache for the `getInstallationToken()` method (used for `git clone` operations where we need the raw token string).
+
+---
+
+## Full Implementation
+
+```typescript
+import { App } from "@octokit/app";
+import type { Octokit } from "@octokit/rest";
+import { createLogger } from "@gblockparty/shared/backend";
+
+const logger = createLogger("github-app-client");
+
+interface CachedToken {
+  token: string;
+  expiresAt: number;
+}
+
+let app: App | null = null;
+
+export class GitHubAppClient {
+  private app: App;
+  private tokenCache = new Map<number, CachedToken>();
+
+  // 55 minutes -- 5-minute buffer before GitHub's 1-hour expiry
+  private static TOKEN_TTL_MS = 55 * 60 * 1000;
+
+  constructor() {
+    if (!app) {
+      app = new App({
+        appId: process.env.GITHUB_APP_ID!,
+        privateKey: process.env.GITHUB_APP_PRIVATE_KEY!,
+        webhooks: {
+          secret: process.env.GITHUB_APP_WEBHOOK_SECRET!,
+        },
+      });
+    }
+    this.app = app;
+  }
+
+  /**
+   * Get an Octokit instance scoped to a specific installation.
+   * The returned Octokit automatically manages its own auth tokens.
+   * Use this for making GitHub API calls (commit status, PR comments, etc.).
+   */
+  async getInstallationOctokit(installationId: number): Promise<Octokit> {
+    logger.debug({ installationId }, "Getting installation Octokit");
+    return (await this.app.getInstallationOctokit(
+      installationId,
+    )) as unknown as Octokit;
+  }
+
+  /**
+   * Get a raw installation access token string.
+   * Tokens are cached for 55 minutes (GitHub expiry is 1 hour).
+   * Use this for git clone operations: git clone https://x-access-token:{token}@github.com/owner/repo.git
+   */
+  async getInstallationToken(installationId: number): Promise<string> {
+    // Check cache
+    const cached = this.tokenCache.get(installationId);
+    if (cached && cached.expiresAt > Date.now()) {
+      logger.debug({ installationId }, "Using cached installation token");
+      return cached.token;
+    }
+
+    logger.info({ installationId }, "Fetching new installation token");
+
+    // Get a fresh token via the App's installation Octokit
+    const octokit = await this.app.getInstallationOctokit(installationId);
+    const auth = (await octokit.auth({
+      type: "installation",
+      installationId,
+    })) as { token: string };
+
+    // Cache it
+    this.tokenCache.set(installationId, {
+      token: auth.token,
+      expiresAt: Date.now() + GitHubAppClient.TOKEN_TTL_MS,
+    });
+
+    return auth.token;
+  }
+
+  /**
+   * Invalidate the cached token for an installation.
+   * Call this if an API call fails with a 401, to force a token refresh on retry.
+   */
+  invalidateToken(installationId: number): void {
+    logger.info({ installationId }, "Invalidating cached installation token");
+    this.tokenCache.delete(installationId);
+  }
+}
+```
+
+---
+
+## Singleton Pattern
+
+The module-level `let app: App | null = null` ensures only one `App` instance exists, regardless of how many `GitHubAppClient` instances are created. However, each `GitHubAppClient` instance has its own `tokenCache`. For a truly shared cache, consider exporting a singleton:
+
+```typescript
+// At the bottom of app.ts
+let _client: GitHubAppClient | null = null;
+
+export function getGitHubAppClient(): GitHubAppClient {
+  if (!_client) {
+    _client = new GitHubAppClient();
+  }
+  return _client;
+}
+```
+
+This ensures one token cache across the entire process, which is the correct behavior for a single-server deployment.
+
+---
+
+## Usage Examples
+
+### Clone a repo (Phase 4 -- Build System)
+
+```typescript
+const client = getGitHubAppClient();
+const token = await client.getInstallationToken(installationId);
+
+// Use token for authenticated git clone
+const cloneUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
+await exec(`git clone --depth 1 --branch ${ref} ${cloneUrl} ${workDir}`);
+```
+
+### Set commit status (Step 5 -- Webhook Event Router)
+
+```typescript
+const client = getGitHubAppClient();
+const octokit = await client.getInstallationOctokit(installationId);
+
+await setCommitStatus(octokit, owner, repo, sha, "pending", {
+  description: "Build in progress...",
+  context: "gblockparty/deploy",
+  targetUrl: `https://platform.yourdomain.dev/projects/${projectId}/deployments/${deploymentId}`,
+});
+```
+
+### Post a PR comment (Step 5 -- Webhook Event Router)
+
+```typescript
+const client = getGitHubAppClient();
+const octokit = await client.getInstallationOctokit(installationId);
+
+const body = formatDeploymentComment("ready", previewUrl, buildDurationMs);
+await createOrUpdatePRComment(octokit, owner, repo, prNumber, body);
+```
+
+---
+
+## Dependencies
+
+### npm packages (already in `packages/core/package.json`)
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `@octokit/app` | ^14.x | GitHub App authentication, installation token management |
+| `@octokit/rest` | ^20.x | Typed Octokit REST client (used as type for return values) |
+
+If not already installed:
+```bash
+pnpm --filter @gblockparty/core add @octokit/app @octokit/rest
+```
+
+### Internal dependencies
+
+| Package | Import | Purpose |
+|---------|--------|---------|
+| `@gblockparty/shared/backend` | `createLogger` | Pino-based structured logging |
+
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `packages/core/src/github/app.ts` | Replace TODO stubs with full implementation |
+
+---
+
+## Testing
+
+### Unit Tests
+
+```typescript
+import { GitHubAppClient } from "./app";
+
+// Mock @octokit/app
+vi.mock("@octokit/app", () => ({
+  App: vi.fn().mockImplementation(() => ({
+    getInstallationOctokit: vi.fn().mockResolvedValue({
+      auth: vi.fn().mockResolvedValue({ token: "ghs_test_token_123" }),
+      rest: { /* mock API methods */ },
+    }),
+  })),
+}));
+
+describe("GitHubAppClient", () => {
+  let client: GitHubAppClient;
+
+  beforeEach(() => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----";
+    process.env.GITHUB_APP_WEBHOOK_SECRET = "test-secret";
+    client = new GitHubAppClient();
+  });
+
+  describe("getInstallationToken", () => {
+    it("returns a token from GitHub on first call", async () => {
+      const token = await client.getInstallationToken(99001);
+      expect(token).toBe("ghs_test_token_123");
+    });
+
+    it("returns cached token on subsequent calls within TTL", async () => {
+      const token1 = await client.getInstallationToken(99001);
+      const token2 = await client.getInstallationToken(99001);
+      expect(token1).toBe(token2);
+      // Verify getInstallationOctokit was only called once
+    });
+
+    it("fetches new token after cache expires", async () => {
+      await client.getInstallationToken(99001);
+      // Advance time past 55 minutes
+      vi.advanceTimersByTime(56 * 60 * 1000);
+      await client.getInstallationToken(99001);
+      // Verify getInstallationOctokit was called twice
+    });
+
+    it("caches tokens per installation ID", async () => {
+      await client.getInstallationToken(99001);
+      await client.getInstallationToken(99002);
+      // Verify two separate API calls were made
+    });
+  });
+
+  describe("getInstallationOctokit", () => {
+    it("returns an Octokit instance", async () => {
+      const octokit = await client.getInstallationOctokit(99001);
+      expect(octokit).toBeDefined();
+      expect(octokit.auth).toBeDefined();
+    });
+  });
+
+  describe("invalidateToken", () => {
+    it("forces a fresh token on next request", async () => {
+      await client.getInstallationToken(99001);
+      client.invalidateToken(99001);
+      await client.getInstallationToken(99001);
+      // Verify two API calls were made despite being within TTL
+    });
+  });
+});
+```
+
+### Key Test Scenarios
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| First token request | Calls GitHub API, caches result, returns token |
+| Second request within 55 min | Returns cached token, no API call |
+| Request after 55 min | Fetches new token from API |
+| Different installation IDs | Separate cache entries, separate API calls |
+| `invalidateToken()` then request | Fetches fresh token despite time remaining |
+| Constructor with missing env vars | Defers error to first API call (non-null assertion) |
+
+---
+
+## Error Handling
+
+| Error | Cause | Response |
+|-------|-------|----------|
+| `@octokit/app` auth failure | Invalid App ID or private key | Throws -- caller should catch and log |
+| Installation not found | App not installed on repo | 404 from GitHub API -- throws |
+| Rate limited | >5000 requests/hour | 403 from GitHub -- caller should retry with backoff |
+| Network error | GitHub API unreachable | Throws -- caller should retry |
+
+The `GitHubAppClient` does not handle retries internally. Callers (webhook handler, build system) are responsible for retry logic. If a 401 is received during an API call using a cached token, the caller should call `invalidateToken()` and retry once.

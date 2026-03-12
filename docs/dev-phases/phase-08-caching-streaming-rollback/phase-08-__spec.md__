@@ -1,0 +1,222 @@
+# Phase 8: Build Caching, Log Streaming & Rollback
+
+**Phase:** 8
+**Status:** Not Started
+**Depends on:** Phase 4 (Build System), Phase 5 (Deployment & Routing), Phase 6 (Dashboard)
+**Blocks:** None (enhances all prior deployment functionality)
+
+---
+
+## Goal
+
+Builds are significantly faster via S3-backed dependency and framework caching. Build logs stream in real-time via Server-Sent Events. Users can rollback to any of the last 10 deployments with one click. Crash-looping containers auto-rollback to the previous healthy deployment. Old Docker images are pruned automatically.
+
+---
+
+## Context
+
+The platform can build and deploy apps (Phase 4-5) and display them in the dashboard (Phase 6). However, builds are slow because dependencies are installed fresh every time, build logs are only available after completion, there is no rollback mechanism, and Docker images accumulate without cleanup.
+
+This phase addresses four cross-cutting concerns that make the platform production-ready:
+
+1. **Build speed**: Caching node_modules and framework build artifacts in S3 eliminates redundant work. A typical Next.js rebuild with unchanged dependencies drops from ~90s to ~15s.
+2. **Observability**: Streaming build logs in real-time lets the developer watch progress instead of waiting for completion. Completed logs are persisted to S3 for later retrieval.
+3. **Reliability**: One-click rollback and auto-rollback on crash-loops mean the platform self-heals when deployments go wrong.
+4. **Resource management**: Docker image pruning prevents disk exhaustion on the VPS.
+
+### Why This Phase Exists
+
+Without caching, every push triggers a full dependency install and build -- unacceptable for a platform meant to replace Vercel. Without rollback, a bad deploy means the site is down until a fix is pushed and built. Without log streaming, debugging build failures is a frustrating wait-and-read cycle. Without image cleanup, the 80 GB VPS disk fills up within weeks.
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `packages/core/src/build/cache.ts` | `saveCache()` / `restoreCache()` -- S3 cache operations (TODO stubs) |
+| `packages/core/src/build/builder.ts` | `BuildRunner` -- build pipeline that will call cache functions |
+| `packages/core/src/deploy/rollback.ts` | `rollbackDeployment()` -- rollback orchestration (TODO stub) |
+| `packages/core/src/deploy/deployer.ts` | `Deployer` -- deploy pipeline (port allocation, container start, health check, Caddy update) |
+| `packages/core/src/providers/docker/client.ts` | Docker operations including `pruneImages()` (TODO stub) |
+| `packages/shared/src/backend/aws/s3.ts` | `uploadToS3()` / `downloadFromS3()` -- S3 client (IMPLEMENTED) |
+| `packages/shared/src/constants/deployment.ts` | `BUILD_LIMITS`, `HEALTH_CHECK` constants |
+| `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/rollback/route.ts` | Rollback API endpoint (TODO stub) |
+| `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/logs/route.ts` | Build log retrieval endpoint (TODO stub) |
+| `apps/dashboard/src/app/api/projects/[id]/deployments/[deploymentId]/logs/stream/route.ts` | SSE log streaming endpoint (TODO stub) |
+
+---
+
+## Existing Infrastructure
+
+### S3 Client (IMPLEMENTED)
+
+The S3 client in `packages/shared/src/backend/aws/s3.ts` provides:
+
+```typescript
+uploadToS3(bucket: string, key: string, body: Buffer | string): Promise<void>
+downloadFromS3(bucket: string, key: string): Promise<Buffer | null>
+```
+
+- Returns `null` on `NoSuchKey` (cache miss), re-throws other errors.
+- Uses `AWS_REGION` env var (defaults to `us-east-1`).
+- Lazy-initialized singleton `S3Client`.
+
+### Constants
+
+From `packages/shared/src/constants/deployment.ts`:
+
+```typescript
+BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES = 1 GB   // Max cache per project
+BUILD_LIMITS.MAX_IMAGES_PER_PROJECT = 10      // Image retention count
+BUILD_LIMITS.MAX_BUILD_TIME_MS = 15 min       // Build timeout
+
+HEALTH_CHECK.MAX_RETRIES = 10
+HEALTH_CHECK.RETRY_INTERVAL_MS = 2000
+HEALTH_CHECK.CRASH_THRESHOLD = 3
+HEALTH_CHECK.CRASH_WINDOW_MS = 5 min
+```
+
+### Docker Client
+
+From `packages/core/src/providers/docker/client.ts`:
+
+- `createDockerClient()` -- singleton Dockerode instance via `/var/run/docker.sock`
+- `buildImage()`, `runContainer()`, `stopContainer()`, `getContainerLogs()` -- TODO stubs
+- `pruneImages(docker, projectName, keepCount)` -- TODO stub, target for Step 8
+
+### Database Schema
+
+The `deployments` table includes fields used by rollback:
+
+- `type`: `'production'`, `'preview'`, `'rollback'`
+- `source_deployment_id`: UUID reference to the deployment being rolled back to
+- `docker_image_tag`: the image tag used to start the container
+- `build_log_s3_key`: S3 key for persisted build logs
+- `status`: tracks deployment lifecycle (`queued` -> `building` -> `deploying` -> `ready` / `failed`)
+
+---
+
+## Steps
+
+### Step 1: S3 Dependency Cache
+Implement `saveCache()` / `restoreCache()` for node_modules. Cache key: `{projectId}/deps/{pnpm-lock-hash}`. Restore before `pnpm install`, save after successful install (only if lockfile changed). Uses existing S3 client.
+
+**Spec:** `step-01-dependency-cache-__spec.md__`
+
+### Step 2: S3 Framework Build Cache
+Add framework build cache (`.next/cache/` for Next.js). Cache key: `{projectId}/build/{branch}`. Restore before build, save after successful build. 7-day expiry via S3 lifecycle rule.
+
+**Spec:** `step-02-framework-cache-__spec.md__`
+
+### Step 3: WebSocket Log Streaming
+Implement real-time build log streaming via SSE endpoint. Build logs stream from `BuildRunner` to connected clients. After build completes, full log is stored to S3.
+
+**Spec:** `step-03-log-streaming-__spec.md__`
+
+### Step 4: Build Log Retrieval
+Implement GET endpoint to fetch completed build logs from S3. Support ANSI color codes in response.
+
+**Spec:** `step-04-log-retrieval-__spec.md__`
+
+### Step 5: Rollback Mechanism
+Implement `rollbackDeployment()`: get target deployment's image tag, create new deployment record (type=rollback, sourceDeploymentId), start container from old image, health check, update Caddy, stop current container.
+
+**Spec:** `step-05-rollback-mechanism-__spec.md__`
+
+### Step 6: Rollback API & Dashboard UI
+Implement POST `/api/projects/:id/deployments/:did/rollback` endpoint. Add rollback UI to deployment list (button per deployment, confirmation dialog, shows which deployment is currently active).
+
+**Spec:** `step-06-rollback-api-ui-__spec.md__`
+
+### Step 7: Auto-Rollback on Crash-Loop
+Monitor containers with Docker restart policies (max 3). If a container crashes 3+ times in 5 minutes, auto-rollback to previous production deployment. Log event and send notification.
+
+**Spec:** `step-07-auto-rollback-__spec.md__`
+
+### Step 8: Docker Image Retention & Cleanup
+Keep last 10 images per project (configurable via `BUILD_LIMITS.MAX_IMAGES_PER_PROJECT`). Cleanup on deploy (prune after each successful production deploy). Preview images deleted on PR close.
+
+**Spec:** `step-08-image-cleanup-__spec.md__`
+
+---
+
+## Acceptance Criteria
+
+1. Builds with unchanged `pnpm-lock.yaml` skip the full install by restoring `node_modules` from S3 cache.
+2. Next.js rebuilds restore `.next/cache/` from S3, significantly reducing incremental build times.
+3. Build logs stream to the dashboard in real-time via SSE while a build is in progress.
+4. Completed build logs can be fetched from S3 via the logs API endpoint with ANSI color support.
+5. Users can rollback to any of the last 10 deployments via the dashboard or API.
+6. Rollback creates a new deployment record with `type: 'rollback'` and `source_deployment_id` pointing to the target.
+7. Crash-looping containers (3+ restarts in 5 minutes) automatically rollback to the previous production deployment.
+8. Auto-rollback events are logged and trigger Slack/Discord notifications.
+9. Docker images are pruned to keep only the last 10 per project.
+10. Preview deployment images are cleaned up when the PR is closed.
+
+---
+
+## Cross-Phase Dependencies
+
+### Depends On
+
+| Phase | What It Provides |
+|-------|-----------------|
+| Phase 4 (Build System) | `BuildRunner` class, `buildImage()`, framework detection, Dockerfile generation |
+| Phase 5 (Deployment & Routing) | `Deployer` class, `runContainer()`, `stopContainer()`, Caddy config management, port allocator, health check logic |
+| Phase 6 (Dashboard) | Deployment list pages, project detail pages, API route infrastructure (`withAuth`, `jsonResponse`, `errorResponse`) |
+
+### Enhances
+
+| Phase | What This Phase Adds |
+|-------|---------------------|
+| Phase 4 (Build System) | Build caching makes builds 2-6x faster; log streaming replaces wait-and-read |
+| Phase 5 (Deployment & Routing) | Rollback and auto-rollback add recovery capability; image pruning manages disk |
+| Phase 6 (Dashboard) | Rollback UI, live log streaming, log history |
+| Phase 7 (CLI) | CLI `rollback` and `logs` commands can use the new API endpoints |
+
+---
+
+## Architecture Decisions
+
+### SSE over WebSocket for Log Streaming
+
+The log streaming endpoint uses Server-Sent Events (SSE) instead of WebSocket because:
+
+1. Next.js App Router natively supports SSE via `ReadableStream` responses -- no additional infrastructure needed.
+2. Log streaming is unidirectional (server to client) -- WebSocket's bidirectional capability is unnecessary.
+3. SSE automatically reconnects on disconnection, which is valuable for long builds.
+4. The existing stub in the codebase already uses the SSE pattern with `text/event-stream` content type.
+
+### Cache as Tarballs in S3
+
+Build caches are stored as compressed tarballs (`.tar.gz`) in S3 rather than individual files because:
+
+1. S3 operations are per-object -- uploading/downloading a single tarball is far more efficient than thousands of individual `node_modules` files.
+2. Compression reduces storage costs and transfer time (~200 MB node_modules compresses to ~40 MB).
+3. The S3 lifecycle rule for 7-day expiry applies cleanly to single objects.
+
+### Rollback Creates a New Deployment Record
+
+Rollback does not modify the existing deployment -- it creates a new deployment record with `type: 'rollback'`. This preserves the full deployment history and makes rollbacks auditable. The `source_deployment_id` field links the rollback to the deployment it restored.
+
+### On-Deploy Pruning over Scheduled Cleanup
+
+Image pruning runs after each successful production deploy rather than via a daily cron job. This approach:
+
+1. Ensures cleanup happens predictably and is tied to the deployment lifecycle.
+2. Avoids needing a separate scheduler/cron system on the VPS.
+3. Keeps disk usage bounded without delay.
+
+---
+
+## Risk & Mitigation
+
+| Risk | Mitigation |
+|------|-----------|
+| S3 cache download slower than fresh install for small projects | Only restore cache if lockfile hash matches; skip for projects with < 10 dependencies |
+| SSE connection drops during long builds | SSE auto-reconnects; client sends `Last-Event-ID` header to resume from last received event |
+| Rollback target image has been pruned | Validate image exists before starting rollback; return clear error if pruned |
+| Auto-rollback triggers on intentional restarts | Only count crashes (non-zero exit code), not graceful restarts; use Docker event filtering |
+| Large node_modules exceeds 1 GB cache limit | Enforce `BUILD_LIMITS.BUILD_CACHE_SIZE_BYTES`; skip cache save if tarball exceeds limit |
+| Concurrent rollback and deploy race condition | Use database locking to ensure only one deployment operation per project at a time |
