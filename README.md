@@ -1,15 +1,14 @@
-# gBlockParty
+# gBlockParty (v1) — Archived
 
-Personal deployment platform — deploy web apps from GitHub to your own VPS.
+> **Status: Paused / Archived**
 
-## Setup
+Personal deployment platform — deploy web apps from GitHub to your own VPS using Docker, Caddy, and PostgreSQL.
 
-```bash
-pnpm install
-cp .env.example .env
-# Edit .env with your configuration
-pnpm dev:dashboard
-```
+## Why archived
+
+Development was paused after realizing the shared AWS infrastructure approach (VPS, RDS, container orchestration) cost more to build and maintain than using managed services like Vercel and Neon, which offer free tiers that cover most project needs with zero ops overhead.
+
+For the original v0 tutorial platform, see [gBlockParty-v0](https://github.com/GeorgeQLe/gBlockParty-v0).
 
 ## Architecture
 
