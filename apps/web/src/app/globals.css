@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/*
+ * gBlockParty design system — TODO (resolve in /spec-interview)
+ * Direction: neo-brutalist / boxy / Duolingo-adjacent.
+ * Decide tokens before building components:
+ *   - color palette (primary, accent, surface, ink)
+ *   - border + shadow system (hard offsets, no blur)
+ *   - typography scale + display font
+ *   - radius scale (likely 0 or small for brutalist)
+ *   - motion (stiff, stepped)
+ */
