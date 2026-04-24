@@ -13,9 +13,68 @@
 - [x] Step 1.4 (discriminated-union schema) shipped 2026-04-24.
 - [x] Step 1.5 (playful-brutalist design tokens) shipped 2026-04-24.
 - [x] Step 1.6 (MDX tooling + content loader) shipped 2026-04-24.
-- [x] Step 1.7 (seed collection YAMLs) shipped 2026-04-24. **Next: Step 1.8 — green-bar verification.**
+- [x] Step 1.7 (seed collection YAMLs) shipped 2026-04-24.
+- [x] Step 1.8 (green-bar verification) shipped 2026-04-24. **Next: Step 1.9 — workspace typecheck + build formal gate.**
 
-## Next step: Phase 1, Step 1.8 — Green-bar verification
+## Next step: Phase 1, Step 1.9 — Workspace typecheck + build formal gate
+
+### Context
+
+Step 1.8 just shipped: cold-run `pnpm -w test` (19/19), `pnpm -w -r typecheck`, and `pnpm --filter @gblockparty/web build` all green with turbo cache force-bypassed. Probes confirmed `loadCollection()` resolves all three real slugs and `loadAllGBlocks({ contentRoot: "content" })` returns `[]` cleanly. No tidy-up surfaced — diff was confined to `tasks/{todo,history}.md`.
+
+Step 1.9 is the second of Phase 1's three "Green" steps. It's a formal gate step: re-run `pnpm -w -r typecheck && pnpm --filter @gblockparty/web build` and record the result, then stop. In practice this largely overlaps with what 1.8 already verified — the separate step exists in the roadmap so that typecheck + build have a dedicated sign-off boundary before the Step 1.10 refactor.
+
+### Ship status going in
+
+- **Shipped last session:** no production changes. `tasks/{todo,history}.md` updated with the Step 1.8 record.
+- **Test status:** `pnpm -w test` 19/19 cold. `pnpm -w -r typecheck` clean cold. `pnpm --filter @gblockparty/web build` green cold (4 static pages).
+- **No git remote:** local `master` only; `git push` is a local no-op.
+- **Deploy:** none.
+
+### What this step does
+
+1. Re-run `pnpm -w -r typecheck` cold (turbo `--force` or equivalent) and confirm clean.
+2. Re-run `pnpm --filter @gblockparty/web build` cold and confirm green.
+3. Record the gate result in `tasks/history.md`.
+4. No production edits expected. If a regression surfaces, narrow one-line fix under `apps/web/src/lib/content/**` or `apps/web/src/components/mdx/**`; no refactors (those are Step 1.10).
+
+### Files to create / modify
+
+- **Likely no production edits.**
+- **Must not modify:** `packages/gblock-schema/src/index.ts` (locked since 1.4), `content/collections/**` (locked since 1.7), `apps/web/src/app/globals.css` (locked since 1.5).
+- **Routine handoff edits** to `tasks/{todo,history}.md` allowed.
+
+### Approach & key decisions
+
+- **Fast-mergeable with 1.8:** since 1.8 already exercised cold typecheck + build, this step may reduce to a formal re-run + log. That's fine — the milestone requires the gate to exist as its own checkbox.
+- **No new deps.** No refactors.
+
+### Acceptance criteria for Step 1.9
+
+- [ ] `pnpm -w -r typecheck` exits 0 cold.
+- [ ] `pnpm --filter @gblockparty/web build` exits 0 cold (4 static pages).
+- [ ] Step 1.9 checked off in `tasks/todo.md`.
+- [ ] `tasks/history.md` has a Step 1.9 entry.
+- [ ] Diff confined to `tasks/{todo,history}.md` (absent a surprise regression).
+
+### Ship-one-step handoff contract (Step 1.9 → 1.10)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.9**. Do not continue into 1.10.
+2. Verify typecheck + build green cold.
+3. Mark Step 1.9 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Seed Step 1.10's plan (refactor while keeping tests green — consolidate shared Zod fields if any duplication, clean MDX barrel exports) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.10 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.10.
+
+---
+
+## (Archived) Phase 1, Step 1.8 — Green-bar verification
 
 ### Context
 
@@ -504,7 +563,7 @@ After approval, the clear-context implementation session must:
 - [x] Step 1.7: Seed collection YAMLs _(Lane: mdx-pipeline)_ — shipped 2026-04-24. `content/collections/{gcanbuild,weekly-sota,weekly-g}.yaml` seeded with verbatim spec §2 descriptions; `frontDoorUrl` omitted (spec doesn't name one); pre-existing `boston-founder-radio.yaml` left alone (Phase 4 decommission, separate follow-up). Verified via one-off `node --input-type=module` probe that `collectionSchema.parse(yaml.load(...))` accepts all three. `pnpm -w test` 19/19 green; typecheck + build unchanged.
 
 ### Green
-- [ ] Step 1.8: `pnpm -w test` — all Phase 1 tests green.
+- [x] Step 1.8: `pnpm -w test` — all Phase 1 tests green. Shipped 2026-04-24 — cold cache-bypassed run (`pnpm turbo run test typecheck --force`) 19/19 test + clean typecheck, `pnpm --filter @gblockparty/web build` 4/4 static pages; probes confirmed `loadCollection()` resolves all three real slugs and `loadAllGBlocks({ contentRoot: "content" })` returns `[]`. No tidy-up surfaced.
 - [ ] Step 1.9: `pnpm -w -r typecheck && pnpm --filter @gblockparty/web build` — clean.
 - [ ] Step 1.10: Refactor while keeping tests green (consolidate shared Zod fields, clean MDX barrel exports).
 
