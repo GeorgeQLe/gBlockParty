@@ -63,7 +63,7 @@
   - Deliverable: `loadAllGBlocks()` + `loadCollection()` functions, 3 collection YAMLs, MDX stubs, passing loader tests
 
 ### Tests First
-- [ ] Step 1.1: Set up Vitest as the monorepo test runner
+- [x] Step 1.1: Set up Vitest as the monorepo test runner
   - Files: create `vitest.config.ts` at repo root; add `vitest` + `@vitest/ui` to root `devDependencies`; add `"test": "vitest run"` and `"test:watch": "vitest"` scripts at root and in `packages/gblock-schema/package.json`.
 - [ ] Step 1.2: Write failing schema validation tests
   - Files: create `packages/gblock-schema/src/__tests__/schema.test.ts`
