@@ -7,6 +7,75 @@
 ## Priority Task Queue
 
 - [x] Task pipeline is healthy; Phase 1 is planned and ready. Start at **Step 1.1** below.
+- [x] Step 1.1 (Vitest scaffold) shipped 2026-04-24. **Next: Step 1.2 — failing schema validation tests.**
+
+## Next step: Phase 1, Step 1.2 — Write failing schema validation tests
+
+### Context
+
+Step 1.1 landed Vitest as the monorepo test runner (`vitest.config.ts` + root/package scripts + turbo `test` task). `pnpm -w test` exits 0 against zero tests. Phase 1 is TDD; Step 1.2 is the first intentionally-red step — it pins the contract for the discriminated-union schema that Step 1.4 will implement.
+
+### Ship status going in
+
+- **Shipped last session (committed locally, no remote):** `vitest.config.ts`, root `package.json` scripts, `packages/gblock-schema/package.json` scripts, `turbo.json` test task, `tasks/history.md`, `pnpm-lock.yaml`, `.claude/settings.local.json` (added `showClearContextOnPlanAccept`, `permissions.defaultMode`).
+- **Test status:** zero tests; `pnpm -w test` exits 0.
+- **No git remote:** local `master` only; `git push` is a no-op.
+- **Deploy:** none — no deploy contract.
+
+### What this step does
+
+Writes failing Vitest cases that pin the shape of the forthcoming `z.discriminatedUnion("type", …)` schema. The tests MUST be red when the step completes — they define the target Step 1.4 has to hit. Do not edit `packages/gblock-schema/src/index.ts` in this step.
+
+### Files to create / modify
+
+- **Create:** `packages/gblock-schema/src/__tests__/schema.test.ts`
+- **Do not modify:** `packages/gblock-schema/src/index.ts` (Step 1.4's owner changes this)
+
+### Test cases (spec §3)
+
+- Valid `tutorial` frontmatter parses.
+- Valid `essay` frontmatter parses.
+- `episode` with neither `videoUrl` nor `audioUrl` fails.
+- `episode` with only `videoUrl` passes.
+- `episode` with only `audioUrl` passes.
+- `stream` missing `videoUrl` fails.
+- `stream` missing `startedAt` fails.
+- `clip` missing `videoUrl` fails.
+- `repo` missing `repoUrl` fails.
+- `tool` missing `demoUrl` fails.
+- `demo` missing `demoUrl` fails.
+- Unknown `type` fails.
+- Shared optional fields (`heroImage`, `featured`, `seriesSlug`, `videoUrl`) accepted on any type.
+- `membership` defaults to `"free"` when omitted.
+
+### Approach & key decisions
+
+- Import the exported `gBlockSchema` from `@gblockparty/gblock-schema`. If it doesn't yet exist under that name, the import failure itself is the red signal — do not stub it.
+- Use `expect(() => gBlockSchema.parse(input)).toThrow()` for failure cases and `expect(gBlockSchema.parse(input)).toMatchObject({...})` for success cases.
+- Keep fixtures inline (small factory helpers per type) — no MDX files yet; those are Step 1.3.
+- Test one assertion per `it()` block so failures in Step 1.4 diagnose cleanly.
+
+### Acceptance criteria for Step 1.2
+
+- [ ] `packages/gblock-schema/src/__tests__/schema.test.ts` exists with the 14 cases above.
+- [ ] `pnpm --filter @gblockparty/gblock-schema test` exits non-zero (red is the expected, desired state).
+- [ ] No changes to `src/index.ts`.
+
+### Ship-one-step handoff contract (Step 1.2 → 1.3)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.2**. Do not continue into 1.3.
+2. Verify tests are red (failures trace to missing/flat schema, not to syntax errors in the test file).
+3. Mark Step 1.2 done in `tasks/todo.md`.
+4. Append a one-line record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Write Step 1.3's plan (failing MDX loader tests) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant (keys present from Step 1.1); do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.3 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.3.
+
 
 ## Pre-phase setup (do once)
 
