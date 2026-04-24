@@ -9,9 +9,67 @@
 - [x] Task pipeline is healthy; Phase 1 is planned and ready. Start at **Step 1.1** below.
 - [x] Step 1.1 (Vitest scaffold) shipped 2026-04-24.
 - [x] Step 1.2 (failing schema tests) shipped 2026-04-24.
-- [x] Step 1.3 (failing MDX loader tests) shipped 2026-04-24. **Next: Step 1.4 — discriminated-union schema implementation (first green step).**
+- [x] Step 1.3 (failing MDX loader tests) shipped 2026-04-24.
+- [x] Step 1.4 (discriminated-union schema) shipped 2026-04-24. **Next: Step 1.5 — playful-brutalist design tokens.**
 
-## Next step: Phase 1, Step 1.4 — Migrate schema to discriminated union (first green step)
+## Next step: Phase 1, Step 1.5 — Playful-brutalist design tokens in `globals.css`
+
+### Context
+
+Phase 1 has shipped Steps 1.1 (Vitest scaffold), 1.2 (14 failing schema tests), 1.3 (5 failing MDX loader tests), and 1.4 (discriminated-union schema — 14 schema tests green). Loader tests from Step 1.3 remain red; Step 1.6 owns them. Step 1.5 is a parallel, implementation-safe lane (no test coupling, no package-schema dependency): author the playful-brutalist token set in `apps/web/src/app/globals.css` per spec §4, exposed via a Tailwind v4 `@theme { ... }` block so utilities like `bg-bg`, `text-ink`, `shadow-brutal` become generated.
+
+### Ship status going in
+
+- **Shipped last session:** `packages/gblock-schema/src/index.ts` rewritten to `z.discriminatedUnion("type", [...])` with 8 variants, shared-base fields, `episode` video-or-audio enforced via union-level `.superRefine()` (Zod 3.25 does not accept ZodEffects inside `discriminatedUnion`). Test helper factories at `packages/gblock-schema/src/__tests__/schema.test.ts` switched to generic overrides so destructures typecheck. Tests, history, todo updated.
+- **Test status:** `pnpm --filter @gblockparty/gblock-schema test` exits 0 (14/14). `pnpm -w test` exits non-zero **only** on the Step 1.3 loader suite (unresolved `../loader` / `../collections`). `pnpm -w -r typecheck` — schema package clean; `apps/web` still fails on the same loader imports (Step 1.6 scope).
+- **No git remote:** local `master` only; `git push` is a no-op.
+- **Deploy:** none.
+
+### What this step does
+
+Replaces the placeholder comment block in `apps/web/src/app/globals.css` with a concrete token set per spec §4 (color palette — bg, ink, paper, primary, accent, surface; borders — 2px/3px hard offsets; shadows — `--shadow-brutal` hard-offset no-blur stack; radii — 0 or very small; typography — Inter Variable body, JetBrains Mono Variable code, optional display face; motion — stepped/stiff). Wires them through Tailwind v4's `@theme { ... }` syntax so utilities are generated (`bg-bg`, `text-ink`, `border-ink`, `shadow-brutal`, etc.). Sets body defaults (background, text color, base font).
+
+### Files to create / modify
+
+- **Modify:** `apps/web/src/app/globals.css` (replace the TODO comment with the full token set + `@theme` block + body defaults).
+- **Modify (if needed):** `apps/web/postcss.config.js` — only if Tailwind v4 `@theme` requires a config change over the existing setup; verify first.
+- **Do not modify:** `packages/**`, `content/**`, `apps/web/src/lib/**`, `tasks/**` (except routine handoff edits), or any component files.
+
+### Approach & key decisions
+
+- Tailwind v4 uses `@theme { --color-bg: ...; }` inside the CSS file itself — no `tailwind.config.*` required. Keep config inline.
+- Prefer `next/font` for Inter Variable + JetBrains Mono Variable only if it's cleaner; otherwise `@font-face` + `font-family` tokens is fine for this step (fonts can be revisited in Step 1.10 refactor).
+- Hard-offset brutalist shadow: e.g. `--shadow-brutal: 4px 4px 0 0 var(--color-ink)`.
+- Stepped motion: define `--ease-brutal: steps(4, end)` or similar; no easing blur.
+- No component styling — tokens only. Components land in Phase 2.
+
+### Acceptance criteria for Step 1.5
+
+- [ ] `apps/web/src/app/globals.css` exports a complete token set: colors (bg, ink, paper, primary, accent, surface), borders (hard width + ink color), shadows (at least `--shadow-brutal`), radii, typography (font-family + scale), motion (stepped easing).
+- [ ] Tokens live in a Tailwind v4 `@theme { ... }` block so `bg-bg`, `text-ink`, `shadow-brutal` etc. resolve as utilities.
+- [ ] Body defaults (background, text color, base font) applied.
+- [ ] `pnpm --filter @gblockparty/web build` succeeds (no CSS syntax errors).
+- [ ] `pnpm --filter @gblockparty/gblock-schema test` still exits 0 (no regression).
+- [ ] No changes outside `apps/web/src/app/globals.css` (and `postcss.config.js` only if strictly required).
+
+### Ship-one-step handoff contract (Step 1.5 → 1.6)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.5**. Do not continue into 1.6.
+2. Verify `pnpm --filter @gblockparty/web build` passes.
+3. Mark Step 1.5 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Write Step 1.6's plan (install MDX tooling + build content loader to turn the Step 1.3 loader tests green) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.6 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.6.
+
+---
+
+## (Archived) Phase 1, Step 1.4 — Migrate schema to discriminated union (first green step)
 
 ### Context
 
@@ -238,7 +296,7 @@ After approval, the clear-context implementation session must:
   - Expected: red.
 
 ### Implementation
-- [ ] Step 1.4: Migrate schema to discriminated union _(Lane: schema)_
+- [x] Step 1.4: Migrate schema to discriminated union _(Lane: schema)_
   - Files: modify `packages/gblock-schema/src/index.ts`
   - Build per-type schemas by extending a shared-field base. `episode` uses `.refine()` to require at least one of `videoUrl`/`audioUrl`. `stream` requires `videoUrl` + `startedAt`. `clip` requires `videoUrl` + optional `parentSlug?`. `repo` requires `repoUrl`. `tool`/`demo` require `demoUrl`. `tutorial`/`essay` add optional `readingTimeMinutes?`. Export `gBlockSchema = z.discriminatedUnion("type", […])`.
 - [ ] Step 1.5: Write playful-brutalist design tokens _(Lane: design-tokens)_

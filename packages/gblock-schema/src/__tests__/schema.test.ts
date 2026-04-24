@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { gBlockSchema } from "../index";
 
-const base = (overrides: Record<string, unknown> = {}) => ({
+const base = <T extends Record<string, unknown>>(overrides: T = {} as T) => ({
   slug: "sample-slug",
   collection: "gcanbuild",
   title: "Sample Title",
@@ -9,26 +9,26 @@ const base = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const tutorial = (overrides: Record<string, unknown> = {}) =>
+const tutorial = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "tutorial", ...overrides });
-const essay = (overrides: Record<string, unknown> = {}) =>
+const essay = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "essay", ...overrides });
-const episode = (overrides: Record<string, unknown> = {}) =>
+const episode = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "episode", ...overrides });
-const stream = (overrides: Record<string, unknown> = {}) =>
+const stream = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({
     type: "stream",
     videoUrl: "https://example.com/stream",
     startedAt: "2026-04-24T00:00:00.000Z",
     ...overrides,
   });
-const clip = (overrides: Record<string, unknown> = {}) =>
+const clip = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "clip", videoUrl: "https://example.com/clip", ...overrides });
-const repo = (overrides: Record<string, unknown> = {}) =>
+const repo = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "repo", repoUrl: "https://github.com/x/y", ...overrides });
-const tool = (overrides: Record<string, unknown> = {}) =>
+const tool = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "tool", demoUrl: "https://example.com/tool", ...overrides });
-const demo = (overrides: Record<string, unknown> = {}) =>
+const demo = <T extends Record<string, unknown>>(overrides: T = {} as T) =>
   base({ type: "demo", demoUrl: "https://example.com/demo", ...overrides });
 
 describe("gBlockSchema discriminated union", () => {
