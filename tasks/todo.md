@@ -7,74 +7,78 @@
 ## Priority Task Queue
 
 - [x] Task pipeline is healthy; Phase 1 is planned and ready. Start at **Step 1.1** below.
-- [x] Step 1.1 (Vitest scaffold) shipped 2026-04-24. **Next: Step 1.2 — failing schema validation tests.**
+- [x] Step 1.1 (Vitest scaffold) shipped 2026-04-24.
+- [x] Step 1.2 (failing schema tests) shipped 2026-04-24. **Next: Step 1.3 — failing MDX loader tests.**
 
-## Next step: Phase 1, Step 1.2 — Write failing schema validation tests
+## Next step: Phase 1, Step 1.3 — Write failing MDX loader tests
 
 ### Context
 
-Step 1.1 landed Vitest as the monorepo test runner (`vitest.config.ts` + root/package scripts + turbo `test` task). `pnpm -w test` exits 0 against zero tests. Phase 1 is TDD; Step 1.2 is the first intentionally-red step — it pins the contract for the discriminated-union schema that Step 1.4 will implement.
+Steps 1.1 (Vitest scaffold) and 1.2 (14 failing schema tests, 7 red / 7 green against the current flat schema) shipped 2026-04-24. Phase 1 continues in TDD mode. Step 1.3 adds the second intentionally-red suite — it pins the contract for the MDX content loader that Step 1.6 will implement. The schema tests from 1.2 remain red; that's expected and will be resolved by Step 1.4.
 
 ### Ship status going in
 
-- **Shipped last session (committed locally, no remote):** `vitest.config.ts`, root `package.json` scripts, `packages/gblock-schema/package.json` scripts, `turbo.json` test task, `tasks/history.md`, `pnpm-lock.yaml`, `.claude/settings.local.json` (added `showClearContextOnPlanAccept`, `permissions.defaultMode`).
-- **Test status:** zero tests; `pnpm -w test` exits 0.
+- **Shipped last session:** `packages/gblock-schema/src/__tests__/schema.test.ts` (14 cases), `packages/gblock-schema/vitest.config.ts` (package-local include so `pnpm --filter` picks up tests), `tasks/history.md`, `tasks/todo.md`.
+- **Test status:** `pnpm -w test` exits non-zero (7 red schema cases, 7 green). Step 1.3 will add more red cases; that's fine.
 - **No git remote:** local `master` only; `git push` is a no-op.
-- **Deploy:** none — no deploy contract.
+- **Deploy:** none.
 
 ### What this step does
 
-Writes failing Vitest cases that pin the shape of the forthcoming `z.discriminatedUnion("type", …)` schema. The tests MUST be red when the step completes — they define the target Step 1.4 has to hit. Do not edit `packages/gblock-schema/src/index.ts` in this step.
+Writes failing Vitest cases for two functions that Step 1.6 will implement:
+
+- `loadAllGBlocks()` — walks `content/gblocks/<collection>/<slug>.mdx`, parses frontmatter via `gray-matter`, validates with `gBlockSchema`, surfaces file path in validation errors, and throws on duplicate slugs across collections.
+- `loadCollection(slug)` — reads + `js-yaml` parses + `collectionSchema.parse()` on `content/collections/<slug>.yaml`.
+
+Tests must be red at step completion. Do not create `apps/web/src/lib/content/*.ts` or install MDX deps in this step (Step 1.6 owns that). Do create test fixtures — small MDX and YAML files under `apps/web/src/lib/content/__tests__/fixtures/` — since they're the inputs the tests load.
 
 ### Files to create / modify
 
-- **Create:** `packages/gblock-schema/src/__tests__/schema.test.ts`
-- **Do not modify:** `packages/gblock-schema/src/index.ts` (Step 1.4's owner changes this)
+- **Create:** `apps/web/src/lib/content/__tests__/loader.test.ts`
+- **Create:** fixtures under `apps/web/src/lib/content/__tests__/fixtures/` — at minimum one valid MDX per collection the test exercises, one intentionally-invalid MDX (e.g., `episode` with no `videoUrl`/`audioUrl`) to assert error messages include the file path, two MDX files sharing a slug across collections to assert the duplicate-slug throw, and one valid + one invalid collection YAML.
+- **Create:** `apps/web/vitest.config.ts` (package-local include mirroring the schema package pattern) if `pnpm --filter @gblockparty/web test` doesn't already pick up `src/**/*.test.ts` from the `apps/web` directory. Verify first before creating.
+- **Create:** `"test": "vitest run"` and `"test:watch": "vitest"` scripts in `apps/web/package.json` if missing. Verify first.
+- **Do not modify:** `apps/web/src/lib/content/**` implementation files, `apps/web/package.json` dependencies (Step 1.6 adds `gray-matter`, `js-yaml`).
 
-### Test cases (spec §3)
+### Test cases (spec §5)
 
-- Valid `tutorial` frontmatter parses.
-- Valid `essay` frontmatter parses.
-- `episode` with neither `videoUrl` nor `audioUrl` fails.
-- `episode` with only `videoUrl` passes.
-- `episode` with only `audioUrl` passes.
-- `stream` missing `videoUrl` fails.
-- `stream` missing `startedAt` fails.
-- `clip` missing `videoUrl` fails.
-- `repo` missing `repoUrl` fails.
-- `tool` missing `demoUrl` fails.
-- `demo` missing `demoUrl` fails.
-- Unknown `type` fails.
-- Shared optional fields (`heroImage`, `featured`, `seriesSlug`, `videoUrl`) accepted on any type.
-- `membership` defaults to `"free"` when omitted.
+- `loadAllGBlocks()` returns all fixture gBlocks with parsed frontmatter and body content included.
+- `loadAllGBlocks()` rejects an invalid fixture (e.g., `episode` with no video or audio) with an error whose message contains the offending file path.
+- `loadAllGBlocks()` throws on duplicate slug across two different collections.
+- `loadCollection("gcanbuild")` reads + validates the fixture `gcanbuild.yaml` and returns a matching object.
+- `loadCollection()` throws when the YAML fails `collectionSchema.parse()`.
 
 ### Approach & key decisions
 
-- Import the exported `gBlockSchema` from `@gblockparty/gblock-schema`. If it doesn't yet exist under that name, the import failure itself is the red signal — do not stub it.
-- Use `expect(() => gBlockSchema.parse(input)).toThrow()` for failure cases and `expect(gBlockSchema.parse(input)).toMatchObject({...})` for success cases.
-- Keep fixtures inline (small factory helpers per type) — no MDX files yet; those are Step 1.3.
-- Test one assertion per `it()` block so failures in Step 1.4 diagnose cleanly.
+- Import loader functions from `@gblockparty/web` path(s) that Step 1.6 will create (e.g., `../loader`, `../collections`, or an `index.ts` barrel). If the modules don't yet exist, the import failure is the red signal — do not stub them.
+- Point the loader at a test-local content root via an env var or function arg so fixtures live under `__tests__/fixtures/` instead of the real `content/` tree. Decide the contract now and document it in the test file's comments so Step 1.6 has a clear target (preferred: `loadAllGBlocks({ contentRoot })` / `loadCollection(slug, { collectionsRoot })` — simple DI, no env-var coupling).
+- Keep fixtures minimal — two or three gBlocks is enough to exercise discovery, frontmatter parsing, error paths, and duplicate-slug collision.
+- One assertion per `it()` block so Step 1.6 failures diagnose cleanly.
+- `expect(() => fn()).toThrow(/path-fragment/)` where possible, so file-path-in-error is actually pinned.
 
-### Acceptance criteria for Step 1.2
+### Acceptance criteria for Step 1.3
 
-- [ ] `packages/gblock-schema/src/__tests__/schema.test.ts` exists with the 14 cases above.
-- [ ] `pnpm --filter @gblockparty/gblock-schema test` exits non-zero (red is the expected, desired state).
-- [ ] No changes to `src/index.ts`.
+- [ ] `apps/web/src/lib/content/__tests__/loader.test.ts` exists with the 5 cases above.
+- [ ] Fixture files under `apps/web/src/lib/content/__tests__/fixtures/` exist and cover valid/invalid MDX + valid/invalid YAML + duplicate-slug pair.
+- [ ] `pnpm --filter @gblockparty/web test` exits non-zero (red is the desired state).
+- [ ] `pnpm -w test` exits non-zero (Step 1.2 + Step 1.3 red cases).
+- [ ] No changes to `apps/web/src/lib/content/*.ts` implementation; no new production deps.
+- [ ] Schema tests from Step 1.2 still present and still red in the same way (not accidentally deleted).
 
-### Ship-one-step handoff contract (Step 1.2 → 1.3)
+### Ship-one-step handoff contract (Step 1.3 → 1.4)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 1.2**. Do not continue into 1.3.
-2. Verify tests are red (failures trace to missing/flat schema, not to syntax errors in the test file).
-3. Mark Step 1.2 done in `tasks/todo.md`.
-4. Append a one-line record to `tasks/history.md`.
+1. Implement **only Step 1.3**. Do not continue into 1.4.
+2. Verify tests are red and failures trace to missing loader modules or missing fixtures, not to syntax errors in the test file.
+3. Mark Step 1.3 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
 5. Commit and push (push is a local no-op — flag the missing remote).
 6. Deploy: none.
-7. Write Step 1.3's plan (failing MDX loader tests) into `tasks/todo.md` as a self-contained block.
-8. `.claude/settings.local.json` is already compliant (keys present from Step 1.1); do not re-edit unless a key is missing.
-9. Start the approval UI for Step 1.3 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
-10. Stop before implementing Step 1.3.
+7. Write Step 1.4's plan (discriminated-union schema implementation) into `tasks/todo.md` as a self-contained block. Note: Step 1.4 is the first green step — it should turn the Step 1.2 schema tests green without touching loader tests.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.4 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.4.
 
 
 ## Pre-phase setup (do once)
@@ -134,10 +138,10 @@ After approval, the clear-context implementation session must:
 ### Tests First
 - [x] Step 1.1: Set up Vitest as the monorepo test runner
   - Files: create `vitest.config.ts` at repo root; add `vitest` + `@vitest/ui` to root `devDependencies`; add `"test": "vitest run"` and `"test:watch": "vitest"` scripts at root and in `packages/gblock-schema/package.json`.
-- [ ] Step 1.2: Write failing schema validation tests
-  - Files: create `packages/gblock-schema/src/__tests__/schema.test.ts`
+- [x] Step 1.2: Write failing schema validation tests
+  - Files: created `packages/gblock-schema/src/__tests__/schema.test.ts` + package-local `packages/gblock-schema/vitest.config.ts` so `pnpm --filter` picks up `src/**/*.test.ts`.
   - Cases: valid `tutorial` / `essay` pass; `episode` without both `videoUrl` AND `audioUrl` fails; `episode` with only `videoUrl` passes; `episode` with only `audioUrl` passes; `stream` missing `videoUrl` fails; `stream` missing `startedAt` fails; `clip` missing `videoUrl` fails; `repo` missing `repoUrl` fails; `tool`/`demo` missing `demoUrl` fails; unknown `type` fails; shared optional fields (`heroImage`, `featured`, `seriesSlug`, `videoUrl`) accepted on any type; `membership` defaults to `"free"` when omitted.
-  - Expected: red.
+  - Result: 14 tests, 7 red / 7 green — exit non-zero as intended. Red failures all trace to the current flat schema (missing per-type required fields, stripped optional fields) — exactly the contract Step 1.4 will make green.
 - [ ] Step 1.3: Write failing MDX pipeline tests
   - Files: create `apps/web/src/lib/content/__tests__/loader.test.ts` and fixtures under `apps/web/src/lib/content/__tests__/fixtures/`
   - Cases: `loadAllGBlocks()` discovers fixtures, parses frontmatter + body, rejects invalid frontmatter with file path in error; `loadCollection("gcanbuild")` reads + validates `content/collections/gcanbuild.yaml`; duplicate-slug collision throws.
