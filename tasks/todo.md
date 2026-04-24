@@ -12,9 +12,69 @@
 - [x] Step 1.3 (failing MDX loader tests) shipped 2026-04-24.
 - [x] Step 1.4 (discriminated-union schema) shipped 2026-04-24.
 - [x] Step 1.5 (playful-brutalist design tokens) shipped 2026-04-24.
-- [x] Step 1.6 (MDX tooling + content loader) shipped 2026-04-24. **Next: Step 1.7 — seed collection YAMLs.**
+- [x] Step 1.6 (MDX tooling + content loader) shipped 2026-04-24.
+- [x] Step 1.7 (seed collection YAMLs) shipped 2026-04-24. **Next: Step 1.8 — green-bar verification.**
 
-## Next step: Phase 1, Step 1.7 — Seed collection YAMLs
+## Next step: Phase 1, Step 1.8 — Green-bar verification
+
+### Context
+
+Step 1.7 just shipped: `content/collections/{gcanbuild,weekly-sota,weekly-g}.yaml` exist and parse through `collectionSchema`. Phase 1's Tests-First queue (1.1–1.3) and Implementation queue (1.4–1.7) are both complete. Step 1.8 is the first of three "Green" steps (1.8 / 1.9 / 1.10) — a lightweight verification pass that confirms `pnpm -w test` is still green across the workspace and tidies anything that fell out of the prior implementation steps.
+
+### Ship status going in
+
+- **Shipped last session:** three collection YAMLs under `content/collections/` per spec §2 verbatim; pre-existing `boston-founder-radio.yaml` left alone (Phase 4 decommission is a separate tracked follow-up).
+- **Test status:** `pnpm -w test` → 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` → 4 static pages, green.
+- **No git remote:** local `master` only; `git push` is a local no-op.
+- **Deploy:** none.
+
+### What this step does
+
+Verifies the green bar and does minor tidy-up only. Specifically:
+
+1. Re-run `pnpm -w test`, `pnpm -w -r typecheck`, and `pnpm --filter @gblockparty/web build` cold (no turbo cache) to confirm the workspace is green end-to-end, not just incrementally.
+2. Sanity-check that `loadCollection()` can read from the real `content/collections/` tree (not just fixtures) by pointing a one-off probe at the default `COLLECTIONS_ROOT` and loading each of the three slugs. No committed probe.
+3. Sanity-check that `loadAllGBlocks({ contentRoot: "content" })` short-circuits cleanly on the empty `content/gblocks/` (no files yet) — should return `[]` without error.
+4. Any trivial tidy-up that surfaces: stray TODO comments, unused imports, an obvious lint warning from the loader/paths modules. Keep the diff narrow — bigger refactors belong to Step 1.10.
+
+### Files to create / modify
+
+- **Likely no production file changes.** If tidy-up surfaces, confine edits to `apps/web/src/lib/content/**` or `apps/web/src/components/mdx/**`.
+- **Must not modify:** `packages/gblock-schema/src/index.ts` (locked since 1.4), `content/collections/**` (locked since 1.7), `apps/web/src/app/globals.css` (locked since 1.5).
+
+### Approach & key decisions
+
+- **Cold run** the test + typecheck + build commands to defeat the turbo cache — a clean re-run catches any mtime-sensitive regressions that incremental builds mask.
+- **Probe, don't test.** If the probe reveals a real gap (e.g. default `CONTENT_ROOT` resolves relative to `process.cwd()` and breaks outside repo root), add a one-line fix; don't scaffold new tests — Step 1.10 refactor owns shared extraction.
+- **No new deps.** If something needs a dep, it's not Step 1.8.
+
+### Acceptance criteria for Step 1.8
+
+- [ ] `pnpm -w test` exits 0 after a cold run (turbo cache cleared or force-rerun) — still 19/19.
+- [ ] `pnpm -w -r typecheck` clean cold.
+- [ ] `pnpm --filter @gblockparty/web build` green cold.
+- [ ] `loadCollection()` against the real `content/collections/` tree returns validated objects for all three slugs (probed, not committed).
+- [ ] `loadAllGBlocks({ contentRoot: "content" })` returns `[]` cleanly (probed, not committed).
+- [ ] Diff confined to at most a few lines of tidy-up plus the routine `tasks/{todo,history}.md` handoff edits.
+
+### Ship-one-step handoff contract (Step 1.8 → 1.9)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.8**. Do not continue into 1.9.
+2. Verify green bar cold across test / typecheck / build.
+3. Mark Step 1.8 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Seed Step 1.9's plan (workspace typecheck + build confirmation — mostly a formal gate; may be fast-mergeable into 1.8's output depending on what 1.8 surfaced) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.9 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.9.
+
+---
+
+## (Archived) Phase 1, Step 1.7 — Seed collection YAMLs
 
 ### Context
 
@@ -441,8 +501,7 @@ After approval, the clear-context implementation session must:
   - Build per-type schemas by extending a shared-field base. `episode` uses `.refine()` to require at least one of `videoUrl`/`audioUrl`. `stream` requires `videoUrl` + `startedAt`. `clip` requires `videoUrl` + optional `parentSlug?`. `repo` requires `repoUrl`. `tool`/`demo` require `demoUrl`. `tutorial`/`essay` add optional `readingTimeMinutes?`. Export `gBlockSchema = z.discriminatedUnion("type", […])`.
 - [x] Step 1.5: Write playful-brutalist design tokens _(Lane: design-tokens)_ — shipped 2026-04-24.
 - [x] Step 1.6: Install MDX tooling + build content loader _(Lane: mdx-pipeline)_ — shipped 2026-04-24. Deps added to `apps/web/package.json`; sync loader at `apps/web/src/lib/content/{paths,loader,collections,index}.ts` (body attached post-parse — schema has no `body` field); MDX component stubs at `apps/web/src/components/mdx/{YouTube,RepoCard,Callout,AudioPlayer}.tsx`. 5/5 loader tests green; `pnpm -w test` 19/19 green for the first time in Phase 1.
-- [ ] Step 1.7: Seed collection YAMLs _(Lane: mdx-pipeline)_
-  - Files: create `content/collections/gcanbuild.yaml`, `weekly-sota.yaml`, `weekly-g.yaml` per spec §2.
+- [x] Step 1.7: Seed collection YAMLs _(Lane: mdx-pipeline)_ — shipped 2026-04-24. `content/collections/{gcanbuild,weekly-sota,weekly-g}.yaml` seeded with verbatim spec §2 descriptions; `frontDoorUrl` omitted (spec doesn't name one); pre-existing `boston-founder-radio.yaml` left alone (Phase 4 decommission, separate follow-up). Verified via one-off `node --input-type=module` probe that `collectionSchema.parse(yaml.load(...))` accepts all three. `pnpm -w test` 19/19 green; typecheck + build unchanged.
 
 ### Green
 - [ ] Step 1.8: `pnpm -w test` — all Phase 1 tests green.
