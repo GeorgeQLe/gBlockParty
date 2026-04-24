@@ -10,9 +10,84 @@
 - [x] Step 1.1 (Vitest scaffold) shipped 2026-04-24.
 - [x] Step 1.2 (failing schema tests) shipped 2026-04-24.
 - [x] Step 1.3 (failing MDX loader tests) shipped 2026-04-24.
-- [x] Step 1.4 (discriminated-union schema) shipped 2026-04-24. **Next: Step 1.5 — playful-brutalist design tokens.**
+- [x] Step 1.4 (discriminated-union schema) shipped 2026-04-24.
+- [x] Step 1.5 (playful-brutalist design tokens) shipped 2026-04-24. **Next: Step 1.6 — install MDX tooling + build content loader.**
 
-## Next step: Phase 1, Step 1.5 — Playful-brutalist design tokens in `globals.css`
+## Next step: Phase 1, Step 1.6 — Install MDX tooling + build content loader
+
+### Context
+
+Steps 1.1 (Vitest scaffold), 1.2 (14 failing schema tests), 1.3 (5 failing MDX loader tests), 1.4 (discriminated-union schema — 14/14 green), and 1.5 (playful-brutalist tokens in `globals.css` — `pnpm --filter @gblockparty/web build` passing) have shipped. Step 1.6 is the second green step of Phase 1: turn the Step 1.3 loader suite green by installing the MDX tool-chain and implementing the two loader functions the tests pin (`loadAllGBlocks({ contentRoot })` and `loadCollection(slug, { collectionsRoot })`).
+
+### Ship status going in
+
+- **Shipped last session:** `apps/web/src/app/globals.css` rewritten with the Tailwind v4 `@theme` token block (colors, borders, shadows, radii, typography, motion) + body defaults; `postcss.config.js` unchanged; spec §4 hexes verbatim (`#FFF8E7`, `#0B0B0B`, `#C3F53C`, `#FF6B5B`, `#4D7CFE`, `#EDE4C9`, `#2A2A2A`). No `@font-face`/`next/font` yet — system fallbacks cover the Inter Variable / JetBrains Mono Variable stacks until Step 1.10 polish.
+- **Test status:** `pnpm --filter @gblockparty/gblock-schema test` exits 0 (14/14). `pnpm -w test` exits non-zero **only** on the Step 1.3 loader suite (unresolved `../loader` / `../collections`). `pnpm --filter @gblockparty/web build` succeeds (4 static pages, no CSS errors).
+- **No git remote:** local `master` only; `git push` is a no-op.
+- **Deploy:** none.
+
+### What this step does
+
+1. **Install deps** in `apps/web/package.json`: `gray-matter`, `js-yaml`, `next-mdx-remote`, and `@types/js-yaml` (dev). Keep versions pinned compatible with Next 15.5 / React 19.
+2. **Create `apps/web/src/lib/content/paths.ts`** — tiny module exporting the default content roots (e.g. `CONTENT_ROOT = path.resolve(process.cwd(), "content")`, `COLLECTIONS_ROOT = path.resolve(process.cwd(), "content/collections")`). Keep injectable so tests can override via options.
+3. **Create `apps/web/src/lib/content/loader.ts`** with `loadAllGBlocks({ contentRoot }: { contentRoot: string }): Promise<GBlock[]>`:
+   - Walk `<contentRoot>/gblocks/<collection>/<slug>.mdx` (use `node:fs/promises` + recursive `readdir`, or a small sync walker — the test harness runs synchronously, so either works).
+   - `gray-matter` parse each file into `{ data, content }`.
+   - `gBlockSchema.parse({ ...data, body: content })` — wrap errors so the thrown message **includes the offending file path** (the Step 1.3 test asserts `/broken-episode.mdx/`).
+   - After all files parsed, check for duplicate `slug` across collections → throw an Error whose message names the colliding slug.
+   - Return the validated array.
+4. **Create `apps/web/src/lib/content/collections.ts`** with `loadCollection(slug: string, { collectionsRoot }: { collectionsRoot: string }): Promise<Collection>`:
+   - `fs.readFile(path.join(collectionsRoot, `${slug}.yaml`))`.
+   - `js-yaml` parse → `collectionSchema.parse(...)` → return. Let Zod errors bubble (Step 1.3 test asserts throw on invalid YAML).
+5. **Create `apps/web/src/lib/content/index.ts`** — barrel re-exporting `loadAllGBlocks`, `loadCollection`, and the content-root constants.
+6. **MDX component stubs** at `apps/web/src/components/mdx/{YouTube,RepoCard,Callout,AudioPlayer}.tsx` — minimal props-only placeholder components (render a labeled box). Not exercised by Step 1.3 tests, but in-scope for the mdx-pipeline lane and Phase 1 milestone.
+
+### Files to create / modify
+
+- **Create:** `apps/web/src/lib/content/paths.ts`, `loader.ts`, `collections.ts`, `index.ts`.
+- **Create:** `apps/web/src/components/mdx/YouTube.tsx`, `RepoCard.tsx`, `Callout.tsx`, `AudioPlayer.tsx`.
+- **Modify:** `apps/web/package.json` (add `gray-matter`, `js-yaml`, `next-mdx-remote` to `dependencies`; `@types/js-yaml` to `devDependencies`).
+- **Do not modify:** `packages/**`, `content/**` (Step 1.7 seeds collection YAMLs), `apps/web/src/app/**`, `apps/web/src/lib/content/__tests__/**` (fixtures + tests are frozen), `tasks/**` (except routine handoff edits).
+
+### Approach & key decisions
+
+- **Async vs sync:** the Step 1.3 tests call the loader directly from `it()` blocks — verify whether they `await` before committing to an API shape. If they await, keep `Promise<…>`. If they call synchronously, use sync `fs` calls and return plain values.
+- **Body field:** Step 1.3's "parses frontmatter + body content" assertion likely checks a field on the returned object. Inspect the test to confirm the exact key (`body`, `content`, or similar) and mirror it. Do **not** invent a field that the test doesn't check.
+- **Error wrapping:** `try { gBlockSchema.parse(data) } catch (err) { throw new Error(\`\${relativeFilePath}: \${err.message}\`) }` — the test uses `toThrow(/broken-episode\.mdx/)`, so the path fragment must appear in `err.message`.
+- **Duplicate-slug check:** build a `Map<slug, filePath>` as you iterate; on collision, throw including both paths and the slug.
+- **Import path from schema:** `@gblockparty/gblock-schema` is a workspace package — prefer its public `gBlockSchema` / `GBlock` / `collectionSchema` / `Collection` exports over deep imports.
+- **Zod 3.25 discriminated-union caveat:** the schema uses a union-level `.superRefine()` for `episode` video-or-audio — `gBlockSchema.parse(...)` still works identically; loader doesn't need to know. Flagged in case a parse error shape is surprising.
+- **No YAML parsing for MDX files; no MDX parsing for YAML.** Keep the two loaders strictly separate.
+- **Next.js server-only:** mark loader files with `import "server-only"` only if it doesn't trip up Vitest. Tests run in a Node env, so vanilla `fs` usage should be fine — verify before adding the guard.
+
+### Acceptance criteria for Step 1.6
+
+- [ ] `pnpm --filter @gblockparty/web test` exits 0 (all 5 loader cases green).
+- [ ] `pnpm --filter @gblockparty/gblock-schema test` still exits 0 (no regression).
+- [ ] `pnpm -w test` exits 0.
+- [ ] `pnpm -w -r typecheck` passes across the workspace (loader + web app both clean).
+- [ ] `pnpm --filter @gblockparty/web build` still succeeds.
+- [ ] No changes to `packages/**`, `content/**`, `apps/web/src/app/**`, or the Step 1.3 test file + fixtures.
+- [ ] New deps recorded in `apps/web/package.json`; lockfile updated.
+
+### Ship-one-step handoff contract (Step 1.6 → 1.7)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.6**. Do not continue into 1.7.
+2. Verify the 5 loader tests are green and nothing else regressed.
+3. Mark Step 1.6 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Seed Step 1.7's plan (seed `content/collections/{gcanbuild,weekly-sota,weekly-g}.yaml` per spec §2) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.7 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.7.
+
+---
+
+## (Archived) Phase 1, Step 1.5 — Playful-brutalist design tokens in `globals.css`
 
 ### Context
 
@@ -296,12 +371,11 @@ After approval, the clear-context implementation session must:
   - Expected: red.
 
 ### Implementation
+- [x] Step 1.5: Write playful-brutalist design tokens _(Lane: design-tokens)_ — shipped 2026-04-24. `apps/web/src/app/globals.css` holds the full `@theme` token set (color/border/shadow/radius/typography/motion) + body defaults; `postcss.config.js` untouched. Mirror entry below (now checked).
 - [x] Step 1.4: Migrate schema to discriminated union _(Lane: schema)_
   - Files: modify `packages/gblock-schema/src/index.ts`
   - Build per-type schemas by extending a shared-field base. `episode` uses `.refine()` to require at least one of `videoUrl`/`audioUrl`. `stream` requires `videoUrl` + `startedAt`. `clip` requires `videoUrl` + optional `parentSlug?`. `repo` requires `repoUrl`. `tool`/`demo` require `demoUrl`. `tutorial`/`essay` add optional `readingTimeMinutes?`. Export `gBlockSchema = z.discriminatedUnion("type", […])`.
-- [ ] Step 1.5: Write playful-brutalist design tokens _(Lane: design-tokens)_
-  - Files: modify `apps/web/src/app/globals.css`
-  - Define color, radius, border/shadow, typography tokens per spec §4 as CSS custom properties in a Tailwind v4 `@theme { … }` block so utilities like `bg-bg`, `text-ink`, `shadow-brutal` are generated. Load Inter Variable + JetBrains Mono Variable (prefer `next/font` in the layout if cleaner than `@font-face`). Set body defaults.
+- [x] Step 1.5: Write playful-brutalist design tokens _(Lane: design-tokens)_ — shipped 2026-04-24.
 - [ ] Step 1.6: Install MDX tooling + build content loader _(Lane: mdx-pipeline)_
   - Files: modify `apps/web/package.json` (add `gray-matter`, `next-mdx-remote`, `js-yaml`, `@types/js-yaml`); create `apps/web/src/lib/content/paths.ts`, `loader.ts`, `collections.ts`, `index.ts`; create `apps/web/src/components/mdx/{YouTube,RepoCard,Callout,AudioPlayer}.tsx`
   - `loader.loadAllGBlocks()` walks `content/gblocks/<collection>/<slug>.mdx`, `gray-matter` parse, `gBlockSchema.parse()` with error wrapping, global slug-uniqueness check. `collections.loadCollection(slug)` reads + `js-yaml` parses + `collectionSchema.parse()`.

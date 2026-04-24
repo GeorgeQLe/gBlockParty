@@ -1,12 +1,85 @@
 @import "tailwindcss";
 
 /*
- * gBlockParty design system — TODO (resolve in /spec-interview)
- * Direction: neo-brutalist / boxy / Duolingo-adjacent.
- * Decide tokens before building components:
- *   - color palette (primary, accent, surface, ink)
- *   - border + shadow system (hard offsets, no blur)
- *   - typography scale + display font
- *   - radius scale (likely 0 or small for brutalist)
- *   - motion (stiff, stepped)
+ * gBlockParty design tokens — Playful Brutalist (spec §4)
+ * Duolingo-adjacent warmth with hard edges. Tokens only.
  */
+@theme {
+  /* Colors */
+  --color-bg: #FFF8E7;
+  --color-ink: #0B0B0B;
+  --color-ink-soft: #2A2A2A;
+  --color-paper: #FFFFFF;
+  --color-muted: #EDE4C9;
+  --color-surface: #EDE4C9;
+  --color-primary: #C3F53C;
+  --color-accent: #FF6B5B;
+  --color-accent-lime: #C3F53C;
+  --color-accent-coral: #FF6B5B;
+  --color-accent-blue: #4D7CFE;
+
+  /* Borders */
+  --border-ink: var(--color-ink);
+  --border-width-hard: 2.5px;
+  --border-width-hard-lg: 3px;
+
+  /* Hard-offset brutalist shadows — no blur */
+  --shadow-brutal: 4px 4px 0 0 var(--color-ink);
+  --shadow-brutal-lg: 6px 6px 0 0 var(--color-ink);
+  --shadow-brutal-sm: 2px 2px 0 0 var(--color-ink);
+
+  /* Radii — minimal / boxy */
+  --radius-none: 0;
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+
+  /* Typography */
+  --font-sans: "Inter Variable", "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Inter Variable", "Nunito", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 48px;
+  --text-4xl: 72px;
+
+  --leading-tight: 1.1;
+  --leading-snug: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  /* Motion — stiff, stepped, no blur */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in: cubic-bezier(0.8, 0.2, 1, 0.8);
+  --ease-brutal: steps(4, end);
+  --duration-fast: 80ms;
+  --duration-base: 120ms;
+}
+
+/* Body defaults */
+html {
+  background: var(--color-bg);
+  color: var(--color-ink);
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+}
