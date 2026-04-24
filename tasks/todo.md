@@ -8,9 +8,99 @@
 
 - [x] Task pipeline is healthy; Phase 1 is planned and ready. Start at **Step 1.1** below.
 - [x] Step 1.1 (Vitest scaffold) shipped 2026-04-24.
-- [x] Step 1.2 (failing schema tests) shipped 2026-04-24. **Next: Step 1.3 — failing MDX loader tests.**
+- [x] Step 1.2 (failing schema tests) shipped 2026-04-24.
+- [x] Step 1.3 (failing MDX loader tests) shipped 2026-04-24. **Next: Step 1.4 — discriminated-union schema implementation (first green step).**
 
-## Next step: Phase 1, Step 1.3 — Write failing MDX loader tests
+## Next step: Phase 1, Step 1.4 — Migrate schema to discriminated union (first green step)
+
+### Context
+
+Phase 1 has shipped Steps 1.1 (Vitest scaffold), 1.2 (14 failing schema tests — 7 red / 7 green), and 1.3 (5 failing MDX loader tests — all red on missing `../loader`/`../collections` modules). Step 1.4 is the first **green** step of Phase 1: rewrite `packages/gblock-schema/src/index.ts` from a flat enum-based `z.object({...})` into a `z.discriminatedUnion("type", […])` so the 7 red schema cases from Step 1.2 turn green without breaking the 7 already-green cases. The loader tests from Step 1.3 remain red — Step 1.6 owns them.
+
+### Ship status going in
+
+- **Shipped last session:** `apps/web/src/lib/content/__tests__/loader.test.ts` (5 red cases), `apps/web/src/lib/content/__tests__/fixtures/**` (valid, invalid, dupe MDX trees + good/bad collection YAMLs), `apps/web/vitest.config.ts`, `test` + `test:watch` scripts in `apps/web/package.json`, `tasks/history.md`, `tasks/todo.md`.
+- **Test status:** `pnpm -w test` exits non-zero: 7 red schema cases, 7 green schema cases, 1 loader suite failing on unresolved `../loader`.
+- **No git remote:** local `master` only; `git push` is a no-op.
+- **Deploy:** none.
+
+### What this step does
+
+Rewrites `packages/gblock-schema/src/index.ts` so that:
+
+- A shared base schema holds the common fields (`slug`, `collection`, `title`, `summary?`, `publishedAt?`, `canonicalUrl?`, `crossPosts?`, `tags?`, `membership` default `"free"`, plus the shared optional fields `heroImage?`, `videoUrl?`, `featured?`, `seriesSlug?`).
+- Per-type schemas extend the base with `type: z.literal(...)` and the per-type required fields:
+  - `tutorial`: optional `readingTimeMinutes?`.
+  - `essay`: optional `readingTimeMinutes?`.
+  - `episode`: uses `.refine()` to require at least one of `videoUrl` / `audioUrl` (adds `audioUrl?` if not already present on the base).
+  - `stream`: requires `videoUrl` and `startedAt` (datetime).
+  - `clip`: requires `videoUrl`; optional `parentSlug?`.
+  - `repo`: requires `repoUrl` (url).
+  - `tool`: requires `demoUrl` (url).
+  - `demo`: requires `demoUrl` (url).
+- Export `gBlockSchema = z.discriminatedUnion("type", [...])` covering all 8 types.
+- `gBlockTypeSchema` is updated to the full 8-type enum (adds `clip`, `stream`).
+- `collectionSchema` is unchanged (Step 1.3 fixtures already match the current schema).
+
+### Files to create / modify
+
+- **Modify:** `packages/gblock-schema/src/index.ts` (rewrite in place).
+- **Do not modify:** test files, loader fixtures, or any code under `apps/**`.
+
+### Approach & key decisions
+
+- Keep `membership` default `"free"` on the base so every variant inherits it.
+- Zod v3 discriminated unions require the `type` field to be a literal on each variant — cannot live on the base via `.extend()` without re-declaring. Re-declare `type: z.literal("...")` on each variant schema.
+- `episode.refine((v) => v.videoUrl || v.audioUrl, { message: "episode requires videoUrl or audioUrl" })` — apply `.refine()` on the variant *before* putting it in the discriminated union (Zod supports this in v3.22+).
+- Add `audioUrl: z.string().url().optional()` to the `episode` variant (not the base) to keep the surface minimal.
+- `clip.parentSlug` is optional and is a plain `z.string()` (slug reference), not a URL.
+- For `stream.startedAt` use `z.string().datetime()` to match `publishedAt`.
+
+### Test cases (pre-existing, from Step 1.2)
+
+All 14 cases in `packages/gblock-schema/src/__tests__/schema.test.ts` must pass after this step:
+
+- ✅ valid `tutorial` passes
+- ✅ valid `essay` passes
+- 🔴 `episode` without both `videoUrl` AND `audioUrl` fails
+- 🔴 `episode` with only `videoUrl` passes
+- 🔴 `episode` with only `audioUrl` passes
+- ✅ `stream` missing `videoUrl` fails (currently passes for wrong reason — will still pass, now for the right reason)
+- ✅ `stream` missing `startedAt` fails
+- ✅ `clip` missing `videoUrl` fails
+- 🔴 `repo` missing `repoUrl` fails
+- 🔴 `tool` missing `demoUrl` fails
+- 🔴 `demo` missing `demoUrl` fails
+- ✅ unknown `type` fails
+- 🔴 shared optional fields (`heroImage`, `featured`, `seriesSlug`, `videoUrl`) accepted on any type
+- ✅ `membership` defaults to `"free"` when omitted
+
+### Acceptance criteria for Step 1.4
+
+- [ ] `pnpm --filter @gblockparty/gblock-schema test` exits 0 (all 14 green).
+- [ ] `pnpm -w test` still exits non-zero **only** because the Step 1.3 loader suite is red (no regression on schema tests).
+- [ ] `pnpm -w -r typecheck` passes — no downstream type breakage from the new `GBlock` union type.
+- [ ] No changes under `apps/**`, `content/**`, or `tasks/**` (except the routine handoff edits below).
+- [ ] `packages/gblock-schema/src/index.ts` exports `gBlockSchema`, `gBlockTypeSchema`, `GBlock`, `GBlockType`, `collectionSchema`, `Collection`.
+
+### Ship-one-step handoff contract (Step 1.4 → 1.5)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.4**. Do not continue into 1.5.
+2. Verify all 14 schema tests are green and loader tests remain red (unchanged).
+3. Mark Step 1.4 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Write Step 1.5's plan (playful-brutalist design tokens in `apps/web/src/app/globals.css`) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.5 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.5.
+
+---
+
+## (Archived) Phase 1, Step 1.3 — Write failing MDX loader tests
 
 ### Context
 
@@ -142,7 +232,7 @@ After approval, the clear-context implementation session must:
   - Files: created `packages/gblock-schema/src/__tests__/schema.test.ts` + package-local `packages/gblock-schema/vitest.config.ts` so `pnpm --filter` picks up `src/**/*.test.ts`.
   - Cases: valid `tutorial` / `essay` pass; `episode` without both `videoUrl` AND `audioUrl` fails; `episode` with only `videoUrl` passes; `episode` with only `audioUrl` passes; `stream` missing `videoUrl` fails; `stream` missing `startedAt` fails; `clip` missing `videoUrl` fails; `repo` missing `repoUrl` fails; `tool`/`demo` missing `demoUrl` fails; unknown `type` fails; shared optional fields (`heroImage`, `featured`, `seriesSlug`, `videoUrl`) accepted on any type; `membership` defaults to `"free"` when omitted.
   - Result: 14 tests, 7 red / 7 green — exit non-zero as intended. Red failures all trace to the current flat schema (missing per-type required fields, stripped optional fields) — exactly the contract Step 1.4 will make green.
-- [ ] Step 1.3: Write failing MDX pipeline tests
+- [x] Step 1.3: Write failing MDX pipeline tests
   - Files: create `apps/web/src/lib/content/__tests__/loader.test.ts` and fixtures under `apps/web/src/lib/content/__tests__/fixtures/`
   - Cases: `loadAllGBlocks()` discovers fixtures, parses frontmatter + body, rejects invalid frontmatter with file path in error; `loadCollection("gcanbuild")` reads + validates `content/collections/gcanbuild.yaml`; duplicate-slug collision throws.
   - Expected: red.

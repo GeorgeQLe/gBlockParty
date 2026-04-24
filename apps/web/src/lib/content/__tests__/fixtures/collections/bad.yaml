@@ -1,0 +1,3 @@
+name: Missing Slug Collection
+description: This YAML lacks the required `slug` field and must fail collectionSchema.parse().
+frontDoorUrl: not-a-valid-url
