@@ -15,7 +15,8 @@
 - [x] Step 1.6 (MDX tooling + content loader) shipped 2026-04-24.
 - [x] Step 1.7 (seed collection YAMLs) shipped 2026-04-24.
 - [x] Step 1.8 (green-bar verification) shipped 2026-04-24.
-- [x] Step 1.9 (workspace typecheck + build formal gate) shipped 2026-04-24. **Next: Step 1.10 — refactor while keeping tests green.**
+- [x] Step 1.9 (workspace typecheck + build formal gate) shipped 2026-04-24.
+- [x] Step 1.10 (refactor while keeping tests green) shipped 2026-04-24. **Phase 1 complete.**
 
 ## Next step: Phase 1, Step 1.10 — Refactor while keeping tests green
 
@@ -51,13 +52,13 @@ Steps 1.1–1.9 are complete. All 19 tests green, typecheck clean across both pa
 
 ### Acceptance criteria for Step 1.10
 
-- [ ] `pnpm -w test` exits 0 (19/19 — no tests added or removed).
-- [ ] `pnpm -w -r typecheck` exits 0.
-- [ ] `pnpm --filter @gblockparty/web build` exits 0 (4 static pages).
-- [ ] Shared Zod fields consolidated (no duplication across variant schemas).
-- [ ] MDX barrel exports clean — all public symbols re-exported.
-- [ ] Step 1.10 checked off in `tasks/todo.md`.
-- [ ] `tasks/history.md` has a Step 1.10 entry.
+- [x] `pnpm -w test` exits 0 (19/19 — no tests added or removed).
+- [x] `pnpm -w -r typecheck` exits 0.
+- [x] `pnpm --filter @gblockparty/web build` exits 0 (4 static pages).
+- [x] Shared Zod fields consolidated (no duplication across variant schemas).
+- [x] MDX barrel exports clean — all public symbols re-exported.
+- [x] Step 1.10 checked off in `tasks/todo.md`.
+- [x] `tasks/history.md` has a Step 1.10 entry.
 
 ### Ship-one-step handoff contract (Step 1.10 → Phase 1 Milestone)
 
@@ -566,17 +567,17 @@ After approval, the clear-context implementation session must:
 ### Green
 - [x] Step 1.8: `pnpm -w test` — all Phase 1 tests green. Shipped 2026-04-24 — cold cache-bypassed run (`pnpm turbo run test typecheck --force`) 19/19 test + clean typecheck, `pnpm --filter @gblockparty/web build` 4/4 static pages; probes confirmed `loadCollection()` resolves all three real slugs and `loadAllGBlocks({ contentRoot: "content" })` returns `[]`. No tidy-up surfaced.
 - [x] Step 1.9: `pnpm -w -r typecheck && pnpm --filter @gblockparty/web build` — clean. Shipped 2026-04-24 — cold cache-bypassed typecheck (2 packages clean), cold build (4/4 static pages). Formal gate passed.
-- [ ] Step 1.10: Refactor while keeping tests green (consolidate shared Zod fields, clean MDX barrel exports).
+- [x] Step 1.10: Refactor while keeping tests green (consolidate shared Zod fields, clean MDX barrel exports). Shipped 2026-04-24.
 
 ### Milestone: Phase 1 Foundation Ready
-- [ ] `packages/gblock-schema` exports a Zod discriminated union with all 8 types; `pnpm typecheck` passes across the monorepo.
-- [ ] Per-type required fields enforced: `episode` requires `videoUrl` or `audioUrl`; `stream` requires `videoUrl` + `startedAt`; `clip` requires `videoUrl`; `repo` requires `repoUrl`; `tool`/`demo` require `demoUrl`.
-- [ ] `apps/web/src/app/globals.css` defines the full token set (colors, borders, shadows, radii, typography) as CSS custom properties accessible via Tailwind v4 utilities.
-- [ ] A unit test successfully parses and validates a sample MDX frontmatter for each of the 3 active collections.
-- [ ] Invalid frontmatter (e.g., `episode` without video or audio) fails validation with a clear error.
-- [ ] `content/collections/gcanbuild.yaml`, `weekly-sota.yaml`, `weekly-g.yaml` exist and validate against `collectionSchema`.
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests. _(None yet — this is the first phase with tests.)_
+- [x] `packages/gblock-schema` exports a Zod discriminated union with all 8 types; `pnpm typecheck` passes across the monorepo.
+- [x] Per-type required fields enforced: `episode` requires `videoUrl` or `audioUrl`; `stream` requires `videoUrl` + `startedAt`; `clip` requires `videoUrl`; `repo` requires `repoUrl`; `tool`/`demo` require `demoUrl`.
+- [x] `apps/web/src/app/globals.css` defines the full token set (colors, borders, shadows, radii, typography) as CSS custom properties accessible via Tailwind v4 utilities.
+- [x] A unit test successfully parses and validates a sample MDX frontmatter for each of the 3 active collections.
+- [x] Invalid frontmatter (e.g., `episode` without video or audio) fails validation with a clear error.
+- [x] `content/collections/gcanbuild.yaml`, `weekly-sota.yaml`, `weekly-g.yaml` exist and validate against `collectionSchema`.
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests. _(None yet — this is the first phase with tests.)_
 
 ## Follow-ups (deferred; revisit in later phases)
 

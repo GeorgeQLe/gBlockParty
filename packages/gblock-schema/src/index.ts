@@ -12,7 +12,7 @@ export const gBlockTypeSchema = z.enum([
 ]);
 export type GBlockType = z.infer<typeof gBlockTypeSchema>;
 
-const baseFields = {
+const baseSchema = z.object({
   slug: z.string().min(1),
   collection: z.string().min(1),
   title: z.string().min(1),
@@ -26,54 +26,46 @@ const baseFields = {
   videoUrl: z.string().url().optional(),
   featured: z.boolean().optional(),
   seriesSlug: z.string().optional(),
-};
+});
 
-const tutorialSchema = z.object({
-  ...baseFields,
+const tutorialSchema = baseSchema.extend({
   type: z.literal("tutorial"),
   readingTimeMinutes: z.number().optional(),
 });
 
-const essaySchema = z.object({
-  ...baseFields,
+const essaySchema = baseSchema.extend({
   type: z.literal("essay"),
   readingTimeMinutes: z.number().optional(),
 });
 
-const episodeSchema = z.object({
-  ...baseFields,
+const episodeSchema = baseSchema.extend({
   type: z.literal("episode"),
   audioUrl: z.string().url().optional(),
 });
 
-const streamSchema = z.object({
-  ...baseFields,
+const streamSchema = baseSchema.extend({
   type: z.literal("stream"),
   videoUrl: z.string().url(),
   startedAt: z.string().datetime(),
 });
 
-const clipSchema = z.object({
-  ...baseFields,
+const clipSchema = baseSchema.extend({
   type: z.literal("clip"),
   videoUrl: z.string().url(),
   parentSlug: z.string().optional(),
 });
 
-const repoSchema = z.object({
-  ...baseFields,
+const repoSchema = baseSchema.extend({
   type: z.literal("repo"),
   repoUrl: z.string().url(),
 });
 
-const toolSchema = z.object({
-  ...baseFields,
+const toolSchema = baseSchema.extend({
   type: z.literal("tool"),
   demoUrl: z.string().url(),
 });
 
-const demoSchema = z.object({
-  ...baseFields,
+const demoSchema = baseSchema.extend({
   type: z.literal("demo"),
   demoUrl: z.string().url(),
 });
