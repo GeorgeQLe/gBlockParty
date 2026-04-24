@@ -11,9 +11,73 @@
 - [x] Step 1.2 (failing schema tests) shipped 2026-04-24.
 - [x] Step 1.3 (failing MDX loader tests) shipped 2026-04-24.
 - [x] Step 1.4 (discriminated-union schema) shipped 2026-04-24.
-- [x] Step 1.5 (playful-brutalist design tokens) shipped 2026-04-24. **Next: Step 1.6 — install MDX tooling + build content loader.**
+- [x] Step 1.5 (playful-brutalist design tokens) shipped 2026-04-24.
+- [x] Step 1.6 (MDX tooling + content loader) shipped 2026-04-24. **Next: Step 1.7 — seed collection YAMLs.**
 
-## Next step: Phase 1, Step 1.6 — Install MDX tooling + build content loader
+## Next step: Phase 1, Step 1.7 — Seed collection YAMLs
+
+### Context
+
+Steps 1.1 through 1.6 have shipped. Phase 1 has its first all-green workspace: `pnpm -w test` 19/19, `pnpm -w -r typecheck` clean, `pnpm --filter @gblockparty/web build` green. The loader plumbing is done but reads from a `contentRoot` argument — no real content directory has been seeded yet. Step 1.7 seeds the three active-collection YAMLs under `content/collections/` per spec §2 so the loader can be pointed at a real tree (and so Phase 2 route work can light up).
+
+### Ship status going in
+
+- **Shipped last session:** `apps/web/src/lib/content/{paths,loader,collections,index}.ts` (sync API per Step 1.3 contract); MDX stubs at `apps/web/src/components/mdx/{YouTube,RepoCard,Callout,AudioPlayer}.tsx`; `gray-matter`, `js-yaml`, `next-mdx-remote`, `@types/js-yaml` installed in `apps/web`.
+- **Test status:** `pnpm -w test` exits 0 (19/19 — 14 schema + 5 loader). `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` succeeds.
+- **No git remote:** local `master` only; `git push` is a local no-op.
+- **Deploy:** none.
+
+### What this step does
+
+Seeds three collection YAML files under `content/collections/` (repo-root `content/` directory, which may not yet exist — create it):
+
+1. `content/collections/gcanbuild.yaml`
+2. `content/collections/weekly-sota.yaml`
+3. `content/collections/weekly-g.yaml`
+
+Each file's shape must satisfy `collectionSchema` (`slug`, `name`, optional `description`, optional `frontDoorUrl`). Spec §2 is the authoritative source for copy — read it before committing wording. No MDX gBlocks in this step — those arrive in Phase 2. The loader already validates YAML, so a quick ad-hoc call from a one-off `node -e` probe (or a throwaway test) confirms the three files parse; do not commit a throwaway test.
+
+### Files to create / modify
+
+- **Create:** `content/collections/gcanbuild.yaml`
+- **Create:** `content/collections/weekly-sota.yaml`
+- **Create:** `content/collections/weekly-g.yaml`
+- **Do not modify:** `packages/**`, `apps/**`, `tasks/**` (except routine handoff edits).
+
+### Approach & key decisions
+
+- **Source of truth:** `specs/gblockparty-v1.md` §2 holds the human-readable names + descriptions for each collection. Copy verbatim — do not paraphrase.
+- **`frontDoorUrl`:** if the spec names a destination (e.g. `https://gblockparty.com/gcanbuild`), include it. If not, omit the field — it's optional and nullable.
+- **No `content/gblocks/**` seeding:** Phase 2 owns the first real gBlocks. Leaving `content/gblocks/` empty is fine — `loadAllGBlocks` returns `[]` when `<contentRoot>/gblocks` is missing (current implementation short-circuits via `fs.existsSync`).
+- **Verification probe:** run `node -e "import('./apps/web/src/lib/content/collections.ts').then(m => console.log(m.loadCollection('gcanbuild', { collectionsRoot: 'content/collections' })))"` or equivalent once to confirm all three parse — optional but cheap.
+
+### Acceptance criteria for Step 1.7
+
+- [ ] `content/collections/{gcanbuild,weekly-sota,weekly-g}.yaml` exist with the `slug` / `name` / `description` / `frontDoorUrl?` fields populated per spec §2.
+- [ ] Each file parses successfully through `loadCollection()` (verify via probe).
+- [ ] `pnpm -w test` still exits 0 (19/19 — no regression).
+- [ ] `pnpm -w -r typecheck` still clean.
+- [ ] `pnpm --filter @gblockparty/web build` still succeeds.
+- [ ] No changes outside `content/collections/**` and routine handoff edits to `tasks/{todo,history}.md`.
+
+### Ship-one-step handoff contract (Step 1.7 → 1.8)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 1.7**. Do not continue into 1.8.
+2. Verify the three YAMLs parse and nothing regresses.
+3. Mark Step 1.7 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Seed Step 1.8's plan (green-bar verification — `pnpm -w test` still 0, plus any tidy-up that falls out) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` is already compliant; do not re-edit unless a key is missing.
+9. Start the approval UI for Step 1.8 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 1.8.
+
+---
+
+## (Archived) Phase 1, Step 1.6 — Install MDX tooling + build content loader
 
 ### Context
 
@@ -376,9 +440,7 @@ After approval, the clear-context implementation session must:
   - Files: modify `packages/gblock-schema/src/index.ts`
   - Build per-type schemas by extending a shared-field base. `episode` uses `.refine()` to require at least one of `videoUrl`/`audioUrl`. `stream` requires `videoUrl` + `startedAt`. `clip` requires `videoUrl` + optional `parentSlug?`. `repo` requires `repoUrl`. `tool`/`demo` require `demoUrl`. `tutorial`/`essay` add optional `readingTimeMinutes?`. Export `gBlockSchema = z.discriminatedUnion("type", […])`.
 - [x] Step 1.5: Write playful-brutalist design tokens _(Lane: design-tokens)_ — shipped 2026-04-24.
-- [ ] Step 1.6: Install MDX tooling + build content loader _(Lane: mdx-pipeline)_
-  - Files: modify `apps/web/package.json` (add `gray-matter`, `next-mdx-remote`, `js-yaml`, `@types/js-yaml`); create `apps/web/src/lib/content/paths.ts`, `loader.ts`, `collections.ts`, `index.ts`; create `apps/web/src/components/mdx/{YouTube,RepoCard,Callout,AudioPlayer}.tsx`
-  - `loader.loadAllGBlocks()` walks `content/gblocks/<collection>/<slug>.mdx`, `gray-matter` parse, `gBlockSchema.parse()` with error wrapping, global slug-uniqueness check. `collections.loadCollection(slug)` reads + `js-yaml` parses + `collectionSchema.parse()`.
+- [x] Step 1.6: Install MDX tooling + build content loader _(Lane: mdx-pipeline)_ — shipped 2026-04-24. Deps added to `apps/web/package.json`; sync loader at `apps/web/src/lib/content/{paths,loader,collections,index}.ts` (body attached post-parse — schema has no `body` field); MDX component stubs at `apps/web/src/components/mdx/{YouTube,RepoCard,Callout,AudioPlayer}.tsx`. 5/5 loader tests green; `pnpm -w test` 19/19 green for the first time in Phase 1.
 - [ ] Step 1.7: Seed collection YAMLs _(Lane: mdx-pipeline)_
   - Files: create `content/collections/gcanbuild.yaml`, `weekly-sota.yaml`, `weekly-g.yaml` per spec §2.
 
