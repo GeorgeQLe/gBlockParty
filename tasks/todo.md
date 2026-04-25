@@ -16,7 +16,7 @@
 - [x] Step 2.8: PaywallCard component
 - [x] Step 2.9: Build-time slug uniqueness + SEO metadata polish
 - [x] Step 2.10: Write regression tests
-- [ ] Step 2.11: Run all tests, typecheck, build — verify green; refactor
+- [x] Step 2.11: Run all tests, typecheck, build — verify green; refactor
 
 ## Phase 2: UI Surface
 
@@ -108,66 +108,21 @@
   - Commands: `pnpm -w test`, `pnpm -w -r typecheck`, `pnpm --filter @gblockparty/web build`
   - Expected: all tests pass (Phase 1 + Phase 2), typecheck clean, production build succeeds with all fixture gBlock pages generated.
 
-### Milestone: Phase 2 UI Surface Ready
-- [ ] `/` renders featured rail + firehose + (empty-state) shorts rail when the repo has any gBlocks authored; empty state is graceful when there are none.
-- [ ] `/<collection>` renders for each of `gcanbuild`, `weekly-sota`, `weekly-g` even with zero or one gBlock seeded.
-- [ ] `/<collection>/<slug>` renders a type-appropriate header: video embed for `episode`/`stream`/`clip`, hero image for `tutorial`/`essay`, linked card for `repo`/`tool`/`demo`.
-- [ ] `/g/<slug>` issues a 301 to the canonical URL and resolves correctly for every authored slug.
-- [ ] `featured: true` pins gBlocks to the featured rail in the order defined (stable sort by `publishedAt` desc within pinned set).
-- [ ] Slug uniqueness enforced at build: duplicate slugs across collections fail the build with a clear error.
-- [ ] `PaywallCard` renders correctly when forced against a fixture `membership: member` gBlock (fixture-only; no real gated content ships).
-- [ ] `pnpm build` in `apps/web` produces a production build with no TS or lint errors.
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests.
+### Milestone: Phase 2 UI Surface Ready ✓
+- [x] `/` renders featured rail + firehose + (empty-state) shorts rail when the repo has any gBlocks authored; empty state is graceful when there are none.
+- [x] `/<collection>` renders for each of `gcanbuild`, `weekly-sota`, `weekly-g` even with zero or one gBlock seeded.
+- [x] `/<collection>/<slug>` renders a type-appropriate header: video embed for `episode`/`stream`/`clip`, hero image for `tutorial`/`essay`, linked card for `repo`/`tool`/`demo`.
+- [x] `/g/<slug>` issues a 301 to the canonical URL and resolves correctly for every authored slug.
+- [x] `featured: true` pins gBlocks to the featured rail in the order defined (stable sort by `publishedAt` desc within pinned set).
+- [x] Slug uniqueness enforced at build: duplicate slugs across collections fail the build with a clear error.
+- [x] `PaywallCard` renders correctly when forced against a fixture `membership: member` gBlock (fixture-only; no real gated content ships).
+- [x] `pnpm build` in `apps/web` produces a production build with no TS or lint errors.
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests.
 
-## Next step: Phase 2, Step 2.11 — Full verification + refactor
+## Next: Phase 3 — Launch
 
-### Context
-
-Step 2.10 is complete — 9 regression tests added in `apps/web/src/__tests__/pages.test.ts` covering all Phase 2 acceptance criteria. 28/28 tests green, typecheck clean, build green (13 pages).
-
-### Ship status going in
-
-- **Shipped last session:** Step 2.10 — Regression tests for Phase 2 acceptance criteria.
-- **Test status:** `pnpm -w test` 28/28 green (14 schema + 5 loader + 9 pages). `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
-- **No git remote:** local `master` only; `git push` is a local no-op.
-- **Deploy:** none.
-
-### What this step does
-
-Final verification gate for Phase 2. Run all tests, typecheck, and build from a clean state. Fix any issues found. Light refactoring only if something surfaces during verification — no feature work.
-
-### Commands to run
-
-1. `pnpm -w test` — all 28 tests must pass.
-2. `pnpm -w -r typecheck` — both packages clean.
-3. `pnpm --filter @gblockparty/web build` — 13 pages generated.
-
-### Refactor scope (if needed)
-
-- Fix any failing tests, type errors, or build warnings.
-- Light cleanup only: dead imports, unused variables, inconsistent formatting.
-- Do NOT add features or change behavior.
-
-### Acceptance criteria for Step 2.11
-
-- [ ] `pnpm -w test` — all tests pass (28/28 expected).
-- [ ] `pnpm -w -r typecheck` — clean across both packages.
-- [ ] `pnpm --filter @gblockparty/web build` — succeeds with 13 pages.
-- [ ] Phase 2 milestone checklist in `tasks/todo.md` fully checked off.
-- [ ] No regressions from any phase.
-
-### Ship-one-step handoff contract (Step 2.11 → Phase 3)
-
-After approval, the clear-context implementation session must:
-
-1. Implement **only Step 2.11**. Do not continue into Phase 3.
-2. Run all verification commands and fix any issues.
-3. Mark Step 2.11 done in `tasks/todo.md`.
-4. Check off the Phase 2 milestone items.
-5. Append a record to `tasks/history.md`.
-6. Commit and push (push is a local no-op).
-7. Plan Phase 3 decomposition into `tasks/todo.md` (or note it as next work).
+Phase 2 (UI Surface) is complete. All 11 steps shipped, milestone fully checked. Next work is Phase 3 decomposition — see `tasks/roadmap.md`.
 
 ---
 
