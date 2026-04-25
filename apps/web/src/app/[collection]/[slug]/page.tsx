@@ -7,6 +7,7 @@ import { compileMDX } from "next-mdx-remote/rsc";
 import { loadAllGBlocks, type LoadedGBlock } from "@/lib/content";
 import { TypeBadge } from "@/components/TypeBadge";
 import { CollectionBadge } from "@/components/CollectionBadge";
+import { PaywallCard } from "@/components/PaywallCard";
 import { YouTube } from "@/components/mdx/YouTube";
 import { Callout } from "@/components/mdx/Callout";
 import { RepoCard } from "@/components/mdx/RepoCard";
@@ -149,10 +150,14 @@ export default async function GBlockDetailPage({ params }: PageProps) {
   const isCode =
     block.type === "repo" || block.type === "tool" || block.type === "demo";
 
-  const { content } = await compileMDX({
-    source: block.body,
-    components: mdxComponents,
-  });
+  const isMember = block.membership === "member";
+
+  const { content } = isMember
+    ? { content: null }
+    : await compileMDX({
+        source: block.body,
+        components: mdxComponents,
+      });
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
@@ -181,7 +186,11 @@ export default async function GBlockDetailPage({ params }: PageProps) {
         )}
       </div>
 
-      <article className="prose mt-8">{content}</article>
+      {isMember ? (
+        <PaywallCard body={block.body} />
+      ) : (
+        <article className="prose mt-8">{content}</article>
+      )}
     </main>
   );
 }
