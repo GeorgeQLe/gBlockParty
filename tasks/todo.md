@@ -12,7 +12,7 @@
 - [x] Step 2.4: Home page route
 - [x] Step 2.5: Collection page route
 - [x] Step 2.6: gBlock detail page route with MDX rendering
-- [ ] Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>`
+- [x] Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>`
 - [ ] Step 2.8: PaywallCard component
 - [ ] Step 2.9: Build-time slug uniqueness + SEO metadata polish
 - [ ] Step 2.10: Write regression tests
@@ -120,57 +120,57 @@
 - [ ] All phase tests pass.
 - [ ] No regressions in previous phase tests.
 
-## Next step: Phase 2, Step 2.7 — Redirect `/g/<slug>` + Stub `/t/<tag>`
+## Next step: Phase 2, Step 2.8 — PaywallCard component
 
 ### Context
 
-Step 2.6 is complete — gBlock detail pages render at `/<collection>/<slug>` with type-appropriate headers (YouTube iframe for video types, hero image + reading time for text types, linked card for code types) and MDX body via `next-mdx-remote`. MDX component stubs upgraded (YouTube iframe, Callout brutalist styling, RepoCard brutalist styling). Build generates 13 pages (home + 4 collections + 5 gBlock details + not-found). Tests 19/19 green, typecheck clean, build green.
+Step 2.7 is complete — `/g/<slug>` route handler returns 301 redirect to `/<collection>/<slug>`, `/t/<tag>` stub page renders placeholder. Build generates 13 pages. Tests 19/19 green, typecheck clean, build green.
 
 ### Ship status going in
 
-- **Shipped last session:** Step 2.6 — gBlock detail page route with MDX rendering.
+- **Shipped last session:** Step 2.7 — Redirect `/g/<slug>` + stub `/t/<tag>`.
 - **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Create two routes:
-1. **`/g/<slug>`** — Route handler that looks up the gBlock by slug, returns 301 redirect to `/<collection>/<slug>`. Returns 404 if slug not found.
-2. **`/t/<tag>`** — Placeholder page (reserved URL pattern, renders "Tag pages coming soon" or similar stub).
+Create the `PaywallCard` component — a CTA card that renders for `membership: member` gBlocks. Shows a preview of the body content, then a paywall overlay with sign-up CTA. At launch no gBlocks have `membership: member`, so this renders nowhere in production.
 
 ### Files to create
 
-- **`apps/web/src/app/g/[slug]/route.ts`** — Route handler for slug redirect.
-- **`apps/web/src/app/t/[tag]/page.tsx`** — Stub tag page.
+- **`apps/web/src/components/PaywallCard.tsx`** — PaywallCard component.
+
+### Files to modify
+
+- **`apps/web/src/app/[collection]/[slug]/page.tsx`** — Wire PaywallCard into gBlock detail page (conditionally render when `membership === "member"`).
 
 ### Approach & key decisions
 
-- **`/g/<slug>` route handler:** Use Next.js route handler (`GET` export). Load all gBlocks, find by slug, redirect with 301 to `/<collection>/<slug>`. Return `NextResponse` with 404 status if not found.
-- **`/t/<tag>` stub page:** Simple server component rendering a placeholder message. `generateStaticParams()` can return empty array or derive tags from all gBlocks. `generateMetadata()` sets title from tag name.
-- **Content resolution:** Reuse `resolveContentRoot()` pattern.
-- **No `"use client"`** on either route.
+- **PaywallCard:** Server component. Renders first ~150 words of body as preview, then a paywall overlay with brutal border + muted background per spec §4. Sign-up CTA button.
+- **Integration:** In the detail page, when `block.membership === "member"`, render `PaywallCard` instead of the full MDX body.
+- **No auth logic:** This is a display scaffold only. No actual gating — just the visual component.
 
-### Acceptance criteria for Step 2.7
+### Acceptance criteria for Step 2.8
 
-- [ ] `/g/<slug>` returns 301 redirect to `/<collection>/<slug>` for every fixture gBlock slug.
-- [ ] `/g/<nonexistent>` returns 404.
-- [ ] `/t/<tag>` renders a stub page.
+- [ ] `PaywallCard` component exists and renders a preview + CTA overlay.
+- [ ] Detail page conditionally renders `PaywallCard` when `membership === "member"`.
+- [ ] Existing pages (no `membership: member` gBlocks) are unaffected.
 - [ ] `pnpm -w test` still 19/19 green.
 - [ ] `pnpm -w -r typecheck` clean.
 - [ ] `pnpm --filter @gblockparty/web build` succeeds.
 
-### Ship-one-step handoff contract (Step 2.7 → 2.8)
+### Ship-one-step handoff contract (Step 2.8 → 2.9)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 2.7**. Do not continue into 2.8.
+1. Implement **only Step 2.8**. Do not continue into 2.9.
 2. Verify typecheck and build pass.
-3. Mark Step 2.7 done in `tasks/todo.md`.
+3. Mark Step 2.8 done in `tasks/todo.md`.
 4. Append a record to `tasks/history.md`.
 5. Commit and push (push is a local no-op).
-6. Write Step 2.8's plan into `tasks/todo.md`.
-7. Enter plan mode for Step 2.8 approval. Stop before implementing.
+6. Write Step 2.9's plan into `tasks/todo.md`.
+7. Enter plan mode for Step 2.9 approval. Stop before implementing.
 
 ---
 
