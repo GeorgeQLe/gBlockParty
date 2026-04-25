@@ -4,6 +4,10 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "gBlockParty",
   description: "Every piece of content and code is a gBlock.",
+  openGraph: {
+    type: "website",
+    siteName: "gBlockParty",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -35,6 +35,10 @@ export async function generateMetadata({
   return {
     title: collection.name,
     description: collection.description,
+    openGraph: {
+      title: collection.name,
+      description: collection.description,
+    },
   };
 }
 

@@ -15,6 +15,11 @@ export async function generateMetadata({
   const { tag } = await params;
   return {
     title: `Tag: ${tag}`,
+    description: `gBlocks tagged with "${tag}"`,
+    openGraph: {
+      title: `Tag: ${tag}`,
+      description: `gBlocks tagged with "${tag}"`,
+    },
   };
 }
 

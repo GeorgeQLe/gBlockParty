@@ -16,6 +16,11 @@ export const metadata: Metadata = {
   title: "gBlockParty — Every piece of content and code is a gBlock",
   description:
     "Tutorials, episodes, clips, and tools from George Le. Browse the full library or filter by type and collection.",
+  openGraph: {
+    title: "gBlockParty — Every piece of content and code is a gBlock",
+    description:
+      "Tutorials, episodes, clips, and tools from George Le. Browse the full library or filter by type and collection.",
+  },
 };
 
 export default async function HomePage({
