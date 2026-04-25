@@ -15,7 +15,7 @@
 - [x] Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>`
 - [x] Step 2.8: PaywallCard component
 - [x] Step 2.9: Build-time slug uniqueness + SEO metadata polish
-- [ ] Step 2.10: Write regression tests
+- [x] Step 2.10: Write regression tests
 - [ ] Step 2.11: Run all tests, typecheck, build — verify green; refactor
 
 ## Phase 2: UI Surface
@@ -120,69 +120,54 @@
 - [ ] All phase tests pass.
 - [ ] No regressions in previous phase tests.
 
-## Next step: Phase 2, Step 2.10 — Write regression tests
+## Next step: Phase 2, Step 2.11 — Full verification + refactor
 
 ### Context
 
-Step 2.9 is complete — slug uniqueness verified at build time (duplicate fixture causes clear build failure), OG metadata added to all 5 page routes (root layout, home, collection, detail, tag stub). Build generates 13 pages. Tests 19/19 green, typecheck clean, build green.
+Step 2.10 is complete — 9 regression tests added in `apps/web/src/__tests__/pages.test.ts` covering all Phase 2 acceptance criteria. 28/28 tests green, typecheck clean, build green (13 pages).
 
 ### Ship status going in
 
-- **Shipped last session:** Step 2.9 — Build-time slug uniqueness verification + SEO metadata polish.
-- **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
+- **Shipped last session:** Step 2.10 — Regression tests for Phase 2 acceptance criteria.
+- **Test status:** `pnpm -w test` 28/28 green (14 schema + 5 loader + 9 pages). `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Write regression tests covering Phase 2 acceptance criteria. This is the "Green" step — tests-after strategy.
+Final verification gate for Phase 2. Run all tests, typecheck, and build from a clean state. Fix any issues found. Light refactoring only if something surfaces during verification — no feature work.
 
-### Files to create/modify
+### Commands to run
 
-- **Create `apps/web/src/__tests__/pages.test.ts`** — New test file for Phase 2 regression tests.
-- Possibly modify `apps/web/vitest.config.ts` if test file discovery needs updating.
+1. `pnpm -w test` — all 28 tests must pass.
+2. `pnpm -w -r typecheck` — both packages clean.
+3. `pnpm --filter @gblockparty/web build` — 13 pages generated.
 
-### Test cases to implement
+### Refactor scope (if needed)
 
-1. **`loadAllGBlocks()` returns the 5 fixture gBlocks with correct types** — verify count, types (`tutorial`, `episode`, `clip`), and that all 3 collections are represented.
-2. **Featured filter returns only `featured: true` blocks sorted by `publishedAt` desc** — filter the loaded blocks, verify count and order.
-3. **Clip filter returns only clip-type blocks** — filter for `type === "clip"`, verify count.
-4. **Redirect lookup resolves slug to canonical `/<collection>/<slug>`** — for each fixture slug, verify the block is findable and its `collection` field maps to the correct URL.
-5. **`PaywallCard` renders when `membership === "member"`** — fixture-only test verifying the component handles member gBlocks (this may need a rendering test or just a logic test depending on what's feasible without a DOM).
-6. **Slug uniqueness throws on duplicates** — already covered by Phase 1 tests (`loader.test.ts` case 3: "throws on duplicate slugs across collections"); verify no regression.
+- Fix any failing tests, type errors, or build warnings.
+- Light cleanup only: dead imports, unused variables, inconsistent formatting.
+- Do NOT add features or change behavior.
 
-### Approach & key decisions
+### Acceptance criteria for Step 2.11
 
-- **Test style:** Use Vitest with the existing setup. Focus on logic/data tests (loader output, filtering, sorting) rather than component rendering tests — the project doesn't have `@testing-library/react` set up, and these are server components.
-- **Fixture data:** Use the real `content/` directory fixtures via `loadAllGBlocks({ contentRoot })` with the `resolveContentRoot()` pattern.
-- **PaywallCard:** Test the preview text extraction logic (first ~150 words, tag stripping) rather than rendering, since it's a server component without a DOM test environment.
+- [ ] `pnpm -w test` — all tests pass (28/28 expected).
+- [ ] `pnpm -w -r typecheck` — clean across both packages.
+- [ ] `pnpm --filter @gblockparty/web build` — succeeds with 13 pages.
+- [ ] Phase 2 milestone checklist in `tasks/todo.md` fully checked off.
+- [ ] No regressions from any phase.
 
-### Acceptance criteria for Step 2.10
-
-- [ ] New test file `apps/web/src/__tests__/pages.test.ts` exists with 5+ test cases.
-- [ ] All new tests pass: `pnpm -w test` green (expected: ~24+ total tests).
-- [ ] `pnpm -w -r typecheck` clean.
-- [ ] `pnpm --filter @gblockparty/web build` still succeeds (13 pages).
-- [ ] No regressions in Phase 1 tests (14 schema + 5 loader).
-
-### Execution Profile
-**Parallel mode:** implementation-safe
-**Integration owner:** main agent
-**Conflict risk:** low
-**Review gates:** correctness, tests
-
-### Ship-one-step handoff contract (Step 2.10 → 2.11)
+### Ship-one-step handoff contract (Step 2.11 → Phase 3)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 2.10**. Do not continue into 2.11.
-2. Verify all tests pass, typecheck clean, build green.
-3. Mark Step 2.10 done in `tasks/todo.md`.
-4. Append a record to `tasks/history.md`.
-5. Commit and push (push is a local no-op).
-6. Write Step 2.11's plan into `tasks/todo.md`.
-7. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-8. Enter plan mode for Step 2.11 approval (`EnterPlanMode` → brief pass-through plan → `ExitPlanMode`). Stop before implementing.
+1. Implement **only Step 2.11**. Do not continue into Phase 3.
+2. Run all verification commands and fix any issues.
+3. Mark Step 2.11 done in `tasks/todo.md`.
+4. Check off the Phase 2 milestone items.
+5. Append a record to `tasks/history.md`.
+6. Commit and push (push is a local no-op).
+7. Plan Phase 3 decomposition into `tasks/todo.md` (or note it as next work).
 
 ---
 

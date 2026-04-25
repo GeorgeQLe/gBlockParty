@@ -1,4 +1,4 @@
-function extractPreview(body: string, wordCount = 150): string {
+export function extractPreview(body: string, wordCount = 150): string {
   const plain = body.replace(/<[^>]+>/g, "").replace(/\{[^}]*\}/g, "");
   const words = plain.split(/\s+/).filter(Boolean);
   const preview = words.slice(0, wordCount).join(" ");
