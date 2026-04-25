@@ -108,6 +108,59 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
+## Next step: Phase 3, Step 3.1 — Upgrade GCanBuild fixture tutorials to production canary content
+
+### Context
+
+Phase 2 is complete (28/28 tests, typecheck clean, 13-page build). Phase 3 has been decomposed into 10 steps. Step 3.1 is the first — upgrading the 2 existing GCanBuild fixture tutorials from placeholder content to production-quality canaries.
+
+### Ship status going in
+
+- **Shipped last session:** Phase 2 complete. Phase 3 decomposed.
+- **Test status:** `pnpm -w test` 28/28 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
+- **No git remote:** local `master` only; `git push` is a local no-op.
+- **Deploy:** none.
+
+### What this step does
+
+Upgrade `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx` and `content/gblocks/gcanbuild/better-auth-tutorial.mdx` from thin development fixtures to production-quality canary content.
+
+**Key changes per file:**
+1. **Replace placeholder video IDs** with real YouTube video IDs from George's channel. The `pastebin-clone-nextjs.mdx` currently uses `dQw4w9WgXcQ` (a rickroll placeholder). The `better-auth-tutorial.mdx` has `L8_98i_bMMA` — verify or replace.
+2. **Expand MDX bodies** from ~200-word step outlines to ~500–800-word production walkthroughs with section summaries, code snippets, and `<Callout>` tips.
+3. **Update `publishedAt`** to match real video publish dates if the user provides them.
+4. **Keep existing frontmatter structure** — `slug`, `type`, `collection`, `tags`, `featured`, `heroImage` fields stay the same.
+
+### Manual prerequisite
+
+**Before implementing:** Ask the user to provide the real YouTube video IDs for these 2 tutorials. If the user isn't available or wants to defer, skip to Step 3.5 (production config) which has no manual blockers.
+
+### Files to modify
+
+- `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx` — replace `dQw4w9WgXcQ` video ID, expand body
+- `content/gblocks/gcanbuild/better-auth-tutorial.mdx` — verify/replace video ID, expand body
+
+### Acceptance criteria for Step 3.1
+
+- [ ] Both MDX files have real YouTube video IDs (not `dQw4w9WgXcQ`).
+- [ ] Both MDX bodies are 500–800 words with section walkthroughs.
+- [ ] Both files validate against `gBlockSchema` (`pnpm -w test` still green).
+- [ ] `pnpm --filter @gblockparty/web build` succeeds.
+
+### Ship-one-step handoff contract (Step 3.1 → Step 3.2)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 3.1**. Do not continue into Step 3.2.
+2. Ask the user for real YouTube video IDs before editing content.
+3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
+4. Mark Step 3.1 done in `tasks/todo.md`.
+5. Append a record to `tasks/history.md`.
+6. Commit and push (push is a local no-op).
+7. Write Step 3.2's plan into `tasks/todo.md`.
+8. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
+9. Start the approval UI for Step 3.2 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
+
 ---
 
 ## Follow-ups (deferred; revisit in later phases)
