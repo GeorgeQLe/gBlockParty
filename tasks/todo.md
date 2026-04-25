@@ -8,7 +8,7 @@
 
 - [x] Step 2.1: Seed development fixture gBlocks
 - [x] Step 2.2: Shared UI primitives (GBlockCard, TypeBadge, CollectionBadge)
-- [ ] Step 2.3: Home page components (FeaturedRail, FirehoseFeed, ShortsRail)
+- [x] Step 2.3: Home page components (FeaturedRail, FirehoseFeed, ShortsRail)
 - [ ] Step 2.4: Home page route
 - [ ] Step 2.5: Collection page route
 - [ ] Step 2.6: gBlock detail page route with MDX rendering
@@ -120,94 +120,56 @@
 - [ ] All phase tests pass.
 - [ ] No regressions in previous phase tests.
 
-## Next step: Phase 2, Step 2.3 — Home Page Components (FeaturedRail, FirehoseFeed, ShortsRail)
+## Next step: Phase 2, Step 2.4 — Home Page Route
 
 ### Context
 
-Step 2.2 is complete — 3 shared UI primitives (`TypeBadge`, `CollectionBadge`, `GBlockCard`) implemented as server components under `apps/web/src/components/`. All use Tailwind utilities against the Step 1.5 design tokens. `GBlockCard` composes both badges, links to `/<collection>/<slug>`, shows hero image or type-colored placeholder, formatted date, and CSS-only brutal hover effect. Tests 19/19 green, typecheck clean, build green.
+Step 2.3 is complete — 3 home-page section components (`FeaturedRail`, `FirehoseFeed`, `ShortsRail`) implemented as server components under `apps/web/src/components/`. All compose `GBlockCard` from Step 2.2. `FeaturedRail` filters `featured: true`, sorts by `publishedAt` desc, limits to 3. `FirehoseFeed` renders all blocks reverse-chron with link-based type/collection filter chips. `ShortsRail` filters to clip-type only with horizontal scroll, returns `null` when empty. Tests 19/19 green, typecheck clean, build green.
 
 ### Ship status going in
 
-- **Shipped last session:** Step 2.2 — TypeBadge, CollectionBadge, GBlockCard components.
+- **Shipped last session:** Step 2.3 — FeaturedRail, FirehoseFeed, ShortsRail components.
 - **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (4 static pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Creates 3 home-page section components that compose the Step 2.2 primitives. These are the building blocks for the home page route (Step 2.4).
+Wire the home page route (`apps/web/src/app/page.tsx`) to load all gBlocks via `loadAllGBlocks()` and render the 3 section components from Step 2.3. This is the first route that renders real content.
 
-### Files to create
+### Files to modify
 
-- **`apps/web/src/components/FeaturedRail.tsx`** — Horizontal row of 1–3 `GBlockCard`s for featured gBlocks.
-- **`apps/web/src/components/FirehoseFeed.tsx`** — Reverse-chron list of all gBlocks with filter chips.
-- **`apps/web/src/components/ShortsRail.tsx`** — Horizontal scroll of clip-type gBlocks.
-
-### Component specs
-
-**FeaturedRail**
-- Props: `blocks: GBlock[]` (pre-filtered by caller, or filters internally by `featured: true`).
-- Filters `featured: true`, sorts by `publishedAt` desc, takes first 3.
-- Renders a horizontal row of `GBlockCard`s (grid or flex, 1–3 cards).
-- Graceful empty state: renders nothing (or a subtle placeholder) when no featured blocks exist.
-- Needs `collectionName` for each block — either accept a map prop or derive from the block's `collection` field.
-
-**FirehoseFeed**
-- Props: `blocks: GBlock[]` (all gBlocks).
-- Sorts by `publishedAt` desc (reverse-chron).
-- Renders a vertical list/grid of `GBlockCard`s.
-- Type and collection filter chips — since this is a server component, filter chips can use URL search params or be purely visual labels for now (client interactivity deferred to later if needed; CSS-only or link-based filtering preferred).
-- Graceful empty state.
-
-**ShortsRail**
-- Props: `blocks: GBlock[]` (pre-filtered or filters internally to `type === "clip"`).
-- Filters to clip-type only.
-- Horizontal scrollable row of `GBlockCard`s (CSS `overflow-x-auto`).
-- Hidden entirely when no clips exist (return `null`).
+- **`apps/web/src/app/page.tsx`** — Replace placeholder content with server component that loads gBlocks and renders `FeaturedRail`, `FirehoseFeed`, `ShortsRail`.
 
 ### Approach & key decisions
 
-- **Server components only.** No `"use client"`. Filter chips in FirehoseFeed should be link-based (`<a href="/?type=tutorial">`) or purely decorative labels — no client-side state. If truly interactive filtering is needed, it can be added later with a client wrapper.
-- **Import types from `@gblockparty/gblock-schema`.** Use `GBlock` type for props.
-- **Compose `GBlockCard`** from Step 2.2. Pass `collectionName` — for now, use the raw `collection` slug as display name (the home page route in Step 2.4 can look up proper names from collection YAML).
-- **No tests this step.** Tests-after strategy — regression tests come in Step 2.10.
-- **Design tokens.** Continue using Tailwind utilities against `@theme` tokens. Section headings use `font-display`, `text-xl`/`text-2xl`, `font-bold`.
+- **Server component.** `page.tsx` calls `loadAllGBlocks()` at the top level (no `"use client"`).
+- **Search params for filtering.** `FirehoseFeed` accepts `activeType` and `activeCollection` — wire these from `searchParams` in the page component.
+- **Collection name lookup.** Load collection YAMLs via `loadCollection()` to map `collection` slug → display name for `GBlockCard`'s `collectionName` prop, or pass collection names as a map to the section components.
+- **Graceful empty state.** When no gBlocks exist, render a friendly empty-state message instead of blank sections.
+- **SEO metadata.** Add basic `<title>` and `<meta name="description">` via Next.js `metadata` export.
 
-### Patterns established in Step 2.2
+### Acceptance criteria for Step 2.4
 
-- `GBlockCard` accepts `{ block: GBlock; collectionName?: string }` — pass the block directly.
-- `TypeBadge` and `CollectionBadge` are composed inside `GBlockCard` — no need to use them separately in these components.
-- Color mapping for type-colored placeholders is inside `GBlockCard` — these rail/feed components don't need to duplicate it.
-- Hover effect is handled by `GBlockCard` — no additional hover logic needed.
-
-### Acceptance criteria for Step 2.3
-
-- [ ] All 3 component files exist and export named components.
-- [ ] `FeaturedRail` filters by `featured: true`, sorts by `publishedAt` desc, limits to 3, renders `GBlockCard`s.
-- [ ] `FirehoseFeed` renders all blocks reverse-chron with `GBlockCard`s. Has filter chip UI (even if non-interactive).
-- [ ] `ShortsRail` filters to clips only, renders horizontal scroll, returns `null` when empty.
+- [ ] Home page renders `FeaturedRail`, `FirehoseFeed`, `ShortsRail` with real fixture data.
+- [ ] Filter chips in `FirehoseFeed` work via URL search params (`?type=tutorial`, `?collection=gcanbuild`).
+- [ ] Empty state renders gracefully when no gBlocks exist.
 - [ ] `pnpm -w test` still 19/19 green.
 - [ ] `pnpm -w -r typecheck` clean.
 - [ ] `pnpm --filter @gblockparty/web build` still succeeds.
 
-### Execution Profile
-**Parallel mode:** implementation-safe
-**Integration owner:** main agent
-**Conflict risk:** low
-**Review gates:** correctness, tests, UX
-
-### Ship-one-step handoff contract (Step 2.3 → 2.4)
+### Ship-one-step handoff contract (Step 2.4 → 2.5)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 2.3**. Do not continue into 2.4.
+1. Implement **only Step 2.4**. Do not continue into 2.5.
 2. Verify typecheck and build pass.
-3. Mark Step 2.3 done in `tasks/todo.md`.
+3. Mark Step 2.4 done in `tasks/todo.md`.
 4. Append a record to `tasks/history.md`.
 5. Commit and push (push is a local no-op).
-6. Write Step 2.4's plan (Home page route) into `tasks/todo.md`.
+6. Write Step 2.5's plan (Collection page route) into `tasks/todo.md`.
 7. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-8. Enter plan mode for Step 2.4 approval (`EnterPlanMode` → brief pass-through plan → `ExitPlanMode`). Stop before implementing.
+8. Enter plan mode for Step 2.5 approval (`EnterPlanMode` → brief pass-through plan → `ExitPlanMode`). Stop before implementing.
 
 ---
 
