@@ -11,7 +11,7 @@
 - [x] Step 2.3: Home page components (FeaturedRail, FirehoseFeed, ShortsRail)
 - [x] Step 2.4: Home page route
 - [x] Step 2.5: Collection page route
-- [ ] Step 2.6: gBlock detail page route with MDX rendering
+- [x] Step 2.6: gBlock detail page route with MDX rendering
 - [ ] Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>`
 - [ ] Step 2.8: PaywallCard component
 - [ ] Step 2.9: Build-time slug uniqueness + SEO metadata polish
@@ -120,63 +120,57 @@
 - [ ] All phase tests pass.
 - [ ] No regressions in previous phase tests.
 
-## Next step: Phase 2, Step 2.6 — gBlock Detail Page Route with MDX Rendering
+## Next step: Phase 2, Step 2.7 — Redirect `/g/<slug>` + Stub `/t/<tag>`
 
 ### Context
 
-Step 2.5 is complete — collection page route (`apps/web/src/app/[collection]/page.tsx`) renders collection hero + filtered gBlock grid with type filter chips. `generateStaticParams()` derives slugs from `content/collections/*.yaml`. Build generates static pages for all 4 collections. Tests 19/19 green, typecheck clean, build green.
+Step 2.6 is complete — gBlock detail pages render at `/<collection>/<slug>` with type-appropriate headers (YouTube iframe for video types, hero image + reading time for text types, linked card for code types) and MDX body via `next-mdx-remote`. MDX component stubs upgraded (YouTube iframe, Callout brutalist styling, RepoCard brutalist styling). Build generates 13 pages (home + 4 collections + 5 gBlock details + not-found). Tests 19/19 green, typecheck clean, build green.
 
 ### Ship status going in
 
-- **Shipped last session:** Step 2.5 — Collection page route with hero, grid, type filters.
-- **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (8 pages: home + 4 collections + not-found).
+- **Shipped last session:** Step 2.6 — gBlock detail page route with MDX rendering.
+- **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Create the gBlock detail page route (`apps/web/src/app/[collection]/[slug]/page.tsx`) so that `/<collection>/<slug>` renders a full gBlock page with type-appropriate header and MDX body rendered via `next-mdx-remote`.
+Create two routes:
+1. **`/g/<slug>`** — Route handler that looks up the gBlock by slug, returns 301 redirect to `/<collection>/<slug>`. Returns 404 if slug not found.
+2. **`/t/<tag>`** — Placeholder page (reserved URL pattern, renders "Tag pages coming soon" or similar stub).
 
-### Files to create/modify
+### Files to create
 
-- **`apps/web/src/app/[collection]/[slug]/page.tsx`** — Detail page route.
-- **`apps/web/src/components/mdx/*.tsx`** — May upgrade stubs to render real content (YouTube iframe, Callout styling, RepoCard links, AudioPlayer placeholder).
+- **`apps/web/src/app/g/[slug]/route.ts`** — Route handler for slug redirect.
+- **`apps/web/src/app/t/[tag]/page.tsx`** — Stub tag page.
 
 ### Approach & key decisions
 
-- **Server component.** No `"use client"`.
-- **`generateStaticParams()`** returns all `{ collection, slug }` pairs from `loadAllGBlocks()`.
-- **`generateMetadata()`** — title from `block.title`, description from `block.description` (or first ~160 chars of body).
-- **Type-specific header:**
-  - `tutorial`/`essay` → hero image + title + reading time estimate
-  - `episode`/`stream`/`clip` → YouTube embed via `<iframe>` (from `videoUrl`) + title
-  - `repo`/`tool`/`demo` → linked card with `repoUrl`/URL + title
-- **MDX body** rendered via `next-mdx-remote`'s `compileMDX` or `MDXRemote`. Pass custom components (`YouTube`, `Callout`, `RepoCard`, `AudioPlayer`) from `apps/web/src/components/mdx/`.
-- **Content resolution** — use the same `resolveContentRoot()` pattern from Step 2.5 for build-time path resolution.
-- **Back link** — breadcrumb or link back to `/<collection>`.
+- **`/g/<slug>` route handler:** Use Next.js route handler (`GET` export). Load all gBlocks, find by slug, redirect with 301 to `/<collection>/<slug>`. Return `NextResponse` with 404 status if not found.
+- **`/t/<tag>` stub page:** Simple server component rendering a placeholder message. `generateStaticParams()` can return empty array or derive tags from all gBlocks. `generateMetadata()` sets title from tag name.
+- **Content resolution:** Reuse `resolveContentRoot()` pattern.
+- **No `"use client"`** on either route.
 
-### Acceptance criteria for Step 2.6
+### Acceptance criteria for Step 2.7
 
-- [ ] `/<collection>/<slug>` renders for every fixture gBlock (5 total).
-- [ ] Type-appropriate header: video embed for episodes/clips, hero image for tutorials.
-- [ ] MDX body renders with custom components (YouTube, Callout, RepoCard).
-- [ ] `generateStaticParams()` returns all `{ collection, slug }` pairs.
-- [ ] `generateMetadata()` sets per-gBlock title and description.
+- [ ] `/g/<slug>` returns 301 redirect to `/<collection>/<slug>` for every fixture gBlock slug.
+- [ ] `/g/<nonexistent>` returns 404.
+- [ ] `/t/<tag>` renders a stub page.
 - [ ] `pnpm -w test` still 19/19 green.
 - [ ] `pnpm -w -r typecheck` clean.
-- [ ] `pnpm --filter @gblockparty/web build` succeeds with all gBlock detail pages generated.
+- [ ] `pnpm --filter @gblockparty/web build` succeeds.
 
-### Ship-one-step handoff contract (Step 2.6 → 2.7)
+### Ship-one-step handoff contract (Step 2.7 → 2.8)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 2.6**. Do not continue into 2.7.
+1. Implement **only Step 2.7**. Do not continue into 2.8.
 2. Verify typecheck and build pass.
-3. Mark Step 2.6 done in `tasks/todo.md`.
+3. Mark Step 2.7 done in `tasks/todo.md`.
 4. Append a record to `tasks/history.md`.
 5. Commit and push (push is a local no-op).
-6. Write Step 2.7's plan into `tasks/todo.md`.
-7. Enter plan mode for Step 2.7 approval. Stop before implementing.
+6. Write Step 2.8's plan into `tasks/todo.md`.
+7. Enter plan mode for Step 2.8 approval. Stop before implementing.
 
 ---
 
