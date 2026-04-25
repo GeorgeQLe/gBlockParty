@@ -10,7 +10,7 @@
 - [x] Step 2.2: Shared UI primitives (GBlockCard, TypeBadge, CollectionBadge)
 - [x] Step 2.3: Home page components (FeaturedRail, FirehoseFeed, ShortsRail)
 - [x] Step 2.4: Home page route
-- [ ] Step 2.5: Collection page route
+- [x] Step 2.5: Collection page route
 - [ ] Step 2.6: gBlock detail page route with MDX rendering
 - [ ] Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>`
 - [ ] Step 2.8: PaywallCard component
@@ -120,64 +120,63 @@
 - [ ] All phase tests pass.
 - [ ] No regressions in previous phase tests.
 
-## Next step: Phase 2, Step 2.5 — Collection Page Route
+## Next step: Phase 2, Step 2.6 — gBlock Detail Page Route with MDX Rendering
 
 ### Context
 
-Step 2.4 is complete — home page route (`apps/web/src/app/page.tsx`) wired as a server component that loads all gBlocks via `loadAllGBlocks()` and renders `FeaturedRail` → `ShortsRail` → `FirehoseFeed`. Search params (`?type=`, `?collection=`) wired to `FirehoseFeed` for filtering. Graceful empty state. SEO metadata exported. Tests 19/19 green, typecheck clean, build green.
+Step 2.5 is complete — collection page route (`apps/web/src/app/[collection]/page.tsx`) renders collection hero + filtered gBlock grid with type filter chips. `generateStaticParams()` derives slugs from `content/collections/*.yaml`. Build generates static pages for all 4 collections. Tests 19/19 green, typecheck clean, build green.
 
 ### Ship status going in
 
-- **Shipped last session:** Step 2.4 — Home page route with real content.
-- **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green.
+- **Shipped last session:** Step 2.5 — Collection page route with hero, grid, type filters.
+- **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (8 pages: home + 4 collections + not-found).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Create the collection page route (`apps/web/src/app/[collection]/page.tsx`) so that `/<collection>` (e.g. `/gcanbuild`, `/weekly-sota`, `/weekly-g`) renders a collection-specific view: collection hero (name + description from YAML), gBlock grid filtered to that collection, with type/date filters.
+Create the gBlock detail page route (`apps/web/src/app/[collection]/[slug]/page.tsx`) so that `/<collection>/<slug>` renders a full gBlock page with type-appropriate header and MDX body rendered via `next-mdx-remote`.
 
-### Files to create
+### Files to create/modify
 
-- **`apps/web/src/app/[collection]/page.tsx`** — Dynamic route for collection pages.
+- **`apps/web/src/app/[collection]/[slug]/page.tsx`** — Detail page route.
+- **`apps/web/src/components/mdx/*.tsx`** — May upgrade stubs to render real content (YouTube iframe, Callout styling, RepoCard links, AudioPlayer placeholder).
 
 ### Approach & key decisions
 
 - **Server component.** No `"use client"`.
-- **`generateStaticParams()`** returns the 3 active collections: `gcanbuild`, `weekly-sota`, `weekly-g`. Reads collection YAML directory to derive slugs dynamically (exclude `boston-founder-radio` which is scheduled for Phase 4 decommission — or include it and let it render with 0 gBlocks; either approach is fine).
-- **`loadCollection(slug, { collectionsRoot })`** to get collection metadata (name, description) for the hero section.
-- **`loadAllGBlocks({ contentRoot })`** filtered by `block.collection === params.collection` for the gBlock grid.
-- **Search params** for type filtering within the collection (optional — `?type=tutorial`).
-- **`generateMetadata()`** for per-collection SEO: `<title>` = collection name, `<meta description>` = collection description from YAML.
-- **Graceful empty state** when a collection has no gBlocks — show collection hero + friendly message.
-- **Collection hero** — display collection name (large heading) + description paragraph with playful-brutalist styling.
-- **gBlock grid** — reuse `GBlockCard` from Step 2.2 in a responsive grid. Can optionally reuse `FirehoseFeed` if it fits, or build a simpler grid since collection filtering is already done.
+- **`generateStaticParams()`** returns all `{ collection, slug }` pairs from `loadAllGBlocks()`.
+- **`generateMetadata()`** — title from `block.title`, description from `block.description` (or first ~160 chars of body).
+- **Type-specific header:**
+  - `tutorial`/`essay` → hero image + title + reading time estimate
+  - `episode`/`stream`/`clip` → YouTube embed via `<iframe>` (from `videoUrl`) + title
+  - `repo`/`tool`/`demo` → linked card with `repoUrl`/URL + title
+- **MDX body** rendered via `next-mdx-remote`'s `compileMDX` or `MDXRemote`. Pass custom components (`YouTube`, `Callout`, `RepoCard`, `AudioPlayer`) from `apps/web/src/components/mdx/`.
+- **Content resolution** — use the same `resolveContentRoot()` pattern from Step 2.5 for build-time path resolution.
+- **Back link** — breadcrumb or link back to `/<collection>`.
 
-### Acceptance criteria for Step 2.5
+### Acceptance criteria for Step 2.6
 
-- [ ] `/gcanbuild`, `/weekly-sota`, `/weekly-g` each render with collection hero and gBlock grid.
-- [ ] Collection name and description sourced from YAML files.
-- [ ] gBlocks filtered to the current collection only.
-- [ ] Type filter via search params works within collection view.
-- [ ] Graceful empty state when a collection has zero gBlocks.
-- [ ] `generateStaticParams()` returns all 3 active collections.
-- [ ] `generateMetadata()` sets per-collection title and description.
+- [ ] `/<collection>/<slug>` renders for every fixture gBlock (5 total).
+- [ ] Type-appropriate header: video embed for episodes/clips, hero image for tutorials.
+- [ ] MDX body renders with custom components (YouTube, Callout, RepoCard).
+- [ ] `generateStaticParams()` returns all `{ collection, slug }` pairs.
+- [ ] `generateMetadata()` sets per-gBlock title and description.
 - [ ] `pnpm -w test` still 19/19 green.
 - [ ] `pnpm -w -r typecheck` clean.
-- [ ] `pnpm --filter @gblockparty/web build` still succeeds.
+- [ ] `pnpm --filter @gblockparty/web build` succeeds with all gBlock detail pages generated.
 
-### Ship-one-step handoff contract (Step 2.5 → 2.6)
+### Ship-one-step handoff contract (Step 2.6 → 2.7)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 2.5**. Do not continue into 2.6.
+1. Implement **only Step 2.6**. Do not continue into 2.7.
 2. Verify typecheck and build pass.
-3. Mark Step 2.5 done in `tasks/todo.md`.
+3. Mark Step 2.6 done in `tasks/todo.md`.
 4. Append a record to `tasks/history.md`.
 5. Commit and push (push is a local no-op).
-6. Write Step 2.6's plan (gBlock detail page route with MDX rendering) into `tasks/todo.md`.
-7. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-8. Enter plan mode for Step 2.6 approval (`EnterPlanMode` → brief pass-through plan → `ExitPlanMode`). Stop before implementing.
+6. Write Step 2.7's plan into `tasks/todo.md`.
+7. Enter plan mode for Step 2.7 approval. Stop before implementing.
 
 ---
 

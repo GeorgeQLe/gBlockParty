@@ -1,6 +1,13 @@
+import fs from "node:fs";
 import path from "path";
 import type { Metadata } from "next";
 import { loadAllGBlocks } from "@/lib/content";
+
+function resolveContentRoot(): string {
+  const candidate = path.join(process.cwd(), "content");
+  if (fs.existsSync(candidate)) return candidate;
+  return path.resolve(process.cwd(), "../../content");
+}
 import { FeaturedRail } from "@/components/FeaturedRail";
 import { ShortsRail } from "@/components/ShortsRail";
 import { FirehoseFeed } from "@/components/FirehoseFeed";
@@ -18,7 +25,7 @@ export default async function HomePage({
 }) {
   const { type, collection } = await searchParams;
   const blocks = loadAllGBlocks({
-    contentRoot: path.join(process.cwd(), "content"),
+    contentRoot: resolveContentRoot(),
   });
 
   if (blocks.length === 0) {
