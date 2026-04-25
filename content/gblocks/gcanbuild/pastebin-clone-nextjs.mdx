@@ -1,0 +1,51 @@
+---
+slug: pastebin-clone-nextjs
+type: tutorial
+collection: gcanbuild
+title: "Build a Pastebin Clone with Next.js, Neon & Drizzle"
+summary: "Full-stack pastebin from scratch — syntax highlighting, expiring pastes, and a share URL scheme that actually works."
+publishedAt: "2026-04-10T14:00:00.000Z"
+tags: [nextjs, neon, drizzle, full-stack]
+featured: true
+videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+heroImage: "/images/gblocks/pastebin-clone-nextjs.png"
+---
+
+<YouTube id="dQw4w9WgXcQ" title="Build a Pastebin Clone with Next.js" />
+
+## What we're building
+
+A fully functional pastebin with syntax highlighting, optional expiration, and short shareable URLs — deployed on Vercel with a Neon Postgres backend.
+
+<Callout tone="info">
+This tutorial assumes you have Node 20+ and a free Neon account. We'll set up everything else from scratch.
+</Callout>
+
+## Stack
+
+- **Next.js 15** — App Router, Server Actions
+- **Neon** — Serverless Postgres
+- **Drizzle ORM** — Type-safe queries
+- **Shiki** — Syntax highlighting at build time
+
+<RepoCard url="https://github.com/gblockparty/pastebin-clone" name="pastebin-clone" description="Starter repo for the Pastebin Clone tutorial" />
+
+## Step 1 — Project setup
+
+Scaffold the Next.js app and wire up Drizzle with the Neon driver.
+
+## Step 2 — Schema and migrations
+
+Define the `pastes` table with columns for content, language, expiration, and a nanoid slug.
+
+## Step 3 — Create paste flow
+
+Server Action that validates input, inserts a row, and redirects to the paste URL.
+
+## Step 4 — Paste detail page
+
+Dynamic route that fetches by slug, highlights with Shiki, and handles 404 / expired states.
+
+## Step 5 — Deploy
+
+Push to Vercel, connect Neon, and verify the production build.

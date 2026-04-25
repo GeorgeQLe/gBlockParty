@@ -1,0 +1,51 @@
+---
+slug: better-auth-tutorial
+type: tutorial
+collection: gcanbuild
+title: "Better Auth — Drop-in Authentication for Next.js"
+summary: "Set up email/password and OAuth login in under 30 minutes with Better Auth, Drizzle, and Neon."
+publishedAt: "2026-04-17T14:00:00.000Z"
+tags: [better-auth, nextjs, auth, drizzle]
+videoUrl: "https://www.youtube.com/watch?v=L8_98i_bMMA"
+readingTimeMinutes: 18
+---
+
+<YouTube id="L8_98i_bMMA" title="Better Auth — Drop-in Auth for Next.js" />
+
+## Why Better Auth?
+
+Auth libraries come and go. Better Auth stands out because it owns the session layer without owning your database — you keep Drizzle migrations, it keeps the cookie jar.
+
+<Callout tone="warn">
+Better Auth is pre-1.0. Pin your version and check the changelog before upgrading in production.
+</Callout>
+
+## What we'll cover
+
+1. Install and configure Better Auth with the Drizzle adapter
+2. Email/password signup and login
+3. GitHub OAuth provider
+4. Protecting server actions and API routes
+5. Session management and sign-out
+
+<RepoCard url="https://github.com/gblockparty/better-auth-starter" name="better-auth-starter" description="Companion repo for the Better Auth tutorial" />
+
+## Step 1 — Install dependencies
+
+Add `better-auth` and the Drizzle adapter to an existing Next.js project.
+
+## Step 2 — Auth configuration
+
+Create the auth config with email/password enabled and GitHub OAuth wired up.
+
+## Step 3 — Sign-up and login pages
+
+Build forms that call the Better Auth client SDK and handle errors.
+
+## Step 4 — Protect routes
+
+Use the session helper in server components and middleware to gate access.
+
+## Step 5 — Deploy and verify
+
+Test the full flow end-to-end on Vercel.

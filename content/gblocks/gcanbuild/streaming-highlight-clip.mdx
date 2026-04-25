@@ -1,0 +1,19 @@
+---
+slug: streaming-highlight-clip
+type: clip
+collection: gcanbuild
+title: "60-Second Drizzle Migration Trick"
+summary: "Quick tip: use drizzle-kit push for dev and drizzle-kit generate + migrate for prod. Never mix them."
+publishedAt: "2026-04-12T12:00:00.000Z"
+tags: [drizzle, quick-tip, shorts]
+videoUrl: "https://www.youtube.com/shorts/dQw4w9WgXcQ"
+parentSlug: pastebin-clone-nextjs
+---
+
+<Callout tone="warn">
+This is a clip extracted from the Pastebin Clone tutorial. Watch the full build for complete context.
+</Callout>
+
+The trick: use `drizzle-kit push` during development for instant schema sync, then switch to `drizzle-kit generate` + `drizzle-kit migrate` when you're ready to deploy.
+
+Mixing the two workflows will desync your migration history. Pick one per environment and stick with it.
