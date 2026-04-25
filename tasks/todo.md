@@ -6,7 +6,7 @@
 
 ## Priority Task Queue
 
-- [ ] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
+- [x] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
 - [ ] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
 - [ ] Step 3.3: Author Weekly SOTA canary MDX
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX
@@ -108,58 +108,57 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.1 — Upgrade GCanBuild fixture tutorials to production canary content
+## Next step: Phase 3, Step 3.2 — Add third GCanBuild canary (Full-Stack Web App tutorial)
 
 ### Context
 
-Phase 2 is complete (28/28 tests, typecheck clean, 13-page build). Phase 3 has been decomposed into 10 steps. Step 3.1 is the first — upgrading the 2 existing GCanBuild fixture tutorials from placeholder content to production-quality canaries.
+Step 3.1 complete — both existing GCanBuild tutorials upgraded to production canaries with real YouTube video IDs (`NzfKEbgvA0A` for Pastebin Clone, `R3r27ldM-TQ` for Better Auth) and expanded to ~500–800-word walkthroughs. 28/28 tests green, build green (13 pages).
 
 ### Ship status going in
 
-- **Shipped last session:** Phase 2 complete. Phase 3 decomposed.
+- **Shipped last session:** Step 3.1 — upgraded 2 GCanBuild fixture tutorials to production canaries.
 - **Test status:** `pnpm -w test` 28/28 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Upgrade `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx` and `content/gblocks/gcanbuild/better-auth-tutorial.mdx` from thin development fixtures to production-quality canary content.
+Create a new third GCanBuild canary tutorial for the "Full Stack Web App Tutorial" (Next.js + Better Auth + Neon + Drizzle + tRPC + Tanstack Query — the channel's top performer at ~10.2k views).
 
-**Key changes per file:**
-1. **Replace placeholder video IDs** with real YouTube video IDs from George's channel. The `pastebin-clone-nextjs.mdx` currently uses `dQw4w9WgXcQ` (a rickroll placeholder). The `better-auth-tutorial.mdx` has `L8_98i_bMMA` — verify or replace.
-2. **Expand MDX bodies** from ~200-word step outlines to ~500–800-word production walkthroughs with section summaries, code snippets, and `<Callout>` tips.
-3. **Update `publishedAt`** to match real video publish dates if the user provides them.
-4. **Keep existing frontmatter structure** — `slug`, `type`, `collection`, `tags`, `featured`, `heroImage` fields stay the same.
+**Key actions:**
+1. **Ask the user** for the real YouTube video ID and confirm the video title.
+2. **Create** `content/gblocks/gcanbuild/full-stack-web-app.mdx` with proper frontmatter (`type: tutorial`, `collection: gcanbuild`, `featured: false`, real `videoUrl`, tags, heroImage placeholder).
+3. **Write** MDX body: `<YouTube>` embed + section walkthrough + code blocks + `<RepoCard>` if a companion repo exists. Target ~500–800 words.
+4. **Validate** with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
 
 ### Manual prerequisite
 
-**Before implementing:** Ask the user to provide the real YouTube video IDs for these 2 tutorials. If the user isn't available or wants to defer, skip to Step 3.5 (production config) which has no manual blockers.
+**Before implementing:** Ask the user to provide the real YouTube video ID for the Full-Stack Web App tutorial and confirm the title.
 
-### Files to modify
+### Files to create/modify
 
-- `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx` — replace `dQw4w9WgXcQ` video ID, expand body
-- `content/gblocks/gcanbuild/better-auth-tutorial.mdx` — verify/replace video ID, expand body
+- Create `content/gblocks/gcanbuild/full-stack-web-app.mdx`
 
-### Acceptance criteria for Step 3.1
+### Acceptance criteria for Step 3.2
 
-- [ ] Both MDX files have real YouTube video IDs (not `dQw4w9WgXcQ`).
-- [ ] Both MDX bodies are 500–800 words with section walkthroughs.
-- [ ] Both files validate against `gBlockSchema` (`pnpm -w test` still green).
-- [ ] `pnpm --filter @gblockparty/web build` succeeds.
+- [ ] `full-stack-web-app.mdx` exists with real YouTube video ID.
+- [ ] MDX body is 500–800 words with section walkthroughs.
+- [ ] File validates against `gBlockSchema` (`pnpm -w test` still green).
+- [ ] `pnpm --filter @gblockparty/web build` succeeds (page count increases to 14).
 
-### Ship-one-step handoff contract (Step 3.1 → Step 3.2)
+### Ship-one-step handoff contract (Step 3.2 → Step 3.3)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 3.1**. Do not continue into Step 3.2.
-2. Ask the user for real YouTube video IDs before editing content.
+1. Implement **only Step 3.2**. Do not continue into Step 3.3.
+2. Ask the user for the real YouTube video ID before creating content.
 3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
-4. Mark Step 3.1 done in `tasks/todo.md`.
+4. Mark Step 3.2 done in `tasks/todo.md`.
 5. Append a record to `tasks/history.md`.
 6. Commit and push (push is a local no-op).
-7. Write Step 3.2's plan into `tasks/todo.md`.
+7. Write Step 3.3's plan into `tasks/todo.md`.
 8. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-9. Start the approval UI for Step 3.2 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
+9. Start the approval UI for Step 3.3 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
 
 ---
 

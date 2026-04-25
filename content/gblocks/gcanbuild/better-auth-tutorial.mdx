@@ -2,19 +2,19 @@
 slug: better-auth-tutorial
 type: tutorial
 collection: gcanbuild
-title: "Better Auth — Drop-in Authentication for Next.js"
-summary: "Set up email/password and OAuth login in under 30 minutes with Better Auth, Drizzle, and Neon."
+title: "Better Auth — Step-by-Step OAuth Tutorial with Next.js, Drizzle & Neon"
+summary: "Set up GitHub and Google OAuth login from scratch using Better Auth, Shadcn/ui, Drizzle ORM, and Neon Postgres."
 publishedAt: "2026-04-17T14:00:00.000Z"
-tags: [better-auth, nextjs, auth, drizzle]
-videoUrl: "https://www.youtube.com/watch?v=L8_98i_bMMA"
+tags: [better-auth, nextjs, auth, drizzle, neon, shadcn, oauth]
+videoUrl: "https://www.youtube.com/watch?v=R3r27ldM-TQ"
 readingTimeMinutes: 18
 ---
 
-<YouTube id="L8_98i_bMMA" title="Better Auth — Drop-in Auth for Next.js" />
+<YouTube id="R3r27ldM-TQ" title="Better Auth Step-by-Step Tutorial with Next.js, Drizzle & Neon" />
 
 ## Why Better Auth?
 
-Auth libraries come and go. Better Auth stands out because it owns the session layer without owning your database — you keep Drizzle migrations, it keeps the cookie jar.
+Auth libraries come and go. Better Auth stands out because it owns the session layer without owning your database — you keep Drizzle migrations, your Neon Postgres instance stays the source of truth, and Better Auth handles the cookie jar. This tutorial is part of a broader [walkthrough playlist](https://www.youtube.com/playlist?list=PLPVbbvcS8ysh9YQCt0BnoLHY5gAWcJX7c) that covers the full boilerplate setup including tRPC and Tanstack Query.
 
 <Callout tone="warn">
 Better Auth is pre-1.0. Pin your version and check the changelog before upgrading in production.
@@ -23,29 +23,45 @@ Better Auth is pre-1.0. Pin your version and check the changelog before upgradin
 ## What we'll cover
 
 1. Install and configure Better Auth with the Drizzle adapter
-2. Email/password signup and login
-3. GitHub OAuth provider
-4. Protecting server actions and API routes
-5. Session management and sign-out
+2. Set up GitHub OAuth credentials
+3. Set up Google OAuth credentials
+4. Build the login page with Shadcn/ui components
+5. Wire up the Drizzle schema for Better Auth's tables
+6. Implement the auth function and session handling
+7. Test login and logout end-to-end
 
-<RepoCard url="https://github.com/gblockparty/better-auth-starter" name="better-auth-starter" description="Companion repo for the Better Auth tutorial" />
+## Step 1 — Install Better Auth (0:32)
 
-## Step 1 — Install dependencies
+Add `better-auth` to an existing Next.js 15 project. Configure the auth instance with your Neon database connection string and enable the social OAuth providers. The core install is a single package — Better Auth ships its own Drizzle adapter so there's no separate plugin to manage.
 
-Add `better-auth` and the Drizzle adapter to an existing Next.js project.
+## Step 2 — GitHub OAuth setup (6:19)
 
-## Step 2 — Auth configuration
+Register a new OAuth app in your GitHub developer settings. You'll need the Client ID and Client Secret. Set the authorization callback URL to your local dev server, then add both values to your `.env` file. Better Auth picks these up automatically from the provider config.
 
-Create the auth config with email/password enabled and GitHub OAuth wired up.
+<Callout tone="info">
+Keep your OAuth callback URLs pointed at `localhost:3000` during development. You'll update them to your production domain when you deploy.
+</Callout>
 
-## Step 3 — Sign-up and login pages
+## Step 3 — Google OAuth setup (11:23)
 
-Build forms that call the Better Auth client SDK and handle errors.
+Head to the Google Cloud Console and create OAuth 2.0 credentials. Configure the consent screen, add the authorized redirect URI, and grab the Client ID and Secret. Google's OAuth setup has a few more screens than GitHub but the flow is the same — credentials go in `.env`, Better Auth reads them from the provider config.
 
-## Step 4 — Protect routes
+## Step 4 — Login page and components (18:10)
 
-Use the session helper in server components and middleware to gate access.
+Build the front-end login page using Shadcn/ui button components. Create sign-in buttons for both GitHub and Google that call Better Auth's client-side `signIn.social()` method. The buttons trigger the OAuth redirect flow — users get sent to the provider, authorize the app, and land back on your callback URL with a session cookie already set.
 
-## Step 5 — Deploy and verify
+## Step 5 — Drizzle schema and Better Auth tables (26:45)
 
-Test the full flow end-to-end on Vercel.
+This is the longest section. Better Auth needs its own tables — `user`, `session`, and `account` — to store OAuth profiles and active sessions. Define these in your Drizzle schema alongside your app's own tables, then run `drizzle-kit push` to sync them to your Neon database. Because everything lives in the same Drizzle schema, you can join auth tables with your app data in a single typesafe query.
+
+<Callout tone="info">
+Better Auth's schema generator can output a Drizzle schema file for you, but defining the tables yourself gives you full control over column types and relations.
+</Callout>
+
+## Step 6 — Auth function implementation (43:52)
+
+Wire up the server-side auth handler that processes OAuth callbacks and manages sessions. Create the API route at `/api/auth/[...all]` that Better Auth uses as its entry point. On the client side, initialize the Better Auth client so components can check session state and trigger sign-in/sign-out flows.
+
+## Step 7 — Login and logout demo (1:02:26)
+
+Test the complete flow: click the GitHub login button, authorize the app, and verify you land back on the app with an active session. Check the Neon dashboard to confirm the user, session, and account rows were created. Then test logout — the session cookie gets cleared and the user is redirected back to the login page. Repeat with Google to verify both providers work independently.

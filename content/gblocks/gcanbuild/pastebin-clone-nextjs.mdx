@@ -2,50 +2,58 @@
 slug: pastebin-clone-nextjs
 type: tutorial
 collection: gcanbuild
-title: "Build a Pastebin Clone with Next.js, Neon & Drizzle"
-summary: "Full-stack pastebin from scratch — syntax highlighting, expiring pastes, and a share URL scheme that actually works."
+title: "Build a Full-Stack Pastebin Clone with Next.js, Drizzle, Neon & tRPC"
+summary: "Beginner-friendly walkthrough building a pastebin clone from scratch — forms, dashboards, auth, and deployment to Vercel."
 publishedAt: "2026-04-10T14:00:00.000Z"
-tags: [nextjs, neon, drizzle, full-stack]
+tags: [nextjs, neon, drizzle, trpc, tanstack-query, better-auth, shadcn, full-stack]
 featured: true
-videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+videoUrl: "https://www.youtube.com/watch?v=NzfKEbgvA0A"
 heroImage: "/images/gblocks/pastebin-clone-nextjs.png"
 ---
 
-<YouTube id="dQw4w9WgXcQ" title="Build a Pastebin Clone with Next.js" />
+<YouTube id="NzfKEbgvA0A" title="Build a Full Stack Pastebin Clone using Next.js, Drizzle, Neon & tRPC" />
 
 ## What we're building
 
-A fully functional pastebin with syntax highlighting, optional expiration, and short shareable URLs — deployed on Vercel with a Neon Postgres backend.
+A fully functional pastebin application where users can sign in, create pastes, view them on a personal dashboard, and share them via URL. This is a beginner-friendly, step-by-step walkthrough covering the full stack — from auth to database to deployment.
 
 <Callout tone="info">
-This tutorial assumes you have Node 20+ and a free Neon account. We'll set up everything else from scratch.
+This tutorial builds on a starting-point repo that has the base Next.js + Shadcn/ui project scaffolded. Grab it from [the starting point repo](https://github.com/GeorgeQLe/walkthrough-starting-point) or follow the [companion setup video](https://youtu.be/5vdooX7g7AE) first.
 </Callout>
 
 ## Stack
 
-- **Next.js 15** — App Router, Server Actions
-- **Neon** — Serverless Postgres
-- **Drizzle ORM** — Type-safe queries
-- **Shiki** — Syntax highlighting at build time
+- **Next.js 15** — App Router for server and client rendering
+- **Better Auth** — Social OAuth with GitHub and Google providers
+- **Neon** — Serverless Postgres database
+- **Drizzle ORM** — Type-safe schema, queries, and migrations
+- **tRPC** — End-to-end typesafe API layer
+- **Tanstack Query** — Data fetching, caching, and prefetching on the client
+- **Shadcn/ui** — Prebuilt UI components for forms and tables
+- **Vercel** — Production deployment
 
-<RepoCard url="https://github.com/gblockparty/pastebin-clone" name="pastebin-clone" description="Starter repo for the Pastebin Clone tutorial" />
+<RepoCard url="https://github.com/GeorgeQLe/walkthrough-starting-point" name="walkthrough-starting-point" description="Starting point repo for the Pastebin Clone tutorial" />
 
-## Step 1 — Project setup
+## Step 1 — Authentication with Better Auth
 
-Scaffold the Next.js app and wire up Drizzle with the Neon driver.
+Set up Better Auth with GitHub and Google OAuth providers. This gives users a login page with social sign-in buttons, session management, and logout functionality. The auth layer uses Drizzle under the hood so all session and account data lives in your own Postgres database — no third-party session stores.
 
-## Step 2 — Schema and migrations
+## Step 2 — Drizzle schema and Neon database
 
-Define the `pastes` table with columns for content, language, expiration, and a nanoid slug.
+Define the Drizzle ORM schema for the `pastes` table, connecting it to the user model that Better Auth manages. Run migrations against a Neon serverless Postgres instance. Drizzle's type-safe schema means your TypeScript types stay in sync with the database automatically.
 
-## Step 3 — Create paste flow
+## Step 3 — tRPC API procedures
 
-Server Action that validates input, inserts a row, and redirects to the paste URL.
+Wire up tRPC with Tanstack Query to create typesafe API procedures for creating and fetching pastes. Mutations handle form submissions while queries power the dashboard. Prefetching on the server means the dashboard loads with data already hydrated — no loading spinners on first paint.
 
-## Step 4 — Paste detail page
+## Step 4 — Forms and dashboard UI
 
-Dynamic route that fetches by slug, highlights with Shiki, and handles 404 / expired states.
+Build the paste creation form using React Hook Form with Shadcn/ui input components. The dashboard uses a Shadcn data table to display all of the current user's pastes with columns for title, creation date, and actions. Authorized access ensures users only see their own pastes.
 
-## Step 5 — Deploy
+<Callout tone="info">
+React Hook Form pairs well with Shadcn's form primitives — you get validation, error messages, and accessible labels with minimal boilerplate.
+</Callout>
 
-Push to Vercel, connect Neon, and verify the production build.
+## Step 5 — Deploy to Vercel
+
+Push the project to GitHub and deploy to Vercel. Connect your Neon database via environment variables, configure the OAuth callback URLs for production, and verify the full flow end-to-end: sign in, create a paste, view the dashboard, and share a paste URL.
