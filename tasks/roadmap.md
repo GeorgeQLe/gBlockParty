@@ -273,24 +273,24 @@ Build the components first (Lane B) as a micro-serial preamble; then Lanes A + C
   - Commands: `pnpm -w test`, `pnpm -w -r typecheck`, `pnpm --filter @gblockparty/web build`
   - Expected: all tests pass (Phase 1 + Phase 2), typecheck clean, production build succeeds with all fixture gBlock pages generated.
 
-### Milestone: Phase 2 UI Surface Ready
+### Milestone: Phase 2 UI Surface Ready ✓
 
-**Acceptance Criteria:** (preserved from roadmap)
-- [ ] `/` renders featured rail + firehose + (empty-state) shorts rail when the repo has any gBlocks authored; empty state is graceful when there are none.
-- [ ] `/<collection>` renders for each of `gcanbuild`, `weekly-sota`, `weekly-g` even with zero or one gBlock seeded.
-- [ ] `/<collection>/<slug>` renders a type-appropriate header: video embed for `episode`/`stream`/`clip`, hero image for `tutorial`/`essay`, linked card for `repo`/`tool`/`demo`.
-- [ ] `/g/<slug>` issues a 301 to the canonical URL and resolves correctly for every authored slug.
-- [ ] `featured: true` pins gBlocks to the featured rail in the order defined (stable sort by `publishedAt` desc within pinned set).
-- [ ] Slug uniqueness enforced at build: duplicate slugs across collections fail the build with a clear error.
-- [ ] `PaywallCard` renders correctly when forced against a fixture `membership: member` gBlock (fixture-only; no real gated content ships).
-- [ ] `pnpm build` in `apps/web` produces a production build with no TS or lint errors.
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests.
+**Acceptance Criteria:**
+- [x] `/` renders featured rail + firehose + (empty-state) shorts rail when the repo has any gBlocks authored; empty state is graceful when there are none.
+- [x] `/<collection>` renders for each of `gcanbuild`, `weekly-sota`, `weekly-g` even with zero or one gBlock seeded.
+- [x] `/<collection>/<slug>` renders a type-appropriate header: video embed for `episode`/`stream`/`clip`, hero image for `tutorial`/`essay`, linked card for `repo`/`tool`/`demo`.
+- [x] `/g/<slug>` issues a 301 to the canonical URL and resolves correctly for every authored slug.
+- [x] `featured: true` pins gBlocks to the featured rail in the order defined (stable sort by `publishedAt` desc within pinned set).
+- [x] Slug uniqueness enforced at build: duplicate slugs across collections fail the build with a clear error.
+- [x] `PaywallCard` renders correctly when forced against a fixture `membership: member` gBlock (fixture-only; no real gated content ships).
+- [x] `pnpm build` in `apps/web` produces a production build with no TS or lint errors.
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests.
 
-**On Completion** (fill in when phase is done):
-- Deviations from plan:
-- Tech debt / follow-ups:
-- Ready for next phase:
+**On Completion:**
+- Deviations from plan: None significant. Zod `superRefine` used at union level instead of per-variant `.refine()` (Zod 3.25 limitation). `resolveContentRoot()` helper added for Turbo CWD handling.
+- Tech debt / follow-ups: `metadataBase` warning in build (cosmetic — no domain configured yet, resolves in Phase 3). `boston-founder-radio.yaml` still present (Phase 4 decommission).
+- Ready for next phase: Yes. 28/28 tests green, typecheck clean, 13-page build. All routes, components, and paywall scaffold in place.
 
 ---
 
@@ -326,6 +326,56 @@ Build the components first (Lane B) as a micro-serial preamble; then Lanes A + C
 **Parallelization:** serial
 
 **Coordination Notes:** Strategic work and deploy steps are sequential by nature (repo → project → domain → DNS → verify). Canary authoring can parallelize across the 5 files, but each is small; the real bottleneck is the manual content-creation tasks. Keep serial to avoid premature deploys before content lands.
+
+> Test strategy: tests-after
+
+### Execution Profile
+**Parallel mode:** serial
+**Integration owner:** main agent
+**Conflict risk:** low
+**Review gates:** correctness, tests
+
+**Subagent lanes:** none
+
+### Implementation
+- Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
+  - Files: modify `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx`, modify `content/gblocks/gcanbuild/better-auth-tutorial.mdx`
+  - Replace placeholder video IDs with real channel video IDs. Expand MDX bodies to production-quality walkthroughs (~500–800 words).
+- Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
+  - Files: create `content/gblocks/gcanbuild/full-stack-web-app.mdx`
+  - New canary for the top-performing Full Stack Web App tutorial (~10.2k views).
+- Step 3.3: Author Weekly SOTA canary MDX
+  - Files: modify `content/gblocks/weekly-sota/sota-ep-001.mdx`
+  - Blocked on manual: user decides SOTA pilot strategy.
+- Step 3.4: Author Weekly G Ep 1 canary MDX
+  - Files: modify `content/gblocks/weekly-g/weekly-g-ep-001.mdx`
+  - Blocked on manual: user records video.
+- Step 3.5: Production build config (metadataBase, env)
+  - Files: modify `apps/web/src/app/layout.tsx`
+  - Set `metadataBase` to `https://gblockparty.com`. Verify clean build.
+- Step 3.6: Create GitHub repo + push
+  - Commands: `gh repo create GeorgeQLe/gblockparty --public --source . --push`
+  - Blocked on manual: `gh` CLI auth.
+- Step 3.7: Create Vercel project + configure domain
+  - Commands: `vercel link`, `vercel domains add gblockparty.com`
+  - Blocked on manual: `vercel` CLI auth.
+- Step 3.8: Verify live deployment + smoke test
+  - Blocked on manual: DNS records at registrar.
+
+### Green
+- Step 3.9: Write regression tests for Phase 3 acceptance criteria
+  - Files: modify `apps/web/src/__tests__/pages.test.ts`
+- Step 3.10: Final verification — all tests, typecheck, build green
+
+### Milestone: Phase 3 Launch Ready
+- [ ] All 5 canary MDX files exist under `content/gblocks/<collection>/<slug>.mdx` and validate against the Phase-1 schema.
+- [ ] `https://gblockparty.com` resolves to the Vercel deploy with a valid TLS cert.
+- [ ] Home page shows featured-rail pins for the `featured: true` canaries and the firehose lists all 5.
+- [ ] Each of the 3 collection pages (`/gcanbuild`, `/weekly-sota`, `/weekly-g`) lists its canary.
+- [ ] Each canary `/<collection>/<slug>` URL renders correctly with type-appropriate header (video embed on SOTA + Weekly G, hero image on GCanBuild tutorials).
+- [ ] `/g/<slug>` short-links for all 5 canaries 301 to canonical URLs.
+- [ ] All phase tests pass.
+- [ ] No regressions in previous phase tests.
 
 **On Completion** (fill in when phase is done):
 - Deviations from plan:

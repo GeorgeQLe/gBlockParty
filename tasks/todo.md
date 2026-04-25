@@ -1,128 +1,112 @@
-# gBlockParty — Phase 2 of 4: UI Surface
+# gBlockParty — Phase 3 of 4: Launch
 
 > Working document for the current phase. Full plan lives in `tasks/roadmap.md`.
 > Spec: `specs/gblockparty-v1.md` · Interview: `specs/gblockparty-v1-interview.md`
-> Generated: 2026-04-24
+> Generated: 2026-04-25
 
 ## Priority Task Queue
 
-- [x] Step 2.1: Seed development fixture gBlocks
-- [x] Step 2.2: Shared UI primitives (GBlockCard, TypeBadge, CollectionBadge)
-- [x] Step 2.3: Home page components (FeaturedRail, FirehoseFeed, ShortsRail)
-- [x] Step 2.4: Home page route
-- [x] Step 2.5: Collection page route
-- [x] Step 2.6: gBlock detail page route with MDX rendering
-- [x] Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>`
-- [x] Step 2.8: PaywallCard component
-- [x] Step 2.9: Build-time slug uniqueness + SEO metadata polish
-- [x] Step 2.10: Write regression tests
-- [x] Step 2.11: Run all tests, typecheck, build — verify green; refactor
+- [ ] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
+- [ ] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
+- [ ] Step 3.3: Author Weekly SOTA canary MDX
+- [ ] Step 3.4: Author Weekly G Ep 1 canary MDX
+- [ ] Step 3.5: Production build config (metadataBase, env)
+- [ ] Step 3.6: Create GitHub repo + push
+- [ ] Step 3.7: Create Vercel project + configure domain
+- [ ] Step 3.8: Verify live deployment + smoke test
+- [ ] Step 3.9: Write regression tests for Phase 3 acceptance criteria
+- [ ] Step 3.10: Final verification — all tests, typecheck, build green
 
-## Phase 2: UI Surface
+## Phase 3: Launch
 
-**Goal**: Render the site. Ship every page type the spec calls for, with the inactive paywall scaffold in place, so that Phase 3 only has to add content and deploy.
+**Goal**: Put gblockparty.com on the internet with real content. This is the launch gate.
 
 **Scope**:
-- App Router routes: `/`, `/<collection>`, `/<collection>/<slug>`, `/g/<slug>` (301), `/t/<tag>` (stub).
-- Components: GBlockCard, FeaturedRail, FirehoseFeed, ShortsRail, TypeBadge, CollectionBadge, PaywallCard.
-- Global slug-uniqueness check at build time.
-- SEO metadata on all pages.
+- Author 5 canary MDX gBlocks:
+  - 3 × GCanBuild tutorials mined from existing top YouTube videos (Better Auth / Full-Stack tutorial / Pastebin Clone). MDX contains: summary, linked `<YouTube>` embed, section-by-section walkthrough synthesized from the video outline, code blocks, tags, `heroImage`, `featured: true` on at least the Pastebin canary.
+  - 1 × Weekly SOTA pilot — either reframe the existing "Sam Altman" commentary as SOTA Ep 1 with fresh show notes, or record a new Ep 1 (user's call at authoring time).
+  - 1 × Weekly G Ep 1 — fresh recording + vlog-style MDX write-up. `featured: true`.
+- Create `GeorgeQLe/gblockparty` GitHub repo (via `gh` CLI) and push `master`.
+- Create Vercel project linked to the repo (via `vercel` CLI).
+- Configure `gblockparty.com` apex domain in Vercel.
+- Add DNS records at the domain registrar to point `gblockparty.com` at Vercel.
+- Verify HTTPS cert issues and the live site renders the 5 canaries.
 
 > Test strategy: tests-after
 
 ### Execution Profile
-**Parallel mode:** implementation-safe
+**Parallel mode:** serial
 **Integration owner:** main agent
 **Conflict risk:** low
-**Review gates:** correctness, tests, UX
+**Review gates:** correctness, tests
 
-**Subagent lanes:**
-- Lane: components
-  - Agent: general-purpose
-  - Role: implementer
-  - Mode: write
-  - Scope: Build all shared presentational components (GBlockCard, TypeBadge, CollectionBadge, FeaturedRail, FirehoseFeed, ShortsRail). Consume design tokens from globals.css. Consume GBlock/Collection types from schema.
-  - Owns: `apps/web/src/components/*.tsx` (excluding `mdx/` and `PaywallCard.tsx`)
-  - Must not edit: `packages/**`, `content/**`, `apps/web/src/app/**`, `apps/web/src/lib/**`, `tasks/**`
-  - Depends on: Step 2.1 (fixture gBlocks for visual dev)
-  - Deliverable: 6 working components with playful-brutalist styling
-- Lane: routes
-  - Agent: general-purpose
-  - Role: implementer
-  - Mode: write
-  - Scope: Build all App Router routes (home, collection, gBlock detail, redirect, tag stub). Wire components to content loader. Add SEO metadata.
-  - Owns: `apps/web/src/app/**` (route files only — layout.tsx, page.tsx, dynamic routes)
-  - Must not edit: `packages/**`, `apps/web/src/components/**`, `tasks/**`
-  - Depends on: components lane (Step 2.2–2.3)
-  - Deliverable: all 5 route patterns functional with content loaded from MDX
-- Lane: paywall
-  - Agent: general-purpose
-  - Role: implementer
-  - Mode: write
-  - Scope: Build PaywallCard component and membership-gating display logic.
-  - Owns: `apps/web/src/components/PaywallCard.tsx`
-  - Must not edit: `packages/**`, `content/**`, `apps/web/src/app/**`, `apps/web/src/lib/**`, `tasks/**`
-  - Depends on: none
-  - Deliverable: PaywallCard component that renders for `membership: member` gBlocks
+**Subagent lanes:** none
 
 ### Implementation
-- Step 2.1: Seed development fixture gBlocks
-  - Files: create `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx`, `content/gblocks/gcanbuild/better-auth-tutorial.mdx`, `content/gblocks/weekly-sota/sota-ep-001.mdx`, `content/gblocks/weekly-g/weekly-g-ep-001.mdx`, `content/gblocks/gcanbuild/streaming-highlight-clip.mdx`
-  - 5 fixture gBlocks exercising 3 types across all 3 collections: 2 tutorials (gcanbuild, 1 with `featured: true`), 1 episode (weekly-sota, `videoUrl`), 1 episode (weekly-g, `featured: true`), 1 clip (gcanbuild, for shorts rail). Each has minimal MDX body using at least one `<YouTube>`, `<Callout>`, or `<RepoCard>` stub. All validate against `gBlockSchema`.
-- Step 2.2: Shared UI primitives — GBlockCard, TypeBadge, CollectionBadge _(Lane: components)_
-  - Files: create `apps/web/src/components/GBlockCard.tsx`, `apps/web/src/components/TypeBadge.tsx`, `apps/web/src/components/CollectionBadge.tsx`
-  - `GBlockCard`: card with brutal border + shadow, hero image (or type-colored placeholder), title, type badge, collection badge, published date. Links to `/<collection>/<slug>`. Hover: translate + shadow bump per spec §4.
-  - `TypeBadge`: small pill with type name, colored by type (accent-coral for video types, accent-blue for code types, ink for text types).
-  - `CollectionBadge`: small pill linking to `/<collection>` with collection name.
-- Step 2.3: Home page components — FeaturedRail, FirehoseFeed, ShortsRail _(Lane: components)_
-  - Files: create `apps/web/src/components/FeaturedRail.tsx`, `apps/web/src/components/FirehoseFeed.tsx`, `apps/web/src/components/ShortsRail.tsx`
-  - `FeaturedRail`: horizontal row of 1–3 `GBlockCard`s filtered by `featured: true`, sorted by `publishedAt` desc. Graceful empty state.
-  - `FirehoseFeed`: reverse-chron list of all gBlocks with `GBlockCard`, plus type and collection filter chips. Graceful empty state.
-  - `ShortsRail`: horizontal scroll of `clip`-type gBlocks. Hidden when no clips exist.
-- Step 2.4: Home page route _(Lane: routes)_
-  - Files: modify `apps/web/src/app/page.tsx`
-  - Server component that calls `loadAllGBlocks()` and renders `FeaturedRail` + `FirehoseFeed` + `ShortsRail`. Graceful empty state when no gBlocks exist.
-- Step 2.5: Collection page route _(Lane: routes)_
-  - Files: create `apps/web/src/app/[collection]/page.tsx`
-  - `generateStaticParams()` returns the 3 active collections. Server component loads collection YAML (hero name + description) + all gBlocks for that collection. Renders collection hero, gBlock grid with type/date filters, series grouping when `seriesSlug` is shared. Graceful empty state.
-- Step 2.6: gBlock detail page route with MDX rendering _(Lane: routes)_
-  - Files: create `apps/web/src/app/[collection]/[slug]/page.tsx`; may modify `apps/web/src/components/mdx/*.tsx` (upgrade stubs to render real content)
-  - `generateStaticParams()` returns all `{ collection, slug }` pairs. Type-specific header block: `tutorial`/`essay` → hero image + title + reading time; `episode`/`stream`/`clip` → YouTube embed via `<iframe>` + title; `repo`/`tool`/`demo` → linked card with URL + title. MDX body rendered via `next-mdx-remote`. SEO metadata: `<title>`, `<meta name="description">`, Open Graph tags derived from frontmatter.
-- Step 2.7: Redirect `/g/<slug>` + stub `/t/<tag>` _(Lane: routes)_
-  - Files: create `apps/web/src/app/g/[slug]/route.ts`, create `apps/web/src/app/t/[tag]/page.tsx`
-  - `/g/<slug>`: Route handler that looks up the gBlock by slug, returns 301 redirect to `/<collection>/<slug>`. Returns 404 if slug not found.
-  - `/t/<tag>`: Placeholder page (reserved URL pattern, renders "Tag pages coming soon" or 404).
-- Step 2.8: PaywallCard component _(Lane: paywall)_
-  - Files: create `apps/web/src/components/PaywallCard.tsx`
-  - Renders a CTA card for `membership: member` gBlocks. Shows first ~150 words of body as preview, then a paywall overlay with sign-up CTA. Uses brutal border + muted background per spec §4. Wired into gBlock detail page but only renders when `membership === "member"` — at launch, no gBlocks have this, so it renders nowhere in production.
-- Step 2.9: Build-time slug uniqueness + SEO metadata polish
-  - Files: may modify `apps/web/next.config.ts` or `apps/web/src/app/layout.tsx`; modify `apps/web/src/app/[collection]/[slug]/page.tsx` (if SEO not fully wired in 2.6)
-  - Slug uniqueness: `loadAllGBlocks()` already throws on duplicate slugs; verify this surfaces as a build failure via `generateStaticParams()`. Add an explicit check in the build pipeline if the loader error doesn't propagate cleanly.
-  - SEO: ensure every page has a meaningful `<title>`, `<meta name="description">`, and Open Graph `og:title`/`og:description`/`og:image` derived from frontmatter or collection metadata.
+- Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
+  - Files: modify `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx`, modify `content/gblocks/gcanbuild/better-auth-tutorial.mdx`
+  - Replace placeholder video ID (`dQw4w9WgXcQ` in pastebin) with the real YouTube video ID from George's channel. The `better-auth-tutorial.mdx` already has a real-looking ID (`L8_98i_bMMA`) — verify it's the actual channel video or replace.
+  - Expand MDX bodies from thin step outlines to production-quality walkthroughs: add section summaries synthesized from the video outline, code snippets for key steps, and `<Callout>` tips. Target ~500–800 words per canary (enough to be useful, not a full transcript).
+  - Keep existing frontmatter fields intact; update `publishedAt` to match the real video publish dates if known.
+  - The `streaming-highlight-clip.mdx` clip stays as-is — it's valid content but not one of the 5 canaries.
+  - **Prerequisite:** User must provide the real YouTube video IDs for these tutorials (or confirm the existing ones are correct). Ask the user before proceeding.
+- Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
+  - Files: create `content/gblocks/gcanbuild/full-stack-web-app.mdx`
+  - New canary for the "Full Stack Web App Tutorial" (Next.js + Better Auth + Neon + Drizzle + tRPC + Tanstack Query — ~10.2k views, top performer on the channel).
+  - Frontmatter: `type: tutorial`, `collection: gcanbuild`, `featured: false`, `videoUrl` from real channel video, `tags: [nextjs, better-auth, neon, drizzle, trpc, tanstack-query, full-stack]`, `heroImage` (use placeholder path — no image asset yet).
+  - MDX body: `<YouTube>` embed + section walkthrough + code blocks + `<RepoCard>` if a companion repo exists.
+  - **Prerequisite:** User must provide the real YouTube video ID and confirm the title. Ask the user before proceeding.
+- Step 3.3: Author Weekly SOTA canary MDX
+  - Files: modify `content/gblocks/weekly-sota/sota-ep-001.mdx`
+  - **Blocked on manual task:** User must decide SOTA pilot strategy (reframe existing "Sam Altman Stuns Investors" video vs. record fresh Ep 1). Once decided, upgrade the fixture to production quality.
+  - If reframing existing video: update `videoUrl` to the real video ID, write show-notes-style MDX body (topic summary, key quotes/claims, links to referenced articles, timestamps).
+  - If new recording: user provides video ID + topic after recording; then author MDX.
+  - Keep `featured: false` (SOTA is not pinned to featured rail at launch).
+- Step 3.4: Author Weekly G Ep 1 canary MDX
+  - Files: modify `content/gblocks/weekly-g/weekly-g-ep-001.mdx`
+  - **Blocked on manual task:** User must record Weekly G Ep 1 video and provide the YouTube video ID.
+  - Once video exists: update `videoUrl` to real ID, write vlog-style MDX body (episode summary, key topics covered, links). Keep `featured: true`.
+- Step 3.5: Production build config (metadataBase, env)
+  - Files: modify `apps/web/src/app/layout.tsx` (set `metadataBase` to `https://gblockparty.com`), optionally create `vercel.json` if framework detection needs hints
+  - Set `metadataBase: new URL("https://gblockparty.com")` in the root layout metadata export — this resolves the build warning about social OG images and ensures all OG URLs are absolute in production.
+  - Verify `next.config.ts` has no blockers for Vercel deployment (current config is minimal and Vercel-ready).
+  - Run `pnpm --filter @gblockparty/web build` to confirm clean production build with all canary pages generated.
+- Step 3.6: Create GitHub repo + push
+  - **Blocked on manual task:** User must confirm `gh` CLI is authenticated (`gh auth status`).
+  - Commands: `gh repo create GeorgeQLe/gblockparty --public --source . --push` (or equivalent). Push `master` branch.
+  - Verify repo is accessible at `github.com/GeorgeQLe/gblockparty`.
+- Step 3.7: Create Vercel project + configure domain
+  - **Blocked on manual task:** User must confirm `vercel` CLI is authenticated (`vercel whoami`).
+  - Commands: `vercel link` to connect the repo, `vercel domains add gblockparty.com` to configure the apex domain.
+  - Vercel auto-detects the Next.js framework and pnpm monorepo. May need to set the root directory to `apps/web` in project settings.
+  - Output the DNS records Vercel provides (A record + CNAME) for the user to add at their registrar.
+- Step 3.8: Verify live deployment + smoke test
+  - **Blocked on manual task:** User must add DNS records at their domain registrar.
+  - Verify `https://gblockparty.com` resolves with valid TLS cert.
+  - Smoke test: home page loads with featured rail showing pinned canaries, each collection page lists its canaries, each canary detail page renders type-appropriate header (video embed for episodes, hero image for tutorials), `/g/<slug>` short-links 301 to canonical URLs.
 
 ### Green
-- Step 2.10: Write regression tests covering acceptance criteria
-  - Files: create `apps/web/src/__tests__/pages.test.ts` or similar
-  - Cases: `loadAllGBlocks()` returns the 5 fixture gBlocks with correct types; featured filter returns only `featured: true` blocks sorted by `publishedAt` desc; clip filter returns only clip-type blocks; redirect lookup resolves slug to canonical `/<collection>/<slug>`; `PaywallCard` renders when `membership === "member"` (fixture-only); slug uniqueness throws on duplicates (already covered by Phase 1 tests — verify no regression).
-- Step 2.11: Run all tests, typecheck, build — verify green; refactor if needed
+- Step 3.9: Write regression tests for Phase 3 acceptance criteria
+  - Files: modify `apps/web/src/__tests__/pages.test.ts` (add Phase 3 canary-specific tests)
+  - Cases: (1) `loadAllGBlocks()` returns canary gBlocks with production video IDs (not placeholder `dQw4w9WgXcQ`), (2) all 3 GCanBuild canaries have `type: tutorial`, (3) SOTA canary has `type: episode` + `videoUrl`, (4) Weekly G canary has `type: episode` + `featured: true`, (5) at least 2 canaries have `featured: true`, (6) `full-stack-web-app` slug exists.
+- Step 3.10: Final verification — all tests, typecheck, build green
   - Commands: `pnpm -w test`, `pnpm -w -r typecheck`, `pnpm --filter @gblockparty/web build`
-  - Expected: all tests pass (Phase 1 + Phase 2), typecheck clean, production build succeeds with all fixture gBlock pages generated.
+  - Expected: all tests pass (Phase 1 + Phase 2 + Phase 3), typecheck clean, production build succeeds with canary pages.
 
-### Milestone: Phase 2 UI Surface Ready ✓
-- [x] `/` renders featured rail + firehose + (empty-state) shorts rail when the repo has any gBlocks authored; empty state is graceful when there are none.
-- [x] `/<collection>` renders for each of `gcanbuild`, `weekly-sota`, `weekly-g` even with zero or one gBlock seeded.
-- [x] `/<collection>/<slug>` renders a type-appropriate header: video embed for `episode`/`stream`/`clip`, hero image for `tutorial`/`essay`, linked card for `repo`/`tool`/`demo`.
-- [x] `/g/<slug>` issues a 301 to the canonical URL and resolves correctly for every authored slug.
-- [x] `featured: true` pins gBlocks to the featured rail in the order defined (stable sort by `publishedAt` desc within pinned set).
-- [x] Slug uniqueness enforced at build: duplicate slugs across collections fail the build with a clear error.
-- [x] `PaywallCard` renders correctly when forced against a fixture `membership: member` gBlock (fixture-only; no real gated content ships).
-- [x] `pnpm build` in `apps/web` produces a production build with no TS or lint errors.
-- [x] All phase tests pass.
-- [x] No regressions in previous phase tests.
+### Milestone: Phase 3 Launch Ready
+- [ ] All 5 canary MDX files exist under `content/gblocks/<collection>/<slug>.mdx` and validate against the Phase-1 schema.
+- [ ] `https://gblockparty.com` resolves to the Vercel deploy with a valid TLS cert.
+- [ ] Home page shows featured-rail pins for the `featured: true` canaries and the firehose lists all 5.
+- [ ] Each of the 3 collection pages (`/gcanbuild`, `/weekly-sota`, `/weekly-g`) lists its canary.
+- [ ] Each canary `/<collection>/<slug>` URL renders correctly with type-appropriate header (video embed on SOTA + Weekly G, hero image on GCanBuild tutorials).
+- [ ] `/g/<slug>` short-links for all 5 canaries 301 to canonical URLs.
+- [ ] All phase tests pass.
+- [ ] No regressions in previous phase tests.
 
-## Next: Phase 3 — Launch
-
-Phase 2 (UI Surface) is complete. All 11 steps shipped, milestone fully checked. Next work is Phase 3 decomposition — see `tasks/roadmap.md`.
+**On Completion** (fill in when phase is done):
+- Deviations from plan:
+- Tech debt / follow-ups:
+- Ready for next phase:
 
 ---
 
@@ -131,5 +115,3 @@ Phase 2 (UI Surface) is complete. All 11 steps shipped, milestone fully checked.
 - [ ] Decommission `lexcorp-war-room/portfolio/boston-founder-radio.yaml` — scheduled for Phase 4.
 - [ ] Add `lexcorp-war-room/portfolio/gblockparty.yaml` with platform-level KPIs — scheduled for Phase 4.
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
-- [ ] Create GitHub repo `GeorgeQLe/gblockparty` — scheduled for Phase 3 (Launch).
-- [ ] Create Vercel project, link `gblockparty.com` — scheduled for Phase 3 (Launch).
