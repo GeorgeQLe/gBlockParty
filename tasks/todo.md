@@ -120,6 +120,81 @@
 - [ ] All phase tests pass.
 - [ ] No regressions in previous phase tests.
 
+## Next step: Phase 2, Step 2.1 — Seed development fixture gBlocks
+
+### Context
+
+Phase 1 is fully complete (19/19 tests green, typecheck clean, build produces 4 static pages). Phase 2 begins now. The content loader (`loadAllGBlocks()`) and schema validation are working, but there are no real MDX gBlock files in `content/gblocks/` yet — just an empty `.gitkeep`. Step 2.1 seeds 5 development fixture gBlocks so that subsequent steps (components, routes) have content to render against.
+
+### Ship status going in
+
+- **Shipped last session:** Phase 2 planning — 11 steps decomposed into `tasks/roadmap.md` and `tasks/todo.md`.
+- **Test status:** `pnpm -w test` 19/19 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (4 static pages).
+- **No git remote:** local `master` only; `git push` is a local no-op.
+- **Deploy:** none.
+
+### What this step does
+
+Creates 5 MDX files under `content/gblocks/<collection>/<slug>.mdx` — real content based on spec §8 (Phase-1 Migration Canaries) and the channel data referenced in the spec. These are development fixtures that also serve as the Phase 3 canary seed (Phase 3 will polish them, not replace them).
+
+1. **`content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx`** — `type: tutorial`, `collection: gcanbuild`, `featured: true`, `videoUrl` pointing at the real YouTube URL, `heroImage` placeholder path, `tags: [nextjs, drizzle, neon, trpc, tanstack-query]`, `readingTimeMinutes: 12`, `publishedAt: 2025-03-19`. MDX body: brief intro, `<YouTube id="NzfKEbgvA0A" />`, 2–3 section headings with placeholder walkthrough text, a `<Callout tone="info">` block.
+
+2. **`content/gblocks/gcanbuild/better-auth-tutorial.mdx`** — `type: tutorial`, `collection: gcanbuild`, `videoUrl` (real YT URL), `tags: [better-auth, nextjs]`, `readingTimeMinutes: 15`, `publishedAt: 2025-02-10`. MDX body: intro, `<YouTube>` embed, walkthrough sections.
+
+3. **`content/gblocks/weekly-sota/sota-ep-001.mdx`** — `type: episode`, `collection: weekly-sota`, `videoUrl` (real or placeholder YT URL), `publishedAt: 2026-04-20`. MDX body: show notes with bullet points, `<YouTube>` embed.
+
+4. **`content/gblocks/weekly-g/weekly-g-ep-001.mdx`** — `type: episode`, `collection: weekly-g`, `featured: true`, `videoUrl` (placeholder), `publishedAt: 2026-04-18`. MDX body: vlog intro, `<YouTube>` embed.
+
+5. **`content/gblocks/gcanbuild/streaming-highlight-clip.mdx`** — `type: clip`, `collection: gcanbuild`, `videoUrl` (placeholder), `parentSlug: pastebin-clone-nextjs`, `publishedAt: 2025-03-20`. MDX body: brief clip context.
+
+### Files to create / modify
+
+- **Create:** `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx`
+- **Create:** `content/gblocks/gcanbuild/better-auth-tutorial.mdx`
+- **Create:** `content/gblocks/gcanbuild/streaming-highlight-clip.mdx`
+- **Create:** `content/gblocks/weekly-sota/sota-ep-001.mdx`
+- **Create:** `content/gblocks/weekly-g/weekly-g-ep-001.mdx`
+- **May remove:** `content/gblocks/.gitkeep` (no longer needed once directory has real files)
+- **Do not modify:** `packages/**`, `apps/**`, `tasks/**` (except routine handoff edits).
+
+### Approach & key decisions
+
+- **Frontmatter must validate.** After creating all 5 files, run `loadAllGBlocks({ contentRoot: "content" })` via a one-off probe (or `pnpm -w test`) to confirm all 5 parse without error. The existing loader test suite runs against test fixtures, not `content/`, so a manual probe is needed.
+- **Use real YouTube video IDs** where spec §8 names specific videos (Pastebin Clone = `NzfKEbgvA0A`, Better Auth tutorial = look up from spec/interview). For SOTA and Weekly G (new recordings), use a placeholder ID like `dQw4w9WgXcQ` or leave `videoUrl` as a generic YouTube URL.
+- **MDX body is minimal but real.** Include enough content to exercise the MDX components and test page rendering. 50–100 words per file is fine — these are development fixtures, not production content.
+- **Slug uniqueness.** All 5 slugs must be globally unique. The loader will throw if any collide.
+- **`publishedAt` dates.** Use realistic past dates so the reverse-chron sort in the firehose feed produces a deterministic order. Vary the dates across collections.
+- **`membership` field.** Omit on all 5 (defaults to `"free"`). The PaywallCard will be tested against a fixture in Step 2.8/2.10, not against these real gBlocks.
+
+### Acceptance criteria for Step 2.1
+
+- [ ] All 5 MDX files exist under `content/gblocks/<collection>/<slug>.mdx`.
+- [ ] Each file's frontmatter validates against `gBlockSchema` (probe via `loadAllGBlocks()`).
+- [ ] Fixture covers: 2 tutorials, 2 episodes, 1 clip across all 3 collections.
+- [ ] At least 2 gBlocks have `featured: true` (pastebin-clone-nextjs + weekly-g-ep-001).
+- [ ] At least 1 clip exists for the shorts rail (streaming-highlight-clip).
+- [ ] Each MDX body uses at least one MDX component (`<YouTube>`, `<Callout>`, or `<RepoCard>`).
+- [ ] `pnpm -w test` still exits 0 (19/19 — no regression).
+- [ ] `pnpm -w -r typecheck` still clean.
+- [ ] `pnpm --filter @gblockparty/web build` still succeeds.
+
+### Ship-one-step handoff contract (Step 2.1 → 2.2)
+
+After approval, the clear-context implementation session must:
+
+1. Implement **only Step 2.1**. Do not continue into 2.2.
+2. Verify all 5 MDX files validate and nothing regresses.
+3. Mark Step 2.1 done in `tasks/todo.md`.
+4. Append a record to `tasks/history.md`.
+5. Commit and push (push is a local no-op — flag the missing remote).
+6. Deploy: none.
+7. Write Step 2.2's plan (shared UI primitives: GBlockCard, TypeBadge, CollectionBadge) into `tasks/todo.md` as a self-contained block.
+8. `.claude/settings.local.json` must have `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
+9. Start the approval UI for Step 2.2 by calling `EnterPlanMode` first, then writing a brief pass-through plan, then `ExitPlanMode`.
+10. Stop before implementing Step 2.2.
+
+---
+
 ## Follow-ups (deferred; revisit in later phases)
 
 - [ ] Decommission `lexcorp-war-room/portfolio/boston-founder-radio.yaml` — scheduled for Phase 4.
