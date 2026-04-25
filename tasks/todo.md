@@ -7,7 +7,7 @@
 ## Priority Task Queue
 
 - [x] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
-- [ ] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
+- [x] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
 - [ ] Step 3.3: Author Weekly SOTA canary MDX
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX
 - [ ] Step 3.5: Production build config (metadataBase, env)
@@ -108,57 +108,57 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.2 — Add third GCanBuild canary (Full-Stack Web App tutorial)
+## Next step: Phase 3, Step 3.3 — Author Weekly SOTA canary MDX
 
 ### Context
 
-Step 3.1 complete — both existing GCanBuild tutorials upgraded to production canaries with real YouTube video IDs (`NzfKEbgvA0A` for Pastebin Clone, `R3r27ldM-TQ` for Better Auth) and expanded to ~500–800-word walkthroughs. 28/28 tests green, build green (13 pages).
+Step 3.2 complete — 3 GCanBuild canary tutorials now live (Pastebin Clone, Better Auth, Full-Stack Web App). 28/28 tests green, build green (14 pages). 3 of 5 canary MDX files done.
 
 ### Ship status going in
 
-- **Shipped last session:** Step 3.1 — upgraded 2 GCanBuild fixture tutorials to production canaries.
-- **Test status:** `pnpm -w test` 28/28 green. `pnpm -w -r typecheck` clean. `pnpm --filter @gblockparty/web build` green (13 pages).
+- **Shipped last session:** Step 3.2 — added Full-Stack Web App tutorial canary (`5vdooX7g7AE`).
+- **Test status:** `pnpm -w test` 28/28 green. `pnpm --filter @gblockparty/web build` green (14 pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Create a new third GCanBuild canary tutorial for the "Full Stack Web App Tutorial" (Next.js + Better Auth + Neon + Drizzle + tRPC + Tanstack Query — the channel's top performer at ~10.2k views).
+Upgrade the existing `content/gblocks/weekly-sota/sota-ep-001.mdx` fixture from placeholder to production canary.
 
 **Key actions:**
-1. **Ask the user** for the real YouTube video ID and confirm the video title.
-2. **Create** `content/gblocks/gcanbuild/full-stack-web-app.mdx` with proper frontmatter (`type: tutorial`, `collection: gcanbuild`, `featured: false`, real `videoUrl`, tags, heroImage placeholder).
-3. **Write** MDX body: `<YouTube>` embed + section walkthrough + code blocks + `<RepoCard>` if a companion repo exists. Target ~500–800 words.
+1. **Ask the user** to decide SOTA pilot strategy: reframe the existing "Sam Altman Stuns Investors" video as SOTA Ep 1 with show notes, or record a fresh Ep 1.
+2. **Get the real YouTube video ID** from the user (either the existing video or new recording).
+3. **Upgrade** `sota-ep-001.mdx`: update `videoUrl` to real video ID, write show-notes-style MDX body (topic summary, key quotes/claims, links to referenced articles, timestamps). Keep `featured: false`.
 4. **Validate** with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
 
 ### Manual prerequisite
 
-**Before implementing:** Ask the user to provide the real YouTube video ID for the Full-Stack Web App tutorial and confirm the title.
+**Before implementing:** Ask the user to decide the SOTA pilot strategy and provide the real YouTube video ID.
 
-### Files to create/modify
+### Files to modify
 
-- Create `content/gblocks/gcanbuild/full-stack-web-app.mdx`
+- Modify `content/gblocks/weekly-sota/sota-ep-001.mdx`
 
-### Acceptance criteria for Step 3.2
+### Acceptance criteria for Step 3.3
 
-- [ ] `full-stack-web-app.mdx` exists with real YouTube video ID.
-- [ ] MDX body is 500–800 words with section walkthroughs.
+- [ ] `sota-ep-001.mdx` has real YouTube video ID (not placeholder).
+- [ ] MDX body is show-notes style with topic summary, timestamps, and key points.
 - [ ] File validates against `gBlockSchema` (`pnpm -w test` still green).
-- [ ] `pnpm --filter @gblockparty/web build` succeeds (page count increases to 14).
+- [ ] `pnpm --filter @gblockparty/web build` succeeds (14 pages, no change in count).
 
-### Ship-one-step handoff contract (Step 3.2 → Step 3.3)
+### Ship-one-step handoff contract (Step 3.3 → Step 3.4)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 3.2**. Do not continue into Step 3.3.
-2. Ask the user for the real YouTube video ID before creating content.
+1. Implement **only Step 3.3**. Do not continue into Step 3.4.
+2. Ask the user for the SOTA pilot strategy and real YouTube video ID before modifying content.
 3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
-4. Mark Step 3.2 done in `tasks/todo.md`.
+4. Mark Step 3.3 done in `tasks/todo.md`.
 5. Append a record to `tasks/history.md`.
 6. Commit and push (push is a local no-op).
-7. Write Step 3.3's plan into `tasks/todo.md`.
+7. Write Step 3.4's plan into `tasks/todo.md`.
 8. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-9. Start the approval UI for Step 3.3 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
+9. Start the approval UI for Step 3.4 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
 
 ---
 

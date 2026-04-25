@@ -1,0 +1,65 @@
+---
+slug: full-stack-web-app
+type: tutorial
+collection: gcanbuild
+title: "Full Stack Web App Tutorial w/ Next.js, Better Auth, Neon DB, Drizzle ORM, tRPC, and Tanstack Query"
+summary: "Build a production-ready full-stack boilerplate from scratch — auth, database, typesafe API, and client-side data fetching wired together step by step."
+publishedAt: "2026-04-05T14:00:00.000Z"
+tags: [nextjs, better-auth, neon, drizzle, trpc, tanstack-query, full-stack]
+featured: false
+videoUrl: "https://www.youtube.com/watch?v=5vdooX7g7AE"
+heroImage: "/images/gblocks/full-stack-web-app.png"
+---
+
+<YouTube id="5vdooX7g7AE" title="Full Stack Web App Tutorial w/ Next.js, Better Auth, Neon DB, Drizzle ORM, tRPC, and Tanstack Query" />
+
+## What we're building
+
+A production-ready full-stack starter that wires together the modern TypeScript stack from an empty directory to a working app with authentication, a serverless Postgres database, typesafe API routes, and client-side data fetching. This is the foundational boilerplate that the other GCanBuild tutorials build on top of — nail this setup once and every future project starts from a solid base.
+
+<Callout tone="info">
+This tutorial produces the starting-point repo used by the [Pastebin Clone walkthrough](/gcanbuild/pastebin-clone-nextjs) and other GCanBuild projects. Follow along here first if you want a clean foundation before jumping into a feature build.
+</Callout>
+
+## Stack
+
+- **Next.js 15** — App Router with server components and API routes
+- **Better Auth** — Social OAuth (GitHub + Google) with session management
+- **Neon** — Serverless Postgres with branching and connection pooling
+- **Drizzle ORM** — Type-safe schema definitions, queries, and migrations
+- **tRPC** — End-to-end typesafe RPC layer between client and server
+- **Tanstack Query** — Client-side data fetching, caching, and mutations
+
+<RepoCard url="https://github.com/GeorgeQLe/walkthrough-starting-point-nextjs-trpc-betterauth-drizzle-neon-tanstack" name="walkthrough-starting-point" description="Full-stack starting-point repo — Next.js, tRPC, Better Auth, Drizzle, Neon, Tanstack Query" />
+
+## Step 1 — Scaffold the Next.js project
+
+Start with `create-next-app` using the App Router and TypeScript. Install Shadcn/ui for prebuilt components and set up the project structure: `src/app` for routes, `src/server` for backend logic, and `src/lib` for shared utilities. The initial scaffold gives you a working dev server with hot reload before any backend wiring.
+
+## Step 2 — Set up Neon and Drizzle ORM
+
+Create a Neon serverless Postgres database and grab the connection string. Install Drizzle ORM and `drizzle-kit`, then configure the Drizzle client to connect to Neon over HTTP using the `@neondatabase/serverless` driver. Define your first schema file — even if it's empty, having the Drizzle config wired up now means you can push schema changes with a single command as you build.
+
+<Callout tone="info">
+Use `drizzle-kit push` during development for instant schema sync. Switch to `drizzle-kit generate` + `drizzle-kit migrate` when you need a migration history for production deployments.
+</Callout>
+
+## Step 3 — Wire up tRPC
+
+Install tRPC and create the router, context, and procedure helpers. Set up the tRPC API handler as a Next.js route at `/api/trpc/[trpc]`. Define a test procedure to verify the round trip works. The key benefit of tRPC is that your frontend and backend share the same TypeScript types with zero code generation — change a return type on the server and your IDE flags every broken call site instantly.
+
+## Step 4 — Integrate Tanstack Query
+
+Install `@tanstack/react-query` and the tRPC React adapter. Create a provider that wraps your app and set up the query client. With tRPC + Tanstack Query working together, every API call gets automatic caching, deduplication, background refetching, and optimistic updates. Test by calling the procedure from a client component and confirming the data renders.
+
+## Step 5 — Add Better Auth
+
+Install Better Auth and configure it with GitHub and Google OAuth providers. Set up the auth API route, create the client-side auth hooks, and build a basic login page. Better Auth stores sessions and accounts in your Neon database via the Drizzle adapter — no external session store. After this step you have a complete auth flow: social login, session cookies, and a protected route pattern.
+
+<Callout tone="warn">
+Better Auth is pre-1.0. Pin your version in `package.json` and check the changelog before upgrading — breaking changes between minor versions are common.
+</Callout>
+
+## Step 6 — Connect everything
+
+With all the pieces in place, wire them together end-to-end. Pass the authenticated user's session from Better Auth into the tRPC context so procedures can enforce authorization. Create a protected query that reads from Neon via Drizzle and returns data only for the logged-in user. On the frontend, Tanstack Query fetches the data through tRPC, caches it, and keeps the UI reactive. You now have a working full-stack app with auth, database, typesafe API, and client-side state — ready to build features on top of.

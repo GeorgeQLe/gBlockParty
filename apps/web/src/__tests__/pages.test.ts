@@ -15,9 +15,9 @@ function getBlocks(): LoadedGBlock[] {
 }
 
 describe("Phase 2 regression — loadAllGBlocks against real fixtures", () => {
-  it("returns 5 fixture gBlocks across 3 collections", () => {
+  it("returns 6 fixture gBlocks across 3 collections", () => {
     const all = getBlocks();
-    expect(all).toHaveLength(5);
+    expect(all).toHaveLength(6);
 
     const collections = new Set(all.map((b) => b.collection));
     expect(collections).toEqual(
