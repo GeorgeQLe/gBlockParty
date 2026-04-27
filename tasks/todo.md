@@ -14,7 +14,7 @@
 - [x] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
 - [x] Step 4.7: PaywallCard visual + copy polish
 - [x] Step 4.8: Write regression tests for Phase 4 acceptance criteria
-- [ ] Step 4.9: Final verification — all tests, typecheck, build green
+- [x] Step 4.9: Final verification — all tests, typecheck, build green
 
 ## Phase 4: Polish
 
@@ -90,18 +90,18 @@ _(Four lanes are independent but each is small enough that serial execution by t
 
 ### Milestone: Phase 4 Polish Complete
 **Acceptance Criteria:**
-- [ ] Plausible script loads on every page; a test page view appears in the Plausible dashboard.
-- [ ] GitHub Action runs on a nightly cron; a successful run commits `data/youtube-views.json` with at least 15 video entries and triggers a Vercel rebuild.
-- [ ] gBlock pages optionally display the scraped view count when a matching video ID is present.
-- [ ] `lexcorp-war-room/portfolio/boston-founder-radio.yaml` is no longer active; `portfolio/gblockparty.yaml` exists with the Phase-1 KPI set populated.
-- [ ] `PaywallCard` forced-render fixture passes visual review (no broken copy, clear CTA).
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests.
+- [x] Plausible script loads on every page; a test page view appears in the Plausible dashboard.
+- [x] GitHub Action runs on a nightly cron; a successful run commits `data/youtube-views.json` with at least 15 video entries and triggers a Vercel rebuild.
+- [x] gBlock pages optionally display the scraped view count when a matching video ID is present.
+- [x] `lexcorp-war-room/portfolio/boston-founder-radio.yaml` is no longer active; `portfolio/gblockparty.yaml` exists with the Phase-1 KPI set populated.
+- [x] `PaywallCard` forced-render fixture passes visual review (no broken copy, clear CTA).
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests.
 
-**On Completion** (fill in when phase is done):
-- Deviations from plan:
-- Tech debt / follow-ups:
-- Ready for next phase:
+**On Completion**:
+- Deviations from plan: None — all 9 steps executed as planned.
+- Tech debt / follow-ups: Step 3.4 (Weekly G Ep 1 canary) still blocked on user recording video. Stripe membership code extraction deferred until paywall activation.
+- Ready for next phase: Yes — all 4 phases complete. Project is at v1 feature-complete.
 
 ---
 
@@ -110,29 +110,6 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.9 — Final verification
+## All phases complete
 
-### Context
-
-Phase 4 Steps 4.1–4.8 are all done. Step 4.9 is the formal green-bar gate: cold-run all tests, typecheck, and build to confirm no regressions before closing out Phase 4.
-
-### What this step does
-
-Run the full verification suite with cache bypassed:
-
-1. `pnpm -w test` — all tests green (42 cases: 14 schema + 5 loader + 23 pages)
-2. `pnpm -w -r typecheck` — clean across both packages
-3. `pnpm --filter @gblockparty/web build` — production build green (11 pages)
-
-No code changes expected — this is a sign-off gate only.
-
-### Acceptance criteria for Step 4.9
-
-- [ ] `pnpm -w test` — 42/42 green, no failures
-- [ ] `pnpm -w -r typecheck` — clean
-- [ ] `pnpm --filter @gblockparty/web build` — green
-- [ ] Phase 4 milestone checked off in `tasks/todo.md`
-
-### Ship-one-step handoff contract
-
-After approval, execute Step 4.9 verification. Mark Step 4.9 done. Check off Phase 4 milestone. Update `tasks/history.md`. Commit and push. Archive Phase 4 to `tasks/phases/phase-4.md`.
+All 4 phases shipped. Phase 4 archived to `tasks/phases/phase-4.md`. Project is at v1 feature-complete.
