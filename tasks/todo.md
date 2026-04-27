@@ -13,7 +13,7 @@
 - [x] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
 - [x] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
 - [x] Step 4.7: PaywallCard visual + copy polish
-- [ ] Step 4.8: Write regression tests for Phase 4 acceptance criteria
+- [x] Step 4.8: Write regression tests for Phase 4 acceptance criteria
 - [ ] Step 4.9: Final verification — all tests, typecheck, build green
 
 ## Phase 4: Polish
@@ -110,40 +110,29 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.8 — Write regression tests for Phase 4 acceptance criteria
+## Next step: Phase 4, Step 4.9 — Final verification
 
 ### Context
 
-Phase 4 is nearly complete — Steps 4.1–4.7 are all done. Step 4.8 adds regression tests covering the Phase 4 deliverables so the acceptance criteria are machine-verifiable. The test strategy for Phase 4 was "tests-after" (per roadmap), so this is where we write them.
+Phase 4 Steps 4.1–4.8 are all done. Step 4.9 is the formal green-bar gate: cold-run all tests, typecheck, and build to confirm no regressions before closing out Phase 4.
 
 ### What this step does
 
-Add test cases to `apps/web/src/__tests__/pages.test.ts` (or a new Phase 4 test file if cleaner) covering:
+Run the full verification suite with cache bypassed:
 
-1. **`loadViewCounts()` — empty map when file missing:** Call `loadViewCounts()` with a non-existent path, assert it returns an empty `Map`.
-2. **`loadViewCounts()` — parses valid JSON:** Write a temp `youtube-views.json` fixture, call `loadViewCounts()`, assert correct `videoId → count` entries in the returned Map.
-3. **`extractVideoId()` — URL parsing:** Test all supported patterns: `/watch?v=`, `/shorts/`, `/embed/`, `youtu.be/`, and invalid URLs.
-4. **`extractPreview` — no regression:** Confirm `extractPreview` still truncates at the expected word count and appends ellipsis (existing tests may already cover this — verify before duplicating).
-5. **Scraper script exists and is valid ESM:** Assert `scripts/scrape-youtube.mjs` exists and can be parsed by Node without syntax errors (`node --check`).
+1. `pnpm -w test` — all tests green (42 cases: 14 schema + 5 loader + 23 pages)
+2. `pnpm -w -r typecheck` — clean across both packages
+3. `pnpm --filter @gblockparty/web build` — production build green (11 pages)
 
-### Files to modify
+No code changes expected — this is a sign-off gate only.
 
-- `apps/web/src/__tests__/pages.test.ts` (add new `describe` blocks for Phase 4 coverage)
+### Acceptance criteria for Step 4.9
 
-### Execution Profile
-
-**Parallel mode:** serial
-**Integration owner:** main agent
-**Conflict risk:** low
-**Review gates:** correctness, tests
-
-### Acceptance criteria for Step 4.8
-
-- [ ] All new test cases pass (`pnpm -w test` green).
-- [ ] No regressions in existing tests.
-- [ ] `pnpm -w -r typecheck` clean.
-- [ ] `pnpm --filter @gblockparty/web build` green.
+- [ ] `pnpm -w test` — 42/42 green, no failures
+- [ ] `pnpm -w -r typecheck` — clean
+- [ ] `pnpm --filter @gblockparty/web build` — green
+- [ ] Phase 4 milestone checked off in `tasks/todo.md`
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.8. Mark Step 4.8 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Write Step 4.9 plan. Enter plan mode for Step 4.9 approval.
+After approval, execute Step 4.9 verification. Mark Step 4.9 done. Check off Phase 4 milestone. Update `tasks/history.md`. Commit and push. Archive Phase 4 to `tasks/phases/phase-4.md`.

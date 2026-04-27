@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
+import fs from "node:fs";
+import { execSync } from "node:child_process";
 import { loadAllGBlocks, type LoadedGBlock } from "../lib/content/loader";
 import { extractPreview } from "../components/PaywallCard";
+import { loadViewCounts, extractVideoId } from "../lib/content/views";
 
 const CONTENT_ROOT = path.resolve(__dirname, "../../../../content");
 
@@ -149,5 +152,73 @@ describe("Phase 3 regression — canary content", () => {
   it("full-stack-web-app slug exists", () => {
     const slugs = getBlocks().map((b) => b.slug);
     expect(slugs).toContain("full-stack-web-app");
+  });
+});
+
+describe("Phase 4 regression — loadViewCounts", () => {
+  it("returns empty map when youtube-views.json does not exist", () => {
+    const map = loadViewCounts("/nonexistent/path/content");
+    expect(map).toBeInstanceOf(Map);
+    expect(map.size).toBe(0);
+  });
+
+  it("parses valid JSON and returns correct videoId → count map", () => {
+    const tmpDir = fs.mkdtempSync(path.join("/tmp", "views-test-"));
+    const dataDir = path.join(tmpDir, "data");
+    const contentDir = path.join(tmpDir, "content");
+    fs.mkdirSync(dataDir);
+    fs.mkdirSync(contentDir);
+    fs.writeFileSync(
+      path.join(dataDir, "youtube-views.json"),
+      JSON.stringify({
+        scrapedAt: "2026-04-27T06:00:00Z",
+        videos: [
+          { videoId: "abc123", title: "Video A", viewCount: 1500, publishedTimeText: "1 day ago" },
+          { videoId: "def456", title: "Video B", viewCount: 300, publishedTimeText: "3 days ago" },
+        ],
+      }),
+    );
+
+    const map = loadViewCounts(contentDir);
+    expect(map.size).toBe(2);
+    expect(map.get("abc123")).toBe(1500);
+    expect(map.get("def456")).toBe(300);
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+});
+
+describe("Phase 4 regression — extractVideoId", () => {
+  it("extracts from /watch?v= URL", () => {
+    expect(extractVideoId("https://www.youtube.com/watch?v=NzfKEbgvA0A")).toBe("NzfKEbgvA0A");
+  });
+
+  it("extracts from /shorts/ URL", () => {
+    expect(extractVideoId("https://www.youtube.com/shorts/abc123")).toBe("abc123");
+  });
+
+  it("extracts from /embed/ URL", () => {
+    expect(extractVideoId("https://www.youtube.com/embed/def456")).toBe("def456");
+  });
+
+  it("extracts from youtu.be/ URL", () => {
+    expect(extractVideoId("https://youtu.be/ghi789")).toBe("ghi789");
+  });
+
+  it("returns null for invalid URL", () => {
+    expect(extractVideoId("https://example.com/video")).toBeNull();
+    expect(extractVideoId("not-a-url")).toBeNull();
+  });
+});
+
+describe("Phase 4 regression — scraper script", () => {
+  const scraperPath = path.resolve(__dirname, "../../../../scripts/scrape-youtube.mjs");
+
+  it("scraper script exists", () => {
+    expect(fs.existsSync(scraperPath)).toBe(true);
+  });
+
+  it("scraper script is valid ESM (passes node --check)", () => {
+    expect(() => execSync(`node --check "${scraperPath}"`)).not.toThrow();
   });
 });
