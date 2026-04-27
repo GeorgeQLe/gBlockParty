@@ -10,7 +10,7 @@
 - [x] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
 - [x] Step 3.3: Author Weekly SOTA canary MDX
 - [x] Step 3.5: Production build config (metadataBase, env)
-- [ ] Step 3.6: Create GitHub repo + push
+- [x] Step 3.6: Create GitHub repo + push
 - [ ] Step 3.7: Create Vercel project + configure domain
 - [ ] Step 3.8: Verify live deployment + smoke test
 - [ ] Step 3.9: Write regression tests for Phase 3 acceptance criteria
@@ -103,32 +103,34 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.6 — Create GitHub repo + push
+## Next step: Phase 3, Step 3.7 — Create Vercel project + configure domain
 
 ### Context
 
-Step 3.5 complete — `metadataBase` set to `https://gblockparty.com` in root layout. Build green (12 pages), 28/28 tests green. `next.config.ts` is minimal and Vercel-ready. Step 3.4 (Weekly G) still deferred.
+Step 3.6 complete — `GeorgeQLe/gBlockParty` repo exists on GitHub (public, unarchived), `master` branch pushed to `origin`. Repo was previously archived from an older project; unarchived and reused. Default branch on GitHub is `main` (stale from old project); our work is on `master`. Build green (12 pages), 28/28 tests green.
 
 ### What this step does
 
-Create the `GeorgeQLe/gblockparty` GitHub repo via `gh` CLI and push `master`.
+Create a Vercel project linked to the GitHub repo and configure `gblockparty.com` as the production domain.
 
 **Key actions:**
-1. Verify `gh` CLI is authenticated (`gh auth status`).
-2. Create the repo: `gh repo create GeorgeQLe/gblockparty --public --source . --push` (or equivalent).
-3. Verify the repo is accessible at `github.com/GeorgeQLe/gblockparty`.
+1. Verify `vercel` CLI is authenticated (`vercel whoami`).
+2. Link the project: `vercel link` (or `vercel` to deploy) — set root directory to `apps/web`.
+3. Configure domain: `vercel domains add gblockparty.com`.
+4. Output DNS records Vercel provides (A record + CNAME) for the user to add at their domain registrar.
 
-**Blocked on manual task:** User must confirm `gh` CLI is authenticated.
+**Blocked on manual task:** User must confirm `vercel` CLI is authenticated.
 
 ### Files to modify
 
-- None (CLI-only step).
+- None (CLI-only step). May create `.vercel/` directory locally.
 
-### Acceptance criteria for Step 3.6
+### Acceptance criteria for Step 3.7
 
-- [ ] `gh auth status` shows authenticated.
-- [ ] `GeorgeQLe/gblockparty` repo exists on GitHub.
-- [ ] `master` branch pushed to remote.
+- [ ] `vercel whoami` shows authenticated.
+- [ ] Vercel project exists and is linked to `GeorgeQLe/gBlockParty`.
+- [ ] `gblockparty.com` domain configured in Vercel project settings.
+- [ ] DNS records documented for user to add at registrar.
 
 ---
 
