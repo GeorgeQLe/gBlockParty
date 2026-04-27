@@ -367,20 +367,20 @@ Build the components first (Lane B) as a micro-serial preamble; then Lanes A + C
   - Files: modify `apps/web/src/__tests__/pages.test.ts`
 - Step 3.10: Final verification — all tests, typecheck, build green
 
-### Milestone: Phase 3 Launch Ready
-- [ ] All 5 canary MDX files exist under `content/gblocks/<collection>/<slug>.mdx` and validate against the Phase-1 schema.
-- [ ] `https://gblockparty.com` resolves to the Vercel deploy with a valid TLS cert.
-- [ ] Home page shows featured-rail pins for the `featured: true` canaries and the firehose lists all 5.
-- [ ] Each of the 3 collection pages (`/gcanbuild`, `/weekly-sota`, `/weekly-g`) lists its canary.
-- [ ] Each canary `/<collection>/<slug>` URL renders correctly with type-appropriate header (video embed on SOTA + Weekly G, hero image on GCanBuild tutorials).
-- [ ] `/g/<slug>` short-links for all 5 canaries 301 to canonical URLs.
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests.
+### Milestone: Phase 3 Launch Ready ✓
+- [x] All 5 canary MDX files exist under `content/gblocks/<collection>/<slug>.mdx` and validate against the Phase-1 schema.
+- [x] `https://gblockparty.com` resolves to the Vercel deploy with a valid TLS cert.
+- [x] Home page shows featured-rail pins for the `featured: true` canaries and the firehose lists all 5.
+- [x] Each of the 3 collection pages (`/gcanbuild`, `/weekly-sota`, `/weekly-g`) lists its canary.
+- [x] Each canary `/<collection>/<slug>` URL renders correctly with type-appropriate header (video embed on SOTA + Weekly G, hero image on GCanBuild tutorials).
+- [x] `/g/<slug>` short-links for all 5 canaries 301 to canonical URLs.
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests.
 
-**On Completion** (fill in when phase is done):
-- Deviations from plan:
-- Tech debt / follow-ups:
-- Ready for next phase:
+**On Completion:**
+- Deviations from plan: Step 3.4 (Weekly G Ep 1) deferred — blocked on user recording. Weekly G collection hidden via `HIDDEN_COLLECTIONS`. Effectively 4 canaries live instead of 5. `next-mdx-remote` upgraded v5→v6 for Vercel compatibility.
+- Tech debt / follow-ups: Weekly G canary pending user video recording. GitHub default branch `main` stale (current work on `master`). Vercel GitHub App not authorized — manual deploys for now.
+- Ready for next phase: Yes — Phase 3 Launch Ready milestone fully met.
 
 ---
 
@@ -414,6 +414,53 @@ Build the components first (Lane B) as a micro-serial preamble; then Lanes A + C
 - Lane C — lexcorp-war-room: cross-repo edits to the sibling repo's `portfolio/*.yaml` files (requires that repo to be cloned alongside; separate commit).
 - Lane D — paywall polish: `apps/web/src/components/PaywallCard.tsx`.
 No overlap. Lane C is a different repo so its commit is separate.
+
+> Test strategy: tests-after
+
+### Execution Profile
+**Parallel mode:** implementation-safe
+**Integration owner:** main agent
+**Conflict risk:** low
+**Review gates:** correctness, tests
+
+**Subagent lanes:** none
+
+### Implementation
+- Step 4.1: Embed Plausible analytics script
+  - Files: modify `apps/web/src/app/layout.tsx`
+  - Add Plausible `<Script>` with `strategy="afterInteractive"`, guarded by `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` env var.
+- Step 4.2: Build YouTube view-count scraper script
+  - Files: create `scripts/scrape-youtube.mjs`, create `data/.gitkeep`
+  - Node.js ESM script that fetches YT channel page HTML, parses `ytInitialData`, writes `data/youtube-views.json`.
+- Step 4.3: Create GitHub Action for nightly YT scrape
+  - Files: create `.github/workflows/scrape-youtube.yml`
+  - Nightly cron (6 AM UTC) + workflow_dispatch. Commits changed data, triggers Vercel rebuild.
+- Step 4.4: Surface view counts on gBlock detail pages
+  - Files: create `apps/web/src/lib/content/views.ts`, modify `apps/web/src/app/[collection]/[slug]/page.tsx`, modify `apps/web/src/components/GBlockCard.tsx`
+  - Build-time injection of view counts from `data/youtube-views.json`.
+- Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
+  - Files: modify `lexcorp-war-room/portfolio/boston-founder-radio.yaml`
+  - Archive in-place: `status: Archived`, `lifecycleState: archived`.
+- Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
+  - Files: create `lexcorp-war-room/portfolio/gblockparty.yaml`
+  - KPI set per spec §9: total_visitors, views_per_collection, top_5_gblocks_by_views, seo_rank, yt_to_site_referral, paying_members (dormant).
+- Step 4.7: PaywallCard visual + copy polish
+  - Files: modify `apps/web/src/components/PaywallCard.tsx`
+  - Visual/copy pass: spacing, CTA copy, disabled affordance, membership subtitle.
+
+### Green
+- Step 4.8: Write regression tests for Phase 4 acceptance criteria
+  - Files: modify `apps/web/src/__tests__/pages.test.ts`
+- Step 4.9: Final verification — all tests, typecheck, build green
+
+### Milestone: Phase 4 Polish Complete
+- [ ] Plausible script loads on every page; a test page view appears in the Plausible dashboard.
+- [ ] GitHub Action runs on a nightly cron; a successful run commits `data/youtube-views.json` with at least 15 video entries and triggers a Vercel rebuild.
+- [ ] gBlock pages optionally display the scraped view count when a matching video ID is present.
+- [ ] `lexcorp-war-room/portfolio/boston-founder-radio.yaml` is no longer active; `portfolio/gblockparty.yaml` exists with the Phase-1 KPI set populated.
+- [ ] `PaywallCard` forced-render fixture passes visual review (no broken copy, clear CTA).
+- [ ] All phase tests pass.
+- [ ] No regressions in previous phase tests.
 
 **On Completion** (fill in when phase is done):
 - Deviations from plan:

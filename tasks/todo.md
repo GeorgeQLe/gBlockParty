@@ -1,120 +1,111 @@
-# gBlockParty — Phase 3 of 4: Launch
+# gBlockParty — Phase 4 of 4: Polish
 
 > Working document for the current phase. Full plan lives in `tasks/roadmap.md`.
 > Spec: `specs/gblockparty-v1.md` · Interview: `specs/gblockparty-v1-interview.md`
-> Generated: 2026-04-25
+> Generated: 2026-04-27
 
 ## Priority Task Queue
 
-- [x] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
-- [x] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
-- [x] Step 3.3: Author Weekly SOTA canary MDX
-- [x] Step 3.5: Production build config (metadataBase, env)
-- [x] Step 3.6: Create GitHub repo + push
-- [x] Step 3.7: Create Vercel project + configure domain
-- [x] Step 3.8: Verify live deployment + smoke test
-- [x] Step 3.9: Write regression tests for Phase 3 acceptance criteria
-- [x] Step 3.10: Final verification — all tests, typecheck, build green
+- [ ] Step 4.1: Embed Plausible analytics script
+- [ ] Step 4.2: Build YouTube view-count scraper script
+- [ ] Step 4.3: Create GitHub Action for nightly YT scrape
+- [ ] Step 4.4: Surface view counts on gBlock detail pages
+- [ ] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
+- [ ] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
+- [ ] Step 4.7: PaywallCard visual + copy polish
+- [ ] Step 4.8: Write regression tests for Phase 4 acceptance criteria
+- [ ] Step 4.9: Final verification — all tests, typecheck, build green
 
-## Phase 3: Launch
+## Phase 4: Polish
 
-**Goal**: Put gblockparty.com on the internet with real content. This is the launch gate.
+**Goal**: Post-launch instrumentation, performance-signal plumbing, and the cross-repo portfolio rollup. These aren't launch-critical but close out the Phase-1 scope from the spec.
 
 **Scope**:
-- Author 5 canary MDX gBlocks:
-  - 3 × GCanBuild tutorials mined from existing top YouTube videos (Better Auth / Full-Stack tutorial / Pastebin Clone). MDX contains: summary, linked `<YouTube>` embed, section-by-section walkthrough synthesized from the video outline, code blocks, tags, `heroImage`, `featured: true` on at least the Pastebin canary.
-  - 1 × Weekly SOTA pilot — either reframe the existing "Sam Altman" commentary as SOTA Ep 1 with fresh show notes, or record a new Ep 1 (user's call at authoring time).
-  - 1 × Weekly G Ep 1 — fresh recording + vlog-style MDX write-up. `featured: true`.
-- Create `GeorgeQLe/gblockparty` GitHub repo (via `gh` CLI) and push `master`.
-- Create Vercel project linked to the repo (via `vercel` CLI).
-- Configure `gblockparty.com` apex domain in Vercel.
-- Add DNS records at the domain registrar to point `gblockparty.com` at Vercel.
-- Verify HTTPS cert issues and the live site renders the 5 canaries.
+- Embed Plausible analytics in `apps/web/src/app/layout.tsx`.
+- Build the nightly YouTube view-count scraper as a GitHub Action: scrape channel HTML via the same technique used during `/spec-interview`, commit `data/youtube-views.json` snapshot, trigger Vercel rebuild so gBlock pages can surface fresh view counts.
+- Cross-repo edits to `lexcorp-war-room`:
+  - Decommission `portfolio/boston-founder-radio.yaml` (move to `portfolio/archive/` or delete per that repo's convention).
+  - Add `portfolio/gblockparty.yaml` with the Phase-1 KPI set: total visitors, views per collection, top-5 gBlocks by views, SEO rank for target queries, YT→site referral.
+- Visual + copy polish pass on the inactive `PaywallCard` component (tighten type, spacing, CTA copy; confirm it would render acceptably when activated).
 
 > Test strategy: tests-after
 
 ### Execution Profile
-**Parallel mode:** serial
+**Parallel mode:** implementation-safe
 **Integration owner:** main agent
 **Conflict risk:** low
 **Review gates:** correctness, tests
 
 **Subagent lanes:** none
+_(Four lanes are independent but each is small enough that serial execution by the main agent is efficient. No subagent overhead warranted.)_
 
 ### Implementation
-- Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
-  - Files: modify `content/gblocks/gcanbuild/pastebin-clone-nextjs.mdx`, modify `content/gblocks/gcanbuild/better-auth-tutorial.mdx`
-  - Replace placeholder video ID (`dQw4w9WgXcQ` in pastebin) with the real YouTube video ID from George's channel. The `better-auth-tutorial.mdx` already has a real-looking ID (`L8_98i_bMMA`) — verify it's the actual channel video or replace.
-  - Expand MDX bodies from thin step outlines to production-quality walkthroughs: add section summaries synthesized from the video outline, code snippets for key steps, and `<Callout>` tips. Target ~500–800 words per canary (enough to be useful, not a full transcript).
-  - Keep existing frontmatter fields intact; update `publishedAt` to match the real video publish dates if known.
-  - The `streaming-highlight-clip.mdx` clip stays as-is — it's valid content but not one of the 5 canaries.
-  - **Prerequisite:** User must provide the real YouTube video IDs for these tutorials (or confirm the existing ones are correct). Ask the user before proceeding.
-- Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
-  - Files: create `content/gblocks/gcanbuild/full-stack-web-app.mdx`
-  - New canary for the "Full Stack Web App Tutorial" (Next.js + Better Auth + Neon + Drizzle + tRPC + Tanstack Query — ~10.2k views, top performer on the channel).
-  - Frontmatter: `type: tutorial`, `collection: gcanbuild`, `featured: false`, `videoUrl` from real channel video, `tags: [nextjs, better-auth, neon, drizzle, trpc, tanstack-query, full-stack]`, `heroImage` (use placeholder path — no image asset yet).
-  - MDX body: `<YouTube>` embed + section walkthrough + code blocks + `<RepoCard>` if a companion repo exists.
-  - **Prerequisite:** User must provide the real YouTube video ID and confirm the title. Ask the user before proceeding.
-- Step 3.3: Author Weekly SOTA canary MDX
-  - Files: modify `content/gblocks/weekly-sota/sota-ep-001.mdx`
-  - **Blocked on manual task:** User must decide SOTA pilot strategy (reframe existing "Sam Altman Stuns Investors" video vs. record fresh Ep 1). Once decided, upgrade the fixture to production quality.
-  - If reframing existing video: update `videoUrl` to the real video ID, write show-notes-style MDX body (topic summary, key quotes/claims, links to referenced articles, timestamps).
-  - If new recording: user provides video ID + topic after recording; then author MDX.
-  - Keep `featured: false` (SOTA is not pinned to featured rail at launch).
-- Step 3.5: Production build config (metadataBase, env)
-  - Files: modify `apps/web/src/app/layout.tsx` (set `metadataBase` to `https://gblockparty.com`), optionally create `vercel.json` if framework detection needs hints
-  - Set `metadataBase: new URL("https://gblockparty.com")` in the root layout metadata export — this resolves the build warning about social OG images and ensures all OG URLs are absolute in production.
-  - Verify `next.config.ts` has no blockers for Vercel deployment (current config is minimal and Vercel-ready).
-  - Run `pnpm --filter @gblockparty/web build` to confirm clean production build with all canary pages generated.
-- Step 3.6: Create GitHub repo + push
-  - **Blocked on manual task:** User must confirm `gh` CLI is authenticated (`gh auth status`).
-  - Commands: `gh repo create GeorgeQLe/gblockparty --public --source . --push` (or equivalent). Push `master` branch.
-  - Verify repo is accessible at `github.com/GeorgeQLe/gblockparty`.
-- Step 3.7: Create Vercel project + configure domain
-  - **Blocked on manual task:** User must confirm `vercel` CLI is authenticated (`vercel whoami`).
-  - Commands: `vercel link` to connect the repo, `vercel domains add gblockparty.com` to configure the apex domain.
-  - Vercel auto-detects the Next.js framework and pnpm monorepo. May need to set the root directory to `apps/web` in project settings.
-  - Output the DNS records Vercel provides (A record + CNAME) for the user to add at their registrar.
-- Step 3.8: Verify live deployment + smoke test
-  - **Blocked on manual task:** User must add DNS records at their domain registrar.
-  - Verify `https://gblockparty.com` resolves with valid TLS cert.
-  - Smoke test: home page loads with featured rail showing pinned canaries, each collection page lists its canaries, each canary detail page renders type-appropriate header (video embed for episodes, hero image for tutorials), `/g/<slug>` short-links 301 to canonical URLs.
+- Step 4.1: Embed Plausible analytics script
+  - Files: modify `apps/web/src/app/layout.tsx`
+  - Add a `<Script>` tag (from `next/script`) with `strategy="afterInteractive"` loading the Plausible tracker. Use `data-domain="gblockparty.com"`. The script URL is `https://plausible.io/js/script.js` (standard Plausible Cloud).
+  - Guard with `process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN` so the script only loads when the env var is set (avoids tracking in dev/preview). Fall back to no script when unset.
+  - **Prerequisite:** User must have a Plausible account with `gblockparty.com` site created (manual task). The script embed itself is automatable — no API key needed for the basic Plausible snippet.
+- Step 4.2: Build YouTube view-count scraper script
+  - Files: create `scripts/scrape-youtube.mjs`
+  - Node.js script (ESM, no external deps beyond `node:https`/`node:fs`) that:
+    1. Fetches the YouTube channel page HTML for `@GeorgeQLe` (or the channel's `/videos` tab).
+    2. Parses `ytInitialData` JSON embedded in the HTML to extract video entries (title, videoId, viewCount, publishedTimeText).
+    3. Writes `data/youtube-views.json` with shape `{ scrapedAt: ISO string, videos: [{ videoId, title, viewCount, publishedTimeText }] }`.
+  - Handle gracefully: channel page structure changes (log warning, exit non-zero so the Action surfaces the failure). No YouTube API key needed — this is HTML scraping per spec §9.
+  - Create `data/.gitkeep` so the directory is tracked before the first scrape.
+- Step 4.3: Create GitHub Action for nightly YT scrape
+  - Files: create `.github/workflows/scrape-youtube.yml`
+  - Workflow: `schedule: cron: "0 6 * * *"` (6 AM UTC daily) + `workflow_dispatch` for manual runs.
+  - Steps: checkout repo, setup Node 20, run `node scripts/scrape-youtube.mjs`, check if `data/youtube-views.json` changed (`git diff --quiet`), if changed: commit + push, then trigger Vercel rebuild via `vercel deploy --prod` or Vercel deploy hook.
+  - Needs: `VERCEL_TOKEN` and `VERCEL_PROJECT_ID` as repo secrets for the rebuild trigger (or a Vercel Deploy Hook URL as `VERCEL_DEPLOY_HOOK`).
+  - Note: The Action uses `git push` to commit the scraped data — this is repo automation, not deployment. The Vercel rebuild is triggered separately.
+- Step 4.4: Surface view counts on gBlock detail pages
+  - Files: create `apps/web/src/lib/content/views.ts`, modify `apps/web/src/app/[collection]/[slug]/page.tsx`, modify `apps/web/src/components/GBlockCard.tsx`
+  - `views.ts`: export `loadViewCounts()` that reads `data/youtube-views.json` (if it exists) and returns a `Map<videoId, number>`. Gracefully returns empty map if file doesn't exist (first build before any scrape).
+  - Detail page: extract video ID from `block.videoUrl` (regex on YouTube URL), look up view count, render a small "▶ X views" badge in the metadata bar next to TypeBadge/CollectionBadge/date.
+  - `GBlockCard`: optionally accept and display view count as a small label if available.
+  - Build-time injection: view counts are read at build time via `fs.readFileSync` in server components — no client-side fetch needed.
+- Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
+  - Files: modify `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/boston-founder-radio.yaml`
+  - Set `status: Archived`, `lifecycleState: archived`, add `archivedAt: "2026-04-27"` and `archivedReason: "Dropped per gBlockParty spec §2 — no real guest pipeline. Content migrated to gBlockParty collections."`.
+  - Do NOT delete the file — the war-room convention is to archive in-place with status fields, not move to a subdirectory (no `archive/` folder exists in the portfolio).
+  - This is a cross-repo edit — commit separately in the lexcorp-war-room repo.
+- Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
+  - Files: create `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/gblockparty.yaml`
+  - Shape matching existing portfolio entries (e.g. `boston-founder-radio.yaml`): `slug`, `name`, `businessUnit`, `status`, `lifecycleState`, `description`, `url`, `competitorTarget`, `productType`, `parentSlug`, `githubRepo`, `repoPath`, `seeded`, `metrics.keyMetrics[]`.
+  - KPI set per spec §9: `total_visitors` (Plausible), `views_per_collection` (weekly, from YT scrape), `top_5_gblocks_by_views` (from YT scrape), `seo_rank_target_queries` (manual/external), `yt_to_site_referral` (Plausible referrer), `paying_members` (dormant — carried from BFR, `needs_instrumentation`).
+  - Cross-repo commit in lexcorp-war-room.
+- Step 4.7: PaywallCard visual + copy polish
+  - Files: modify `apps/web/src/components/PaywallCard.tsx`
+  - Polish pass: tighten spacing (reduce padding, adjust gradient overlap), refine CTA copy (more specific than "Join gBlockParty" — e.g., "Unlock full gBlock" or "Get member access"), ensure the disabled button has clear visual affordance (opacity + cursor-not-allowed), add a brief subtitle explaining what membership includes. Verify with a temporary `membership: member` fixture gBlock, then revert the fixture.
+  - No functional changes — this is visual/copy only.
 
 ### Green
-- Step 3.9: Write regression tests for Phase 3 acceptance criteria
-  - Files: modify `apps/web/src/__tests__/pages.test.ts` (add Phase 3 canary-specific tests)
-  - Cases: (1) `loadAllGBlocks()` returns canary gBlocks with production video IDs (not placeholder `dQw4w9WgXcQ`), (2) all 3 GCanBuild canaries have `type: tutorial`, (3) SOTA canary has `type: episode` + `videoUrl`, (4) Weekly G canary has `type: episode` + `featured: true`, (5) at least 2 canaries have `featured: true`, (6) `full-stack-web-app` slug exists.
-- Step 3.10: Final verification — all tests, typecheck, build green
+- Step 4.8: Write regression tests for Phase 4 acceptance criteria
+  - Files: modify `apps/web/src/__tests__/pages.test.ts`
+  - Cases: (1) `loadViewCounts()` returns empty map when `data/youtube-views.json` doesn't exist, (2) `loadViewCounts()` parses valid JSON and returns correct videoId→count map, (3) Plausible script conditional: verify layout renders script tag when env var is set (may need to test at build level or inspect HTML output), (4) `extractPreview` still works correctly (no regression from PaywallCard polish), (5) scraper script exists and is executable.
+- Step 4.9: Final verification — all tests, typecheck, build green
   - Commands: `pnpm -w test`, `pnpm -w -r typecheck`, `pnpm --filter @gblockparty/web build`
-  - Expected: all tests pass (Phase 1 + Phase 2 + Phase 3), typecheck clean, production build succeeds with canary pages.
+  - Expected: all tests pass (Phase 1 + Phase 2 + Phase 3 + Phase 4), typecheck clean, production build succeeds.
 
-### Milestone: Phase 3 Launch Ready
-- [x] All 5 canary MDX files exist under `content/gblocks/<collection>/<slug>.mdx` and validate against the Phase-1 schema.
-- [x] `https://gblockparty.com` resolves to the Vercel deploy with a valid TLS cert.
-- [x] Home page shows featured-rail pins for the `featured: true` canaries and the firehose lists all 5.
-- [x] Each of the 3 collection pages (`/gcanbuild`, `/weekly-sota`, `/weekly-g`) lists its canary.
-- [x] Each canary `/<collection>/<slug>` URL renders correctly with type-appropriate header (video embed on SOTA + Weekly G, hero image on GCanBuild tutorials).
-- [x] `/g/<slug>` short-links for all 5 canaries 301 to canonical URLs.
-- [x] All phase tests pass.
-- [x] No regressions in previous phase tests.
+### Milestone: Phase 4 Polish Complete
+**Acceptance Criteria:**
+- [ ] Plausible script loads on every page; a test page view appears in the Plausible dashboard.
+- [ ] GitHub Action runs on a nightly cron; a successful run commits `data/youtube-views.json` with at least 15 video entries and triggers a Vercel rebuild.
+- [ ] gBlock pages optionally display the scraped view count when a matching video ID is present.
+- [ ] `lexcorp-war-room/portfolio/boston-founder-radio.yaml` is no longer active; `portfolio/gblockparty.yaml` exists with the Phase-1 KPI set populated.
+- [ ] `PaywallCard` forced-render fixture passes visual review (no broken copy, clear CTA).
+- [ ] All phase tests pass.
+- [ ] No regressions in previous phase tests.
 
-**On Completion**:
-- Deviations from plan: Step 3.4 (Weekly G Ep 1) deferred — blocked on user recording. Weekly G collection hidden via `HIDDEN_COLLECTIONS`. Effectively 4 canaries live instead of 5.
-- Tech debt / follow-ups: Weekly G canary pending user video recording. GitHub default branch is `main` (stale from old project), current work on `master`. Vercel GitHub App not authorized — manual deploys via `vercel deploy --prod` for now. `next-mdx-remote` upgraded from v5→v6 for Vercel compatibility.
-- Ready for next phase: Yes — Phase 3 Launch Ready milestone fully met.
-
-## Phase 3 Complete
-
-All verification gates passed on 2026-04-27:
-- `pnpm -w test` — 33/33 green (14 schema + 5 loader + 14 pages)
-- `pnpm -w -r typecheck` — clean (2 packages)
-- `pnpm --filter @gblockparty/web build` — 12 pages generated
+**On Completion** (fill in when phase is done):
+- Deviations from plan:
+- Tech debt / follow-ups:
+- Ready for next phase:
 
 ---
 
-## Follow-ups (deferred; revisit in later phases)
+## Follow-ups (carried from Phase 3)
 
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
-- [ ] Decommission `lexcorp-war-room/portfolio/boston-founder-radio.yaml` — scheduled for Phase 4.
-- [ ] Add `lexcorp-war-room/portfolio/gblockparty.yaml` with platform-level KPIs — scheduled for Phase 4.
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
