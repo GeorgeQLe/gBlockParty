@@ -9,7 +9,7 @@
 - [x] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
 - [x] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
 - [x] Step 3.3: Author Weekly SOTA canary MDX
-- [ ] Step 3.5: Production build config (metadataBase, env)
+- [x] Step 3.5: Production build config (metadataBase, env)
 - [ ] Step 3.6: Create GitHub repo + push
 - [ ] Step 3.7: Create Vercel project + configure domain
 - [ ] Step 3.8: Verify live deployment + smoke test
@@ -103,30 +103,32 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.5 — Production build config (metadataBase, env)
+## Next step: Phase 3, Step 3.6 — Create GitHub repo + push
 
 ### Context
 
-Step 3.4 (Weekly G canary) deferred — blocked on user recording video. Weekly G hidden from site via `HIDDEN_COLLECTIONS`. 4 canary MDX files active (3 GCanBuild + Weekly SOTA). 28/28 tests green, build green (12 pages — down from 14 because weekly-g collection page + detail page excluded).
+Step 3.5 complete — `metadataBase` set to `https://gblockparty.com` in root layout. Build green (12 pages), 28/28 tests green. `next.config.ts` is minimal and Vercel-ready. Step 3.4 (Weekly G) still deferred.
 
 ### What this step does
 
-Set `metadataBase` in the root layout so OG image URLs resolve correctly in production. Verify the build is Vercel-ready.
+Create the `GeorgeQLe/gblockparty` GitHub repo via `gh` CLI and push `master`.
 
 **Key actions:**
-1. Set `metadataBase: new URL("https://gblockparty.com")` in `apps/web/src/app/layout.tsx`.
-2. Verify `next.config.ts` has no Vercel deployment blockers.
-3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build` (expect metadataBase warning gone).
+1. Verify `gh` CLI is authenticated (`gh auth status`).
+2. Create the repo: `gh repo create GeorgeQLe/gblockparty --public --source . --push` (or equivalent).
+3. Verify the repo is accessible at `github.com/GeorgeQLe/gblockparty`.
+
+**Blocked on manual task:** User must confirm `gh` CLI is authenticated.
 
 ### Files to modify
 
-- Modify `apps/web/src/app/layout.tsx`
+- None (CLI-only step).
 
-### Acceptance criteria for Step 3.5
+### Acceptance criteria for Step 3.6
 
-- [ ] `metadataBase` set to `https://gblockparty.com` in root layout.
-- [ ] Build succeeds with no metadataBase warning.
-- [ ] All tests still green.
+- [ ] `gh auth status` shows authenticated.
+- [ ] `GeorgeQLe/gblockparty` repo exists on GitHub.
+- [ ] `master` branch pushed to remote.
 
 ---
 
