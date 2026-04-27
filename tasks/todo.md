@@ -12,7 +12,7 @@
 - [x] Step 3.5: Production build config (metadataBase, env)
 - [x] Step 3.6: Create GitHub repo + push
 - [x] Step 3.7: Create Vercel project + configure domain
-- [ ] Step 3.8: Verify live deployment + smoke test
+- [x] Step 3.8: Verify live deployment + smoke test
 - [ ] Step 3.9: Write regression tests for Phase 3 acceptance criteria
 - [ ] Step 3.10: Final verification — all tests, typecheck, build green
 
@@ -103,35 +103,30 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.8 — Verify live deployment + smoke test
+## Next step: Phase 3, Step 3.9 — Write regression tests for Phase 3 acceptance criteria
 
 ### Context
 
-Step 3.7 complete — Vercel project `gblockparty` created, root directory set to `apps/web`, framework set to Next.js. Domain `gblockparty.com` + `www.gblockparty.com` assigned (Vercel-registered domain, nameservers already correct). Production deploy live via `vercel deploy --prod` — build green (12 pages). Upgraded `next-mdx-remote` from 5.0.0 to 6.0.0 to pass Vercel's vulnerability check. GitHub repo integration pending (user must authorize Vercel GitHub App for `GeorgeQLe/gBlockParty` in browser).
+Step 3.8 complete — live smoke tests all pass. `https://gblockparty.com` resolves with valid TLS (HTTP/2 200, HSTS enabled). Homepage renders Featured rail with pinned canaries. Collection pages `/gcanbuild` (200), `/weekly-sota` (200), `/boston-founder-radio` (200, empty — no content yet, expected). All detail pages render type-appropriate headers: tutorials show hero images + YouTube embeds, episodes show YouTube embeds. `/g/<slug>` short-links 301 to canonical URLs for all 4 content slugs. OG metadata (`og:title`, `og:description`, `og:image`) correct on homepage and detail pages.
 
 ### What this step does
 
-Verify the live production deployment at `https://gblockparty.com` is working correctly.
+Write regression tests for Phase 3 acceptance criteria.
 
 **Key actions:**
-1. Verify `https://gblockparty.com` resolves with valid TLS cert.
-2. Smoke test key pages: home page, collection pages, gBlock detail pages, `/g/<slug>` redirects.
-3. Check that featured rail shows pinned canaries, collection pages list their gBlocks, detail pages render type-appropriate headers.
-4. Verify OG metadata is correct on key pages.
-
-**Blocked on manual task:** User must authorize Vercel GitHub App for `GeorgeQLe/gBlockParty` (for auto-deploy on push). The site is already live via manual deploy, so smoke testing can proceed.
+1. Add Phase 3 canary-specific test cases to `apps/web/src/__tests__/pages.test.ts`.
+2. Cases per plan: (1) `loadAllGBlocks()` returns canary gBlocks with production video IDs (not placeholder `dQw4w9WgXcQ`), (2) all 3 GCanBuild canaries have `type: tutorial`, (3) SOTA canary has `type: episode` + `videoUrl`, (4) at least 2 canaries have `featured: true`, (5) `full-stack-web-app` slug exists.
+3. Run `pnpm -w test` to verify all tests pass.
 
 ### Files to modify
 
-- None (verification-only step).
+- `apps/web/src/__tests__/pages.test.ts` (add Phase 3 canary-specific tests)
 
-### Acceptance criteria for Step 3.8
+### Acceptance criteria for Step 3.9
 
-- [ ] `https://gblockparty.com` resolves with valid TLS cert.
-- [ ] Home page loads with featured rail showing pinned canaries.
-- [ ] Each collection page (`/gcanbuild`, `/weekly-sota`, `/boston-founder-radio`) lists its canaries.
-- [ ] Each canary detail page renders type-appropriate header (video embed for episodes, hero image for tutorials).
-- [ ] `/g/<slug>` short-links 301 to canonical URLs.
+- [ ] Phase 3 regression tests added and passing.
+- [ ] No regressions in existing tests (28/28 + new tests all green).
+- [ ] `pnpm -w test` exits 0.
 
 ---
 
