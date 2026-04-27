@@ -8,7 +8,7 @@
 
 - [x] Step 4.1: Embed Plausible analytics script
 - [x] Step 4.2: Build YouTube view-count scraper script
-- [ ] Step 4.3: Create GitHub Action for nightly YT scrape
+- [x] Step 4.3: Create GitHub Action for nightly YT scrape
 - [ ] Step 4.4: Surface view counts on gBlock detail pages
 - [ ] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
 - [ ] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
@@ -110,31 +110,33 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.2 — Build YouTube view-count scraper script
+## Next step: Phase 4, Step 4.4 — Surface view counts on gBlock detail pages
 
 ### Context
 
-Step 4.1 complete — Plausible analytics embedded. 33/33 tests green. Next: build the YouTube view-count scraper that will feed into the nightly GitHub Action (Step 4.3) and gBlock detail pages (Step 4.4).
+Steps 4.2–4.3 delivered the YouTube scraper and its nightly GitHub Action. `data/youtube-views.json` now exists with `{ scrapedAt, videos: [{ videoId, title, viewCount, publishedTimeText }] }` shape. Step 4.4 wires these view counts into the site so they're visible on gBlock detail pages at build time.
 
 ### What this step does
 
-Create `scripts/scrape-youtube.mjs` — a Node.js ESM script (no external deps) that scrapes the `@GeorgeQLe` YouTube channel page, extracts video metadata from `ytInitialData`, and writes `data/youtube-views.json`.
+1. Create `apps/web/src/lib/content/views.ts`:
+   - Export `loadViewCounts(): Map<string, number>` — reads `data/youtube-views.json` (relative to content root), parses it, returns a `Map<videoId, viewCount>`. Returns empty map if the file doesn't exist (graceful for first build before any scrape).
+   - Export `extractVideoId(url: string): string | null` — extracts YouTube video ID from a URL (handles `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/embed/` patterns).
 
-**Key actions:**
-1. Create `data/.gitkeep` so the directory is tracked before the first scrape.
-2. Create `scripts/scrape-youtube.mjs`:
-   - Fetch `https://www.youtube.com/@GeorgeQLe/videos` via `node:https`.
-   - Parse `ytInitialData` JSON embedded in the page HTML.
-   - Extract video entries: `videoId`, `title`, `viewCount`, `publishedTimeText`.
-   - Write `data/youtube-views.json` with shape `{ scrapedAt: ISO string, videos: [...] }`.
-   - Handle gracefully: if page structure changes, log a warning and exit non-zero.
-3. Test locally: `node scripts/scrape-youtube.mjs` should produce valid JSON with ≥1 video entry.
-4. Run `pnpm -w -r typecheck` and `pnpm --filter @gblockparty/web build` to verify no regressions.
+2. Modify `apps/web/src/app/[collection]/[slug]/page.tsx`:
+   - Import `loadViewCounts` and `extractVideoId`.
+   - In the page component, load view counts, extract video ID from `block.videoUrl` (if present), look up the count.
+   - Render a small "▶ X views" indicator in the metadata bar (next to TypeBadge/CollectionBadge/date) when a view count is available.
+
+3. Optionally modify `apps/web/src/components/GBlockCard.tsx`:
+   - Accept an optional `viewCount?: number` prop.
+   - Display a small view count label when provided.
 
 ### Files to create/modify
 
-- Create `data/.gitkeep`
-- Create `scripts/scrape-youtube.mjs`
+- Create `apps/web/src/lib/content/views.ts`
+- Modify `apps/web/src/app/[collection]/[slug]/page.tsx`
+- Modify `apps/web/src/components/GBlockCard.tsx` (optional)
+- Modify `apps/web/src/lib/content/index.ts` (re-export new symbols)
 
 ### Execution Profile
 
@@ -143,16 +145,17 @@ Create `scripts/scrape-youtube.mjs` — a Node.js ESM script (no external deps) 
 **Conflict risk:** low
 **Review gates:** correctness, tests
 
-### Acceptance criteria for Step 4.2
+### Acceptance criteria for Step 4.4
 
-- [ ] `scripts/scrape-youtube.mjs` exists and is executable.
-- [ ] `node scripts/scrape-youtube.mjs` produces `data/youtube-views.json` with valid JSON.
-- [ ] JSON shape: `{ scrapedAt: string, videos: [{ videoId, title, viewCount, publishedTimeText }] }`.
-- [ ] Script exits non-zero with a warning if it can't parse `ytInitialData`.
+- [ ] `loadViewCounts()` returns empty map when `data/youtube-views.json` doesn't exist.
+- [ ] `loadViewCounts()` parses valid JSON and returns correct `videoId → count` map.
+- [ ] `extractVideoId()` handles standard YouTube URL patterns.
+- [ ] Detail pages show view count when a matching video ID is found in the scraped data.
+- [ ] Detail pages render normally (no error) when no view data exists.
 - [ ] `pnpm -w -r typecheck` exits 0.
 - [ ] `pnpm --filter @gblockparty/web build` exits 0.
 - [ ] No test regressions (`pnpm -w test` still 33/33 green).
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.2. Validate it (typecheck + build + tests + manual run). Mark Step 4.2 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Deploy only when `tasks/deploy.md` exists. Write Step 4.3 plan. Enter plan mode for Step 4.3 approval.
+After approval, implement only Step 4.4. Validate (typecheck + build + tests). Mark Step 4.4 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Write Step 4.5 plan. Enter plan mode for Step 4.5 approval.
