@@ -6,7 +6,7 @@
 
 ## Priority Task Queue
 
-- [ ] Step 4.1: Embed Plausible analytics script
+- [x] Step 4.1: Embed Plausible analytics script
 - [ ] Step 4.2: Build YouTube view-count scraper script
 - [ ] Step 4.3: Create GitHub Action for nightly YT scrape
 - [ ] Step 4.4: Surface view counts on gBlock detail pages
@@ -110,28 +110,31 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.1 — Embed Plausible analytics script
+## Next step: Phase 4, Step 4.2 — Build YouTube view-count scraper script
 
 ### Context
 
-Phase 3 complete — site live at `gblockparty.com`, 33/33 tests green. Phase 4 starts with analytics instrumentation.
+Step 4.1 complete — Plausible analytics embedded. 33/33 tests green. Next: build the YouTube view-count scraper that will feed into the nightly GitHub Action (Step 4.3) and gBlock detail pages (Step 4.4).
 
 ### What this step does
 
-Add the Plausible analytics script to the root layout so every page tracks page views.
+Create `scripts/scrape-youtube.mjs` — a Node.js ESM script (no external deps) that scrapes the `@GeorgeQLe` YouTube channel page, extracts video metadata from `ytInitialData`, and writes `data/youtube-views.json`.
 
 **Key actions:**
-1. Import `Script` from `next/script` in `apps/web/src/app/layout.tsx`.
-2. Add a `<Script>` tag inside `<body>` with:
-   - `src="https://plausible.io/js/script.js"`
-   - `data-domain="gblockparty.com"`
-   - `strategy="afterInteractive"`
-3. Guard with `process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN` — only render the script when the env var is set. This prevents tracking in dev/preview environments.
-4. Run `pnpm -w -r typecheck` and `pnpm --filter @gblockparty/web build` to verify.
+1. Create `data/.gitkeep` so the directory is tracked before the first scrape.
+2. Create `scripts/scrape-youtube.mjs`:
+   - Fetch `https://www.youtube.com/@GeorgeQLe/videos` via `node:https`.
+   - Parse `ytInitialData` JSON embedded in the page HTML.
+   - Extract video entries: `videoId`, `title`, `viewCount`, `publishedTimeText`.
+   - Write `data/youtube-views.json` with shape `{ scrapedAt: ISO string, videos: [...] }`.
+   - Handle gracefully: if page structure changes, log a warning and exit non-zero.
+3. Test locally: `node scripts/scrape-youtube.mjs` should produce valid JSON with ≥1 video entry.
+4. Run `pnpm -w -r typecheck` and `pnpm --filter @gblockparty/web build` to verify no regressions.
 
-### Files to modify
+### Files to create/modify
 
-- `apps/web/src/app/layout.tsx` — add Plausible `<Script>` tag
+- Create `data/.gitkeep`
+- Create `scripts/scrape-youtube.mjs`
 
 ### Execution Profile
 
@@ -140,13 +143,16 @@ Add the Plausible analytics script to the root layout so every page tracks page 
 **Conflict risk:** low
 **Review gates:** correctness, tests
 
-### Acceptance criteria for Step 4.1
+### Acceptance criteria for Step 4.2
 
-- [ ] Plausible script tag present in the root layout, guarded by env var.
+- [ ] `scripts/scrape-youtube.mjs` exists and is executable.
+- [ ] `node scripts/scrape-youtube.mjs` produces `data/youtube-views.json` with valid JSON.
+- [ ] JSON shape: `{ scrapedAt: string, videos: [{ videoId, title, viewCount, publishedTimeText }] }`.
+- [ ] Script exits non-zero with a warning if it can't parse `ytInitialData`.
 - [ ] `pnpm -w -r typecheck` exits 0.
 - [ ] `pnpm --filter @gblockparty/web build` exits 0.
 - [ ] No test regressions (`pnpm -w test` still 33/33 green).
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.1. Validate it (typecheck + build + tests). Mark Step 4.1 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Deploy only when an explicit manual deploy contract exists (`tasks/deploy.md`). Write the Step 4.2 plan into `tasks/todo.md`. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`. Start the approval UI for Step 4.2 by calling `EnterPlanMode`, write a brief pass-through plan, call `ExitPlanMode`, and stop.
+After approval, implement only Step 4.2. Validate it (typecheck + build + tests + manual run). Mark Step 4.2 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Deploy only when `tasks/deploy.md` exists. Write Step 4.3 plan. Enter plan mode for Step 4.3 approval.
