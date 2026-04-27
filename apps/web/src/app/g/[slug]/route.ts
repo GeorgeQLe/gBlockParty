@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { loadAllGBlocks } from "@/lib/content";
+import { HIDDEN_COLLECTIONS } from "@/lib/hidden-collections";
 
 function resolveContentRoot(): string {
   const candidate = path.join(process.cwd(), "content");
@@ -20,7 +21,7 @@ export async function GET(_request: Request, { params }: RouteProps) {
   const blocks = loadAllGBlocks({ contentRoot });
   const block = blocks.find((b) => b.slug === slug);
 
-  if (!block) {
+  if (!block || HIDDEN_COLLECTIONS.includes(block.collection)) {
     return new NextResponse("Not found", { status: 404 });
   }
 

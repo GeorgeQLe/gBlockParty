@@ -12,7 +12,7 @@ const ALL_TYPES: GBlockType[] = [
   "demo",
 ];
 
-const COLLECTIONS = ["gcanbuild", "weekly-sota", "weekly-g"];
+const COLLECTIONS = ["gcanbuild", "weekly-sota"];
 
 export interface FirehoseFeedProps {
   blocks: GBlock[];

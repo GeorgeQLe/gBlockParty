@@ -4,6 +4,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { GBlockType } from "@gblockparty/gblock-schema";
 import { loadCollection, loadAllGBlocks } from "@/lib/content";
+import { HIDDEN_COLLECTIONS } from "@/lib/hidden-collections";
 import { GBlockCard } from "@/components/GBlockCard";
 
 function resolveContentRoot(): string {
@@ -24,7 +25,8 @@ export function generateStaticParams(): { collection: string }[] {
   return fs
     .readdirSync(collectionsRoot)
     .filter((f) => f.endsWith(".yaml"))
-    .map((f) => ({ collection: f.replace(/\.yaml$/, "") }));
+    .map((f) => ({ collection: f.replace(/\.yaml$/, "") }))
+    .filter((p) => !HIDDEN_COLLECTIONS.includes(p.collection));
 }
 
 export async function generateMetadata({

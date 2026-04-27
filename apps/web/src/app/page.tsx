@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "path";
 import type { Metadata } from "next";
 import { loadAllGBlocks } from "@/lib/content";
+import { HIDDEN_COLLECTIONS } from "@/lib/hidden-collections";
 
 function resolveContentRoot(): string {
   const candidate = path.join(process.cwd(), "content");
@@ -31,7 +32,7 @@ export default async function HomePage({
   const { type, collection } = await searchParams;
   const blocks = loadAllGBlocks({
     contentRoot: resolveContentRoot(),
-  });
+  }).filter((b) => !HIDDEN_COLLECTIONS.includes(b.collection));
 
   if (blocks.length === 0) {
     return (

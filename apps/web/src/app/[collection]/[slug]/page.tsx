@@ -5,6 +5,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { compileMDX } from "next-mdx-remote/rsc";
 import { loadAllGBlocks, type LoadedGBlock } from "@/lib/content";
+import { HIDDEN_COLLECTIONS } from "@/lib/hidden-collections";
 import { TypeBadge } from "@/components/TypeBadge";
 import { CollectionBadge } from "@/components/CollectionBadge";
 import { PaywallCard } from "@/components/PaywallCard";
@@ -41,10 +42,12 @@ function findBlock(
 }
 
 export function generateStaticParams(): { collection: string; slug: string }[] {
-  return loadAllGBlocks({ contentRoot }).map((b) => ({
-    collection: b.collection,
-    slug: b.slug,
-  }));
+  return loadAllGBlocks({ contentRoot })
+    .filter((b) => !HIDDEN_COLLECTIONS.includes(b.collection))
+    .map((b) => ({
+      collection: b.collection,
+      slug: b.slug,
+    }));
 }
 
 export async function generateMetadata({
