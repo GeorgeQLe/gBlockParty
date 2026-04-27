@@ -6,15 +6,12 @@
 
 ## Priority Task Queue
 
-- [x] Step 4.1: Embed Plausible analytics script
-- [x] Step 4.2: Build YouTube view-count scraper script
-- [x] Step 4.3: Create GitHub Action for nightly YT scrape
-- [x] Step 4.4: Surface view counts on gBlock detail pages
-- [x] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
-- [x] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
-- [x] Step 4.7: PaywallCard visual + copy polish
-- [x] Step 4.8: Write regression tests for Phase 4 acceptance criteria
-- [x] Step 4.9: Final verification — all tests, typecheck, build green
+- [x] All 4 roadmap phases complete (Phase 1–4 shipped and archived).
+- [ ] Complete manual task: "Create Plausible site entry for `gblockparty.com`" _(blocks: dashboard verification)_ — resolve before verifying analytics in production.
+- [ ] Complete manual task: "Add `VERCEL_DEPLOY_HOOK` as GitHub repo secret" _(blocks: nightly scraper Action)_ — resolve before the GitHub Action can trigger Vercel rebuilds.
+- [ ] Complete manual task: "Verify a test page view appears in the Plausible dashboard" — resolve after Plausible site is created and site is deployed.
+- [ ] Complete manual task: "Record Weekly G Ep 1 video + upload to YouTube" _(blocks: Step 3.4 deferred)_ — resolve before Weekly G collection can be unhidden.
+- [ ] `/research-roadmap` - scan documentation health and recommend next documentation or research work, now that all implementation phases are complete.
 
 ## Phase 4: Polish
 

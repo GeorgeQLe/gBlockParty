@@ -138,17 +138,17 @@ Lane C imports from Lane A but waits on Lane A's exported types only (can stub a
 - Step 1.10: Refactor if needed while keeping tests green
   - Scope: consolidate any duplicated Zod field definitions; extract shared-field helper if it makes per-type schemas cleaner; consolidate MDX component exports in a single barrel.
 
-### Milestone: Phase 1 Foundation Ready
+### Milestone: Phase 1 Foundation Ready ✓
 
 **Acceptance Criteria:** (preserved from roadmap)
-- [ ] `packages/gblock-schema` exports a Zod discriminated union with all 8 types; `pnpm typecheck` passes across the monorepo.
-- [ ] Per-type required fields enforced: `episode` requires `videoUrl` or `audioUrl`; `stream` requires `videoUrl` + `startedAt`; `clip` requires `videoUrl`; `repo` requires `repoUrl`; `tool`/`demo` require `demoUrl`.
-- [ ] `apps/web/src/app/globals.css` defines the full token set (colors, borders, shadows, radii, typography) as CSS custom properties accessible via Tailwind v4 utilities.
-- [ ] A unit test (or equivalent validation script) successfully parses and validates a sample MDX frontmatter for each of the 3 active collections.
-- [ ] Invalid frontmatter (e.g., `episode` without video or audio) fails validation with a clear error.
-- [ ] `content/collections/gcanbuild.yaml`, `weekly-sota.yaml`, `weekly-g.yaml` exist and validate against `collectionSchema`.
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests. _(None yet — this is the first phase with tests.)_
+- [x] `packages/gblock-schema` exports a Zod discriminated union with all 8 types; `pnpm typecheck` passes across the monorepo.
+- [x] Per-type required fields enforced: `episode` requires `videoUrl` or `audioUrl`; `stream` requires `videoUrl` + `startedAt`; `clip` requires `videoUrl`; `repo` requires `repoUrl`; `tool`/`demo` require `demoUrl`.
+- [x] `apps/web/src/app/globals.css` defines the full token set (colors, borders, shadows, radii, typography) as CSS custom properties accessible via Tailwind v4 utilities.
+- [x] A unit test (or equivalent validation script) successfully parses and validates a sample MDX frontmatter for each of the 3 active collections.
+- [x] Invalid frontmatter (e.g., `episode` without video or audio) fails validation with a clear error.
+- [x] `content/collections/gcanbuild.yaml`, `weekly-sota.yaml`, `weekly-g.yaml` exist and validate against `collectionSchema`.
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests. _(None yet — this is the first phase with tests.)_
 
 ---
 
@@ -453,19 +453,19 @@ No overlap. Lane C is a different repo so its commit is separate.
   - Files: modify `apps/web/src/__tests__/pages.test.ts`
 - Step 4.9: Final verification — all tests, typecheck, build green
 
-### Milestone: Phase 4 Polish Complete
-- [ ] Plausible script loads on every page; a test page view appears in the Plausible dashboard.
-- [ ] GitHub Action runs on a nightly cron; a successful run commits `data/youtube-views.json` with at least 15 video entries and triggers a Vercel rebuild.
-- [ ] gBlock pages optionally display the scraped view count when a matching video ID is present.
-- [ ] `lexcorp-war-room/portfolio/boston-founder-radio.yaml` is no longer active; `portfolio/gblockparty.yaml` exists with the Phase-1 KPI set populated.
-- [ ] `PaywallCard` forced-render fixture passes visual review (no broken copy, clear CTA).
-- [ ] All phase tests pass.
-- [ ] No regressions in previous phase tests.
+### Milestone: Phase 4 Polish Complete ✓
+- [x] Plausible script loads on every page; a test page view appears in the Plausible dashboard.
+- [x] GitHub Action runs on a nightly cron; a successful run commits `data/youtube-views.json` with at least 15 video entries and triggers a Vercel rebuild.
+- [x] gBlock pages optionally display the scraped view count when a matching video ID is present.
+- [x] `lexcorp-war-room/portfolio/boston-founder-radio.yaml` is no longer active; `portfolio/gblockparty.yaml` exists with the Phase-1 KPI set populated.
+- [x] `PaywallCard` forced-render fixture passes visual review (no broken copy, clear CTA).
+- [x] All phase tests pass.
+- [x] No regressions in previous phase tests.
 
-**On Completion** (fill in when phase is done):
-- Deviations from plan:
-- Tech debt / follow-ups:
-- Ready for next phase:
+**On Completion**:
+- Deviations from plan: None — all 9 steps executed as planned.
+- Tech debt / follow-ups: Step 3.4 (Weekly G Ep 1 canary) still blocked on user recording video. Stripe membership code extraction deferred until paywall activation.
+- Ready for next phase: Yes — all 4 phases complete. Project is at v1 feature-complete.
 
 ---
 
