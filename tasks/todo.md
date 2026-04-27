@@ -9,7 +9,6 @@
 - [x] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
 - [x] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
 - [x] Step 3.3: Author Weekly SOTA canary MDX
-- [ ] Step 3.4: Author Weekly G Ep 1 canary MDX
 - [ ] Step 3.5: Production build config (metadataBase, env)
 - [ ] Step 3.6: Create GitHub repo + push
 - [ ] Step 3.7: Create Vercel project + configure domain
@@ -62,10 +61,6 @@
   - If reframing existing video: update `videoUrl` to the real video ID, write show-notes-style MDX body (topic summary, key quotes/claims, links to referenced articles, timestamps).
   - If new recording: user provides video ID + topic after recording; then author MDX.
   - Keep `featured: false` (SOTA is not pinned to featured rail at launch).
-- Step 3.4: Author Weekly G Ep 1 canary MDX
-  - Files: modify `content/gblocks/weekly-g/weekly-g-ep-001.mdx`
-  - **Blocked on manual task:** User must record Weekly G Ep 1 video and provide the YouTube video ID.
-  - Once video exists: update `videoUrl` to real ID, write vlog-style MDX body (episode summary, key topics covered, links). Keep `featured: true`.
 - Step 3.5: Production build config (metadataBase, env)
   - Files: modify `apps/web/src/app/layout.tsx` (set `metadataBase` to `https://gblockparty.com`), optionally create `vercel.json` if framework detection needs hints
   - Set `metadataBase: new URL("https://gblockparty.com")` in the root layout metadata export — this resolves the build warning about social OG images and ensures all OG URLs are absolute in production.
@@ -108,62 +103,36 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.4 — Author Weekly G Ep 1 canary MDX
+## Next step: Phase 3, Step 3.5 — Production build config (metadataBase, env)
 
 ### Context
 
-Step 3.3 complete — 4 of 5 canary MDX files done (3 GCanBuild tutorials + Weekly SOTA Ep 1). 28/28 tests green, build green (14 pages). One canary remaining: Weekly G Ep 1.
-
-### Ship status going in
-
-- **Shipped last session:** Step 3.3 — upgraded Weekly SOTA canary (`_G8iJRMiCJY`).
-- **Test status:** `pnpm -w test` 28/28 green. `pnpm --filter @gblockparty/web build` green (14 pages).
-- **No git remote:** local `master` only; `git push` is a local no-op.
-- **Deploy:** none.
+Step 3.4 (Weekly G canary) deferred — blocked on user recording video. Weekly G hidden from site via `HIDDEN_COLLECTIONS`. 4 canary MDX files active (3 GCanBuild + Weekly SOTA). 28/28 tests green, build green (12 pages — down from 14 because weekly-g collection page + detail page excluded).
 
 ### What this step does
 
-Upgrade the existing `content/gblocks/weekly-g/weekly-g-ep-001.mdx` fixture from placeholder to production canary.
+Set `metadataBase` in the root layout so OG image URLs resolve correctly in production. Verify the build is Vercel-ready.
 
 **Key actions:**
-1. **Get the real YouTube video ID** from the user (user must record Weekly G Ep 1 first).
-2. **Upgrade** `weekly-g-ep-001.mdx`: update `videoUrl` to real video ID, write vlog-style MDX body (episode summary, key topics covered, links). Keep `featured: true`.
-3. **Validate** with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
-
-### Manual prerequisite
-
-**Before implementing:** User must record Weekly G Ep 1 video and provide the YouTube video ID.
+1. Set `metadataBase: new URL("https://gblockparty.com")` in `apps/web/src/app/layout.tsx`.
+2. Verify `next.config.ts` has no Vercel deployment blockers.
+3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build` (expect metadataBase warning gone).
 
 ### Files to modify
 
-- Modify `content/gblocks/weekly-g/weekly-g-ep-001.mdx`
+- Modify `apps/web/src/app/layout.tsx`
 
-### Acceptance criteria for Step 3.4
+### Acceptance criteria for Step 3.5
 
-- [ ] `weekly-g-ep-001.mdx` has real YouTube video ID (not placeholder).
-- [ ] MDX body is vlog-style with episode summary and key topics.
-- [ ] `featured: true` preserved.
-- [ ] File validates against `gBlockSchema` (`pnpm -w test` still green).
-- [ ] `pnpm --filter @gblockparty/web build` succeeds (14 pages, no change in count).
-
-### Ship-one-step handoff contract (Step 3.4 → Step 3.5)
-
-After approval, the clear-context implementation session must:
-
-1. Implement **only Step 3.4**. Do not continue into Step 3.5.
-2. Ask the user for the real YouTube video ID before modifying content.
-3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
-4. Mark Step 3.4 done in `tasks/todo.md`.
-5. Append a record to `tasks/history.md`.
-6. Commit and push (push is a local no-op).
-7. Write Step 3.5's plan into `tasks/todo.md`.
-8. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-9. Start the approval UI for Step 3.5 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
+- [ ] `metadataBase` set to `https://gblockparty.com` in root layout.
+- [ ] Build succeeds with no metadataBase warning.
+- [ ] All tests still green.
 
 ---
 
 ## Follow-ups (deferred; revisit in later phases)
 
+- [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Decommission `lexcorp-war-room/portfolio/boston-founder-radio.yaml` — scheduled for Phase 4.
 - [ ] Add `lexcorp-war-room/portfolio/gblockparty.yaml` with platform-level KPIs — scheduled for Phase 4.
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
