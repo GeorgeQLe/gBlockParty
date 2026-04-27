@@ -9,9 +9,9 @@ gBlockParty is the canonical home for all of George's content and code. Tutorial
 This repo was scaffolded on 2026-04-23 after a strategic conversation. The following are settled:
 
 - **Canonical brand.** gBlockParty is the umbrella. Domain: `gblockparty.com` (already owned).
-- **BFR dropped as a separate brand/domain.** No `bfr.fm` purchase. "Boston Founder Radio" survives as a **collection** inside gBlockParty — same way a podcast network hosts multiple shows without each show owning its own TLD.
+- **BFR dropped as a separate brand/domain.** No `bfr.fm` purchase. Former Boston Founder Radio material is source material only now: it can be mined and absorbed into active gBlockParty collections, but BFR is not a live collection on the site.
 - **Old repos archived.** `GeorgeQLe/gBlockParty` (old deployment-platform scaffolding) and `GeorgeQLe/boston-founder-radio-v1` are archived. Their content/specs can be mined later but none of their code is carried forward.
-- **Atomic unit is the gBlock.** See `packages/gblock-schema/src/index.ts`. A gBlock has `type` (tutorial / episode / essay / repo / tool / demo), `collection` (BFR, GCanBuild, …), and optional `membership` gating (free / member).
+- **Atomic unit is the gBlock.** See `packages/gblock-schema/src/index.ts`. A gBlock has `type` (tutorial / episode / essay / repo / tool / demo), `collection` (GCanBuild, Weekly SOTA, Weekly G, …), and optional `membership` gating (free / member).
 - **Collections group gBlocks.** They are tags with identity — a name, a description, optionally their own front door. Collections do **not** own their own repos or domains by default.
 - **Content in-repo, file-backed.** MDX/YAML in `content/` rather than a DB. Git history per gBlock. Can move to Neon later if scale demands it.
 - **Membership is platform-level, not per-collection.** A single gBlockParty membership unlocks premium gBlocks across all collections. Stripe plumbing migrates from the BFR v1 repo when we get there.
@@ -26,7 +26,7 @@ The scaffold intentionally stops short of design and content strategy. The follo
 3. **gBlock URL scheme.** `/g/<slug>`? `/<collection>/<slug>`? Both with a canonical?
 4. **Content authoring format.** MDX per gBlock is the default assumption. Confirm, and decide frontmatter extensions beyond `gblock-schema` (hero image, audio URL for episodes, repo URL for code gBlocks, etc.).
 5. **Membership gating.** Which gBlock types default to paid? How does a member-only gBlock render for non-members — paywall, preview, or hidden?
-6. **Migration plan.** What existing BFR v1 content (if any) migrates in the canary pass? Is there drafted GCanBuild content anywhere to seed with?
+6. **Migration plan.** What archived BFR v1 material, if any, is worth reworking into an active collection? Is there drafted GCanBuild content anywhere to seed with?
 7. **Portfolio rollup.** Which KPIs from the old `boston-founder-radio.yaml` carry forward onto `gblockparty.yaml` (paying members, MRR, weekly listens) — and which get rethought now that membership is platform-level?
 
 ## Structure
@@ -58,5 +58,5 @@ gblockparty/
 3. Scaffold design tokens in `apps/web/src/app/globals.css` per the spec.
 4. Build gBlock loader + index page.
 5. Create Vercel project, point `gblockparty.com` at it.
-6. Migrate one BFR artifact + one GCanBuild draft as canaries.
+6. Mine archived BFR material only if it is worth recutting into an active collection, and keep GCanBuild as the primary canary source.
 7. Update `lexcorp-war-room`: decommission `portfolio/boston-founder-radio.yaml`, add `portfolio/gblockparty.yaml`.
