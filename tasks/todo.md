@@ -11,7 +11,7 @@
 - [x] Step 4.3: Create GitHub Action for nightly YT scrape
 - [x] Step 4.4: Surface view counts on gBlock detail pages
 - [x] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
-- [ ] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
+- [x] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
 - [ ] Step 4.7: PaywallCard visual + copy polish
 - [ ] Step 4.8: Write regression tests for Phase 4 acceptance criteria
 - [ ] Step 4.9: Final verification — all tests, typecheck, build green
@@ -110,42 +110,43 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.6 — Add `gblockparty.yaml` to lexcorp-war-room portfolio
+## Next step: Phase 4, Step 4.7 — PaywallCard visual + copy polish
 
 ### Context
 
-With BFR archived (Step 4.5), the war-room portfolio needs the replacement entry for gBlockParty itself. This registers gBlockParty as an active portfolio product with its Phase-1 KPI set per spec §9.
+The `PaywallCard` component (Step 2.8) is a functional scaffold — it renders a blurred preview with a membership CTA, but the visual polish and copy need refinement before Phase 4 close-out. This is visual/copy only, no functional changes.
 
 ### What this step does
 
-1. Create `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/gblockparty.yaml` matching the shape of existing portfolio entries (use `boston-founder-radio.yaml` as reference).
-2. Fields:
-   - `slug: gblockparty`, `name: gBlockParty`, `businessUnit: LexContent`
-   - `status: Building`, `lifecycleState: active`
-   - `description`: Per spec — content platform for coding tutorials, SOTA episodes, and weekly G episodes.
-   - `url: https://gblockparty.com`, `competitorTarget: null`, `productType: content-brand`
-   - `githubRepo: GeorgeQLe/gBlockParty`, `repoPath: apps/web`, `seeded: true`
-   - `metrics.keyMetrics[]`: KPI set per spec §9 — `total_visitors` (Plausible), `views_per_collection` (YT scrape), `top_5_gblocks_by_views` (YT scrape), `seo_rank_target_queries` (manual), `yt_to_site_referral` (Plausible referrer), `paying_members` (dormant, carried from BFR).
-3. Cross-repo commit in lexcorp-war-room.
+1. Polish `PaywallCard.tsx`:
+   - Tighten spacing: reduce outer padding, adjust gradient overlap so the fade is less abrupt.
+   - Refine CTA copy: change heading from "Become a member to read this gBlock" to something more specific (e.g., "Unlock the full gBlock"). Change button text from "Join gBlockParty" to "Get member access" or similar.
+   - Ensure the disabled button has clear visual affordance: add `opacity-60` + `cursor-not-allowed` classes.
+   - Add a brief subtitle under the CTA heading explaining what membership includes (e.g., "Full tutorials, source code, and exclusive episodes").
+2. Verify with a temporary `membership: member` fixture gBlock — visually confirm the card renders acceptably, then revert the fixture.
+3. No functional changes — paywall logic, `extractPreview`, and routing are unchanged.
 
-### Files to create
+### Files to modify
 
-- Create `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/gblockparty.yaml`
+- `apps/web/src/components/PaywallCard.tsx`
+- Temporarily modify one fixture MDX for visual verification (revert after)
 
 ### Execution Profile
 
 **Parallel mode:** serial
 **Integration owner:** main agent
-**Conflict risk:** low (cross-repo, no contention)
-**Review gates:** correctness
+**Conflict risk:** low
+**Review gates:** correctness, visual
 
-### Acceptance criteria for Step 4.6
+### Acceptance criteria for Step 4.7
 
-- [ ] `gblockparty.yaml` exists in `lexcorp-war-room/portfolio/` with correct shape matching existing entries.
-- [ ] KPI set includes all 6 metrics from spec §9.
-- [ ] Change is committed and pushed in lexcorp-war-room.
-- [ ] No changes to the gblockparty repo needed for this step.
+- [ ] PaywallCard has tighter spacing and smoother gradient fade.
+- [ ] CTA copy is more specific than generic "Join gBlockParty".
+- [ ] Disabled button has `opacity` + `cursor-not-allowed` visual affordance.
+- [ ] Subtitle text present under CTA heading.
+- [ ] Temporary fixture reverted — no member gBlocks in committed content.
+- [ ] `pnpm -w test` green, `pnpm -w -r typecheck` clean, `pnpm --filter @gblockparty/web build` green.
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.6. Mark Step 4.6 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push in lexcorp-war-room. Write Step 4.7 plan. Enter plan mode for Step 4.7 approval.
+After approval, implement only Step 4.7. Mark Step 4.7 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Write Step 4.8 plan. Enter plan mode for Step 4.8 approval.
