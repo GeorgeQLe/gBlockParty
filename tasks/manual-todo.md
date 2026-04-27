@@ -5,11 +5,11 @@
 > Check them off as you complete them.
 
 ## Pre-Phase / Setup
-- [ ] Create Plausible site entry for `gblockparty.com` and copy the tracking snippet/domain _(blocks: Step 4.1)_
+- [x] ~~Create Plausible site entry for `gblockparty.com`~~ — removed; page analytics descoped in favor of YouTube view-count telemetry.
 - [ ] Add `VERCEL_DEPLOY_HOOK` (or `VERCEL_TOKEN` + `VERCEL_PROJECT_ID`) as GitHub repo secrets for the nightly scraper Action _(blocks: Step 4.3)_
 
 ## Post-Phase / Verification
-- [ ] Verify a test page view appears in the Plausible dashboard after deploying Step 4.1
+- [x] ~~Verify a test page view appears in the Plausible dashboard~~ — removed; Plausible descoped.
 
 ## Carried from Phase 3
 - [ ] Record Weekly G Ep 1 video + upload to YouTube, provide video ID _(after: Step 3.4 deferred)_

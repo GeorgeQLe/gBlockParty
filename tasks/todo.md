@@ -7,9 +7,8 @@
 ## Priority Task Queue
 
 - [x] All 4 roadmap phases complete (Phase 1–4 shipped and archived).
-- [ ] Complete manual task: "Create Plausible site entry for `gblockparty.com`" _(blocks: dashboard verification)_ — resolve before verifying analytics in production.
+- [x] Plausible descoped — removed script from layout, updated war-room KPIs. YT view counts + game telemetry are the metrics strategy.
 - [ ] Complete manual task: "Add `VERCEL_DEPLOY_HOOK` as GitHub repo secret" _(blocks: nightly scraper Action)_ — resolve before the GitHub Action can trigger Vercel rebuilds.
-- [ ] Complete manual task: "Verify a test page view appears in the Plausible dashboard" — resolve after Plausible site is created and site is deployed.
 - [ ] Complete manual task: "Record Weekly G Ep 1 video + upload to YouTube" _(blocks: Step 3.4 deferred)_ — resolve before Weekly G collection can be unhidden.
 - [ ] `/research-roadmap` - scan documentation health and recommend next documentation or research work, now that all implementation phases are complete.
 
