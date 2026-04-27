@@ -113,3 +113,41 @@ describe("Phase 2 regression — PaywallCard preview extraction", () => {
     expect(preview).not.toContain("…");
   });
 });
+
+describe("Phase 3 regression — canary content", () => {
+  it("no placeholder video IDs in canary blocks", () => {
+    const canaries = getBlocks().filter((b) => b.type !== "clip");
+    for (const block of canaries) {
+      if (block.videoUrl) {
+        expect(block.videoUrl).not.toContain("dQw4w9WgXcQ");
+      }
+    }
+  });
+
+  it("all 3 GCanBuild canaries are tutorials", () => {
+    const gcanbuildCanaries = getBlocks().filter(
+      (b) => b.collection === "gcanbuild" && b.type !== "clip",
+    );
+    expect(gcanbuildCanaries).toHaveLength(3);
+    for (const block of gcanbuildCanaries) {
+      expect(block.type).toBe("tutorial");
+    }
+  });
+
+  it("SOTA canary has type episode and videoUrl", () => {
+    const sota = getBlocks().find((b) => b.slug === "sota-ep-001");
+    expect(sota).toBeDefined();
+    expect(sota!.type).toBe("episode");
+    expect(sota!.videoUrl).toBeDefined();
+  });
+
+  it("at least 2 featured canaries", () => {
+    const featured = getBlocks().filter((b) => b.featured);
+    expect(featured.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("full-stack-web-app slug exists", () => {
+    const slugs = getBlocks().map((b) => b.slug);
+    expect(slugs).toContain("full-stack-web-app");
+  });
+});
