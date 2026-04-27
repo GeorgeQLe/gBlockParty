@@ -12,7 +12,7 @@
 - [x] Step 4.4: Surface view counts on gBlock detail pages
 - [x] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
 - [x] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
-- [ ] Step 4.7: PaywallCard visual + copy polish
+- [x] Step 4.7: PaywallCard visual + copy polish
 - [ ] Step 4.8: Write regression tests for Phase 4 acceptance criteria
 - [ ] Step 4.9: Final verification — all tests, typecheck, build green
 
@@ -110,43 +110,40 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.7 — PaywallCard visual + copy polish
+## Next step: Phase 4, Step 4.8 — Write regression tests for Phase 4 acceptance criteria
 
 ### Context
 
-The `PaywallCard` component (Step 2.8) is a functional scaffold — it renders a blurred preview with a membership CTA, but the visual polish and copy need refinement before Phase 4 close-out. This is visual/copy only, no functional changes.
+Phase 4 is nearly complete — Steps 4.1–4.7 are all done. Step 4.8 adds regression tests covering the Phase 4 deliverables so the acceptance criteria are machine-verifiable. The test strategy for Phase 4 was "tests-after" (per roadmap), so this is where we write them.
 
 ### What this step does
 
-1. Polish `PaywallCard.tsx`:
-   - Tighten spacing: reduce outer padding, adjust gradient overlap so the fade is less abrupt.
-   - Refine CTA copy: change heading from "Become a member to read this gBlock" to something more specific (e.g., "Unlock the full gBlock"). Change button text from "Join gBlockParty" to "Get member access" or similar.
-   - Ensure the disabled button has clear visual affordance: add `opacity-60` + `cursor-not-allowed` classes.
-   - Add a brief subtitle under the CTA heading explaining what membership includes (e.g., "Full tutorials, source code, and exclusive episodes").
-2. Verify with a temporary `membership: member` fixture gBlock — visually confirm the card renders acceptably, then revert the fixture.
-3. No functional changes — paywall logic, `extractPreview`, and routing are unchanged.
+Add test cases to `apps/web/src/__tests__/pages.test.ts` (or a new Phase 4 test file if cleaner) covering:
+
+1. **`loadViewCounts()` — empty map when file missing:** Call `loadViewCounts()` with a non-existent path, assert it returns an empty `Map`.
+2. **`loadViewCounts()` — parses valid JSON:** Write a temp `youtube-views.json` fixture, call `loadViewCounts()`, assert correct `videoId → count` entries in the returned Map.
+3. **`extractVideoId()` — URL parsing:** Test all supported patterns: `/watch?v=`, `/shorts/`, `/embed/`, `youtu.be/`, and invalid URLs.
+4. **`extractPreview` — no regression:** Confirm `extractPreview` still truncates at the expected word count and appends ellipsis (existing tests may already cover this — verify before duplicating).
+5. **Scraper script exists and is valid ESM:** Assert `scripts/scrape-youtube.mjs` exists and can be parsed by Node without syntax errors (`node --check`).
 
 ### Files to modify
 
-- `apps/web/src/components/PaywallCard.tsx`
-- Temporarily modify one fixture MDX for visual verification (revert after)
+- `apps/web/src/__tests__/pages.test.ts` (add new `describe` blocks for Phase 4 coverage)
 
 ### Execution Profile
 
 **Parallel mode:** serial
 **Integration owner:** main agent
 **Conflict risk:** low
-**Review gates:** correctness, visual
+**Review gates:** correctness, tests
 
-### Acceptance criteria for Step 4.7
+### Acceptance criteria for Step 4.8
 
-- [ ] PaywallCard has tighter spacing and smoother gradient fade.
-- [ ] CTA copy is more specific than generic "Join gBlockParty".
-- [ ] Disabled button has `opacity` + `cursor-not-allowed` visual affordance.
-- [ ] Subtitle text present under CTA heading.
-- [ ] Temporary fixture reverted — no member gBlocks in committed content.
-- [ ] `pnpm -w test` green, `pnpm -w -r typecheck` clean, `pnpm --filter @gblockparty/web build` green.
+- [ ] All new test cases pass (`pnpm -w test` green).
+- [ ] No regressions in existing tests.
+- [ ] `pnpm -w -r typecheck` clean.
+- [ ] `pnpm --filter @gblockparty/web build` green.
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.7. Mark Step 4.7 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Write Step 4.8 plan. Enter plan mode for Step 4.8 approval.
+After approval, implement only Step 4.8. Mark Step 4.8 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Write Step 4.9 plan. Enter plan mode for Step 4.9 approval.

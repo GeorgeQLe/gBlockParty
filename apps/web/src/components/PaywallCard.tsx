@@ -10,21 +10,24 @@ export function PaywallCard({ body }: { body: string }) {
 
   return (
     <div className="relative mt-8 overflow-hidden rounded-md border-[length:var(--border-width-hard)] border-ink bg-muted shadow-brutal">
-      <div className="px-6 pt-6 pb-24 text-ink-soft">
+      <div className="px-5 pt-5 pb-20 text-ink-soft">
         <p className="line-clamp-6 leading-relaxed">{preview}</p>
       </div>
 
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-muted from-60% to-transparent px-6 pb-6 pt-16">
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-muted from-50% to-transparent px-5 pb-5 pt-14">
         <div className="text-center">
           <p className="font-display text-lg font-bold text-ink">
-            Become a member to read this gBlock
+            Unlock the full gBlock
+          </p>
+          <p className="mt-1 text-sm text-ink-soft">
+            Full tutorials, source code, and exclusive episodes.
           </p>
           <button
             type="button"
             disabled
-            className="mt-4 inline-block rounded-md border-[length:var(--border-width-hard)] border-ink bg-accent-lime px-6 py-3 font-display font-bold text-ink shadow-brutal transition-[transform,box-shadow] duration-[var(--duration-base)] ease-[var(--ease-out)]"
+            className="mt-4 inline-block rounded-md border-[length:var(--border-width-hard)] border-ink bg-accent-lime px-6 py-3 font-display font-bold text-ink opacity-60 cursor-not-allowed shadow-brutal transition-[transform,box-shadow] duration-[var(--duration-base)] ease-[var(--ease-out)]"
           >
-            Join gBlockParty
+            Get member access
           </button>
         </div>
       </div>
