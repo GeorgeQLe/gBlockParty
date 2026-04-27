@@ -7,7 +7,7 @@
 ## Priority Task Queue
 
 - [x] Step 4.1: Embed Plausible analytics script
-- [ ] Step 4.2: Build YouTube view-count scraper script
+- [x] Step 4.2: Build YouTube view-count scraper script
 - [ ] Step 4.3: Create GitHub Action for nightly YT scrape
 - [ ] Step 4.4: Surface view counts on gBlock detail pages
 - [ ] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
