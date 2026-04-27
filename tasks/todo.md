@@ -9,7 +9,7 @@
 - [x] Step 4.1: Embed Plausible analytics script
 - [x] Step 4.2: Build YouTube view-count scraper script
 - [x] Step 4.3: Create GitHub Action for nightly YT scrape
-- [ ] Step 4.4: Surface view counts on gBlock detail pages
+- [x] Step 4.4: Surface view counts on gBlock detail pages
 - [ ] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
 - [ ] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
 - [ ] Step 4.7: PaywallCard visual + copy polish
@@ -110,52 +110,41 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.4 — Surface view counts on gBlock detail pages
+## Next step: Phase 4, Step 4.5 — Decommission `boston-founder-radio.yaml` in lexcorp-war-room
 
 ### Context
 
-Steps 4.2–4.3 delivered the YouTube scraper and its nightly GitHub Action. `data/youtube-views.json` now exists with `{ scrapedAt, videos: [{ videoId, title, viewCount, publishedTimeText }] }` shape. Step 4.4 wires these view counts into the site so they're visible on gBlock detail pages at build time.
+Per spec §2, Boston Founder Radio is dropped as a separate brand. The BFR collection was already removed from this repo (Step 4.4 session). Step 4.5 archives the BFR portfolio entry in the sibling `lexcorp-war-room` repo so the war-room dashboard reflects the current state.
 
 ### What this step does
 
-1. Create `apps/web/src/lib/content/views.ts`:
-   - Export `loadViewCounts(): Map<string, number>` — reads `data/youtube-views.json` (relative to content root), parses it, returns a `Map<videoId, viewCount>`. Returns empty map if the file doesn't exist (graceful for first build before any scrape).
-   - Export `extractVideoId(url: string): string | null` — extracts YouTube video ID from a URL (handles `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/embed/` patterns).
+1. Modify `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/boston-founder-radio.yaml`:
+   - Set `status: Archived`
+   - Set `lifecycleState: archived`
+   - Add `archivedAt: "2026-04-27"`
+   - Add `archivedReason: "Dropped per gBlockParty spec §2 — no real guest pipeline. Content migrated to gBlockParty collections."`
+   - Do NOT delete the file — the war-room convention is archive-in-place with status fields.
 
-2. Modify `apps/web/src/app/[collection]/[slug]/page.tsx`:
-   - Import `loadViewCounts` and `extractVideoId`.
-   - In the page component, load view counts, extract video ID from `block.videoUrl` (if present), look up the count.
-   - Render a small "▶ X views" indicator in the metadata bar (next to TypeBadge/CollectionBadge/date) when a view count is available.
+2. This is a cross-repo edit — commit separately in the lexcorp-war-room repo.
 
-3. Optionally modify `apps/web/src/components/GBlockCard.tsx`:
-   - Accept an optional `viewCount?: number` prop.
-   - Display a small view count label when provided.
+### Files to modify
 
-### Files to create/modify
-
-- Create `apps/web/src/lib/content/views.ts`
-- Modify `apps/web/src/app/[collection]/[slug]/page.tsx`
-- Modify `apps/web/src/components/GBlockCard.tsx` (optional)
-- Modify `apps/web/src/lib/content/index.ts` (re-export new symbols)
+- Modify `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/boston-founder-radio.yaml`
 
 ### Execution Profile
 
 **Parallel mode:** serial
 **Integration owner:** main agent
-**Conflict risk:** low
-**Review gates:** correctness, tests
+**Conflict risk:** low (cross-repo, no contention)
+**Review gates:** correctness
 
-### Acceptance criteria for Step 4.4
+### Acceptance criteria for Step 4.5
 
-- [ ] `loadViewCounts()` returns empty map when `data/youtube-views.json` doesn't exist.
-- [ ] `loadViewCounts()` parses valid JSON and returns correct `videoId → count` map.
-- [ ] `extractVideoId()` handles standard YouTube URL patterns.
-- [ ] Detail pages show view count when a matching video ID is found in the scraped data.
-- [ ] Detail pages render normally (no error) when no view data exists.
-- [ ] `pnpm -w -r typecheck` exits 0.
-- [ ] `pnpm --filter @gblockparty/web build` exits 0.
-- [ ] No test regressions (`pnpm -w test` still 33/33 green).
+- [ ] `boston-founder-radio.yaml` has `status: Archived`, `lifecycleState: archived`, `archivedAt`, and `archivedReason` fields.
+- [ ] The file is NOT deleted — it stays in place with archive fields.
+- [ ] Change is committed and pushed in the lexcorp-war-room repo.
+- [ ] No changes to the gblockparty repo needed for this step.
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.4. Validate (typecheck + build + tests). Mark Step 4.4 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Write Step 4.5 plan. Enter plan mode for Step 4.5 approval.
+After approval, implement only Step 4.5. Mark Step 4.5 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push in lexcorp-war-room. Write Step 4.6 plan. Enter plan mode for Step 4.6 approval.
