@@ -11,7 +11,7 @@
 - [x] Step 3.3: Author Weekly SOTA canary MDX
 - [x] Step 3.5: Production build config (metadataBase, env)
 - [x] Step 3.6: Create GitHub repo + push
-- [ ] Step 3.7: Create Vercel project + configure domain
+- [x] Step 3.7: Create Vercel project + configure domain
 - [ ] Step 3.8: Verify live deployment + smoke test
 - [ ] Step 3.9: Write regression tests for Phase 3 acceptance criteria
 - [ ] Step 3.10: Final verification — all tests, typecheck, build green
@@ -103,34 +103,35 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.7 — Create Vercel project + configure domain
+## Next step: Phase 3, Step 3.8 — Verify live deployment + smoke test
 
 ### Context
 
-Step 3.6 complete — `GeorgeQLe/gBlockParty` repo exists on GitHub (public, unarchived), `master` branch pushed to `origin`. Repo was previously archived from an older project; unarchived and reused. Default branch on GitHub is `main` (stale from old project); our work is on `master`. Build green (12 pages), 28/28 tests green.
+Step 3.7 complete — Vercel project `gblockparty` created, root directory set to `apps/web`, framework set to Next.js. Domain `gblockparty.com` + `www.gblockparty.com` assigned (Vercel-registered domain, nameservers already correct). Production deploy live via `vercel deploy --prod` — build green (12 pages). Upgraded `next-mdx-remote` from 5.0.0 to 6.0.0 to pass Vercel's vulnerability check. GitHub repo integration pending (user must authorize Vercel GitHub App for `GeorgeQLe/gBlockParty` in browser).
 
 ### What this step does
 
-Create a Vercel project linked to the GitHub repo and configure `gblockparty.com` as the production domain.
+Verify the live production deployment at `https://gblockparty.com` is working correctly.
 
 **Key actions:**
-1. Verify `vercel` CLI is authenticated (`vercel whoami`).
-2. Link the project: `vercel link` (or `vercel` to deploy) — set root directory to `apps/web`.
-3. Configure domain: `vercel domains add gblockparty.com`.
-4. Output DNS records Vercel provides (A record + CNAME) for the user to add at their domain registrar.
+1. Verify `https://gblockparty.com` resolves with valid TLS cert.
+2. Smoke test key pages: home page, collection pages, gBlock detail pages, `/g/<slug>` redirects.
+3. Check that featured rail shows pinned canaries, collection pages list their gBlocks, detail pages render type-appropriate headers.
+4. Verify OG metadata is correct on key pages.
 
-**Blocked on manual task:** User must confirm `vercel` CLI is authenticated.
+**Blocked on manual task:** User must authorize Vercel GitHub App for `GeorgeQLe/gBlockParty` (for auto-deploy on push). The site is already live via manual deploy, so smoke testing can proceed.
 
 ### Files to modify
 
-- None (CLI-only step). May create `.vercel/` directory locally.
+- None (verification-only step).
 
-### Acceptance criteria for Step 3.7
+### Acceptance criteria for Step 3.8
 
-- [ ] `vercel whoami` shows authenticated.
-- [ ] Vercel project exists and is linked to `GeorgeQLe/gBlockParty`.
-- [ ] `gblockparty.com` domain configured in Vercel project settings.
-- [ ] DNS records documented for user to add at registrar.
+- [ ] `https://gblockparty.com` resolves with valid TLS cert.
+- [ ] Home page loads with featured rail showing pinned canaries.
+- [ ] Each collection page (`/gcanbuild`, `/weekly-sota`, `/boston-founder-radio`) lists its canaries.
+- [ ] Each canary detail page renders type-appropriate header (video embed for episodes, hero image for tutorials).
+- [ ] `/g/<slug>` short-links 301 to canonical URLs.
 
 ---
 
