@@ -8,7 +8,7 @@
 
 - [x] Step 3.1: Upgrade GCanBuild fixture tutorials to production canary content
 - [x] Step 3.2: Add third GCanBuild canary (Full-Stack Web App tutorial)
-- [ ] Step 3.3: Author Weekly SOTA canary MDX
+- [x] Step 3.3: Author Weekly SOTA canary MDX
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX
 - [ ] Step 3.5: Production build config (metadataBase, env)
 - [ ] Step 3.6: Create GitHub repo + push
@@ -108,57 +108,57 @@
 - Tech debt / follow-ups:
 - Ready for next phase:
 
-## Next step: Phase 3, Step 3.3 — Author Weekly SOTA canary MDX
+## Next step: Phase 3, Step 3.4 — Author Weekly G Ep 1 canary MDX
 
 ### Context
 
-Step 3.2 complete — 3 GCanBuild canary tutorials now live (Pastebin Clone, Better Auth, Full-Stack Web App). 28/28 tests green, build green (14 pages). 3 of 5 canary MDX files done.
+Step 3.3 complete — 4 of 5 canary MDX files done (3 GCanBuild tutorials + Weekly SOTA Ep 1). 28/28 tests green, build green (14 pages). One canary remaining: Weekly G Ep 1.
 
 ### Ship status going in
 
-- **Shipped last session:** Step 3.2 — added Full-Stack Web App tutorial canary (`5vdooX7g7AE`).
+- **Shipped last session:** Step 3.3 — upgraded Weekly SOTA canary (`_G8iJRMiCJY`).
 - **Test status:** `pnpm -w test` 28/28 green. `pnpm --filter @gblockparty/web build` green (14 pages).
 - **No git remote:** local `master` only; `git push` is a local no-op.
 - **Deploy:** none.
 
 ### What this step does
 
-Upgrade the existing `content/gblocks/weekly-sota/sota-ep-001.mdx` fixture from placeholder to production canary.
+Upgrade the existing `content/gblocks/weekly-g/weekly-g-ep-001.mdx` fixture from placeholder to production canary.
 
 **Key actions:**
-1. **Ask the user** to decide SOTA pilot strategy: reframe the existing "Sam Altman Stuns Investors" video as SOTA Ep 1 with show notes, or record a fresh Ep 1.
-2. **Get the real YouTube video ID** from the user (either the existing video or new recording).
-3. **Upgrade** `sota-ep-001.mdx`: update `videoUrl` to real video ID, write show-notes-style MDX body (topic summary, key quotes/claims, links to referenced articles, timestamps). Keep `featured: false`.
-4. **Validate** with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
+1. **Get the real YouTube video ID** from the user (user must record Weekly G Ep 1 first).
+2. **Upgrade** `weekly-g-ep-001.mdx`: update `videoUrl` to real video ID, write vlog-style MDX body (episode summary, key topics covered, links). Keep `featured: true`.
+3. **Validate** with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
 
 ### Manual prerequisite
 
-**Before implementing:** Ask the user to decide the SOTA pilot strategy and provide the real YouTube video ID.
+**Before implementing:** User must record Weekly G Ep 1 video and provide the YouTube video ID.
 
 ### Files to modify
 
-- Modify `content/gblocks/weekly-sota/sota-ep-001.mdx`
+- Modify `content/gblocks/weekly-g/weekly-g-ep-001.mdx`
 
-### Acceptance criteria for Step 3.3
+### Acceptance criteria for Step 3.4
 
-- [ ] `sota-ep-001.mdx` has real YouTube video ID (not placeholder).
-- [ ] MDX body is show-notes style with topic summary, timestamps, and key points.
+- [ ] `weekly-g-ep-001.mdx` has real YouTube video ID (not placeholder).
+- [ ] MDX body is vlog-style with episode summary and key topics.
+- [ ] `featured: true` preserved.
 - [ ] File validates against `gBlockSchema` (`pnpm -w test` still green).
 - [ ] `pnpm --filter @gblockparty/web build` succeeds (14 pages, no change in count).
 
-### Ship-one-step handoff contract (Step 3.3 → Step 3.4)
+### Ship-one-step handoff contract (Step 3.4 → Step 3.5)
 
 After approval, the clear-context implementation session must:
 
-1. Implement **only Step 3.3**. Do not continue into Step 3.4.
-2. Ask the user for the SOTA pilot strategy and real YouTube video ID before modifying content.
+1. Implement **only Step 3.4**. Do not continue into Step 3.5.
+2. Ask the user for the real YouTube video ID before modifying content.
 3. Validate with `pnpm -w test` + `pnpm --filter @gblockparty/web build`.
-4. Mark Step 3.3 done in `tasks/todo.md`.
+4. Mark Step 3.4 done in `tasks/todo.md`.
 5. Append a record to `tasks/history.md`.
 6. Commit and push (push is a local no-op).
-7. Write Step 3.4's plan into `tasks/todo.md`.
+7. Write Step 3.5's plan into `tasks/todo.md`.
 8. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`.
-9. Start the approval UI for Step 3.4 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
+9. Start the approval UI for Step 3.5 by calling `EnterPlanMode` first, write a brief pass-through plan in plan mode, call `ExitPlanMode`, and stop before implementing it.
 
 ---
 
