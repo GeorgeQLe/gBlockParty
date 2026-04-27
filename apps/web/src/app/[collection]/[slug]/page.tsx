@@ -4,7 +4,12 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { compileMDX } from "next-mdx-remote/rsc";
-import { loadAllGBlocks, type LoadedGBlock } from "@/lib/content";
+import {
+  loadAllGBlocks,
+  loadViewCounts,
+  extractVideoId,
+  type LoadedGBlock,
+} from "@/lib/content";
 import { HIDDEN_COLLECTIONS } from "@/lib/hidden-collections";
 import { TypeBadge } from "@/components/TypeBadge";
 import { CollectionBadge } from "@/components/CollectionBadge";
@@ -75,15 +80,8 @@ function formatDate(iso: string): string {
   });
 }
 
-function extractYouTubeId(url: string): string | null {
-  const match = url.match(
-    /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]+)/,
-  );
-  return match?.[1] ?? null;
-}
-
 function VideoHeader({ block }: { block: LoadedGBlock }) {
-  const videoId = block.videoUrl ? extractYouTubeId(block.videoUrl) : null;
+  const videoId = block.videoUrl ? extractVideoId(block.videoUrl) : null;
   if (!videoId) return null;
   return (
     <div className="relative mb-6 aspect-video w-full overflow-hidden border-[length:var(--border-width-hard)] border-ink">
@@ -158,6 +156,10 @@ export default async function GBlockDetailPage({ params }: PageProps) {
   const isCode =
     block.type === "repo" || block.type === "tool" || block.type === "demo";
 
+  const videoId = block.videoUrl ? extractVideoId(block.videoUrl) : null;
+  const viewCounts = loadViewCounts(contentRoot);
+  const viewCount = videoId ? viewCounts.get(videoId) : undefined;
+
   const isMember = block.membership === "member";
 
   const { content } = isMember
@@ -190,6 +192,11 @@ export default async function GBlockDetailPage({ params }: PageProps) {
         {block.publishedAt && (
           <span className="text-xs text-ink-soft">
             {formatDate(block.publishedAt)}
+          </span>
+        )}
+        {viewCount != null && (
+          <span className="text-xs text-ink-soft">
+            ▶ {viewCount.toLocaleString()} views
           </span>
         )}
       </div>

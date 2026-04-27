@@ -4,3 +4,4 @@ export {
   type LoadedGBlock,
 } from "./loader";
 export { loadCollection, type LoadCollectionOptions } from "./collections";
+export { loadViewCounts, extractVideoId } from "./views";
