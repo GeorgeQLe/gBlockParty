@@ -10,7 +10,7 @@
 - [x] Step 4.2: Build YouTube view-count scraper script
 - [x] Step 4.3: Create GitHub Action for nightly YT scrape
 - [x] Step 4.4: Surface view counts on gBlock detail pages
-- [ ] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
+- [x] Step 4.5: Decommission `boston-founder-radio.yaml` in lexcorp-war-room
 - [ ] Step 4.6: Add `gblockparty.yaml` to lexcorp-war-room portfolio
 - [ ] Step 4.7: PaywallCard visual + copy polish
 - [ ] Step 4.8: Write regression tests for Phase 4 acceptance criteria
@@ -110,26 +110,27 @@ _(Four lanes are independent but each is small enough that serial execution by t
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
 
-## Next step: Phase 4, Step 4.5 — Decommission `boston-founder-radio.yaml` in lexcorp-war-room
+## Next step: Phase 4, Step 4.6 — Add `gblockparty.yaml` to lexcorp-war-room portfolio
 
 ### Context
 
-Per spec §2, Boston Founder Radio is dropped as a separate brand. The BFR collection was already removed from this repo (Step 4.4 session). Step 4.5 archives the BFR portfolio entry in the sibling `lexcorp-war-room` repo so the war-room dashboard reflects the current state.
+With BFR archived (Step 4.5), the war-room portfolio needs the replacement entry for gBlockParty itself. This registers gBlockParty as an active portfolio product with its Phase-1 KPI set per spec §9.
 
 ### What this step does
 
-1. Modify `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/boston-founder-radio.yaml`:
-   - Set `status: Archived`
-   - Set `lifecycleState: archived`
-   - Add `archivedAt: "2026-04-27"`
-   - Add `archivedReason: "Dropped per gBlockParty spec §2 — no real guest pipeline. Content migrated to gBlockParty collections."`
-   - Do NOT delete the file — the war-room convention is archive-in-place with status fields.
+1. Create `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/gblockparty.yaml` matching the shape of existing portfolio entries (use `boston-founder-radio.yaml` as reference).
+2. Fields:
+   - `slug: gblockparty`, `name: gBlockParty`, `businessUnit: LexContent`
+   - `status: Building`, `lifecycleState: active`
+   - `description`: Per spec — content platform for coding tutorials, SOTA episodes, and weekly G episodes.
+   - `url: https://gblockparty.com`, `competitorTarget: null`, `productType: content-brand`
+   - `githubRepo: GeorgeQLe/gBlockParty`, `repoPath: apps/web`, `seeded: true`
+   - `metrics.keyMetrics[]`: KPI set per spec §9 — `total_visitors` (Plausible), `views_per_collection` (YT scrape), `top_5_gblocks_by_views` (YT scrape), `seo_rank_target_queries` (manual), `yt_to_site_referral` (Plausible referrer), `paying_members` (dormant, carried from BFR).
+3. Cross-repo commit in lexcorp-war-room.
 
-2. This is a cross-repo edit — commit separately in the lexcorp-war-room repo.
+### Files to create
 
-### Files to modify
-
-- Modify `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/boston-founder-radio.yaml`
+- Create `/Users/georgele/projects/apps/lexcorp-war-room/portfolio/gblockparty.yaml`
 
 ### Execution Profile
 
@@ -138,13 +139,13 @@ Per spec §2, Boston Founder Radio is dropped as a separate brand. The BFR colle
 **Conflict risk:** low (cross-repo, no contention)
 **Review gates:** correctness
 
-### Acceptance criteria for Step 4.5
+### Acceptance criteria for Step 4.6
 
-- [ ] `boston-founder-radio.yaml` has `status: Archived`, `lifecycleState: archived`, `archivedAt`, and `archivedReason` fields.
-- [ ] The file is NOT deleted — it stays in place with archive fields.
-- [ ] Change is committed and pushed in the lexcorp-war-room repo.
+- [ ] `gblockparty.yaml` exists in `lexcorp-war-room/portfolio/` with correct shape matching existing entries.
+- [ ] KPI set includes all 6 metrics from spec §9.
+- [ ] Change is committed and pushed in lexcorp-war-room.
 - [ ] No changes to the gblockparty repo needed for this step.
 
 ### Ship-one-step handoff contract
 
-After approval, implement only Step 4.5. Mark Step 4.5 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push in lexcorp-war-room. Write Step 4.6 plan. Enter plan mode for Step 4.6 approval.
+After approval, implement only Step 4.6. Mark Step 4.6 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push in lexcorp-war-room. Write Step 4.7 plan. Enter plan mode for Step 4.7 approval.
