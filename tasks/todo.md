@@ -109,3 +109,44 @@ _(Four lanes are independent but each is small enough that serial execution by t
 
 - [ ] Step 3.4: Author Weekly G Ep 1 canary MDX — blocked on user recording video + providing YouTube video ID. Weekly G hidden from site until ready (see `HIDDEN_COLLECTIONS` in `apps/web/src/lib/hidden-collections.ts`).
 - [ ] Mine `GeorgeQLe/boston-founder-radio-v1` (archived) for Stripe membership code — not needed until paywall activation (gated on audience thresholds per spec §7).
+
+## Next step: Phase 4, Step 4.1 — Embed Plausible analytics script
+
+### Context
+
+Phase 3 complete — site live at `gblockparty.com`, 33/33 tests green. Phase 4 starts with analytics instrumentation.
+
+### What this step does
+
+Add the Plausible analytics script to the root layout so every page tracks page views.
+
+**Key actions:**
+1. Import `Script` from `next/script` in `apps/web/src/app/layout.tsx`.
+2. Add a `<Script>` tag inside `<body>` with:
+   - `src="https://plausible.io/js/script.js"`
+   - `data-domain="gblockparty.com"`
+   - `strategy="afterInteractive"`
+3. Guard with `process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN` — only render the script when the env var is set. This prevents tracking in dev/preview environments.
+4. Run `pnpm -w -r typecheck` and `pnpm --filter @gblockparty/web build` to verify.
+
+### Files to modify
+
+- `apps/web/src/app/layout.tsx` — add Plausible `<Script>` tag
+
+### Execution Profile
+
+**Parallel mode:** serial
+**Integration owner:** main agent
+**Conflict risk:** low
+**Review gates:** correctness, tests
+
+### Acceptance criteria for Step 4.1
+
+- [ ] Plausible script tag present in the root layout, guarded by env var.
+- [ ] `pnpm -w -r typecheck` exits 0.
+- [ ] `pnpm --filter @gblockparty/web build` exits 0.
+- [ ] No test regressions (`pnpm -w test` still 33/33 green).
+
+### Ship-one-step handoff contract
+
+After approval, implement only Step 4.1. Validate it (typecheck + build + tests). Mark Step 4.1 done in `tasks/todo.md`. Update `tasks/history.md`. Commit and push. Deploy only when an explicit manual deploy contract exists (`tasks/deploy.md`). Write the Step 4.2 plan into `tasks/todo.md`. Ensure `.claude/settings.local.json` has `"showClearContextOnPlanAccept": true` and `"defaultMode": "acceptEdits"`. Start the approval UI for Step 4.2 by calling `EnterPlanMode`, write a brief pass-through plan, call `ExitPlanMode`, and stop.
