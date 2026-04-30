@@ -4,6 +4,8 @@
 
 gBlockParty is the canonical home for all of George's content and code. Tutorials, podcast episodes, essays, tools, demos, and repositories are all **gBlocks** — atomic, indexable artifacts that live in one place and can be surfaced across multiple front doors.
 
+Current operating plan: keep the existing George Le YouTube channel as the single hub and prove Weekly G for 3 months. GCanBuild and Weekly SOTA remain supported collections, but they are optional playlists/backlog until Weekly G has shipped consistently.
+
 ## Decisions already made (context for /spec-interview)
 
 This repo was scaffolded on 2026-04-23 after a strategic conversation. The following are settled:
@@ -12,22 +14,19 @@ This repo was scaffolded on 2026-04-23 after a strategic conversation. The follo
 - **BFR dropped as a separate brand/domain.** No `bfr.fm` purchase. Former Boston Founder Radio material is source material only now: it can be mined and absorbed into active gBlockParty collections, but BFR is not a live collection on the site.
 - **Old repos archived.** `GeorgeQLe/gBlockParty` (old deployment-platform scaffolding) and `GeorgeQLe/boston-founder-radio-v1` are archived. Their content/specs can be mined later but none of their code is carried forward.
 - **Atomic unit is the gBlock.** See `packages/gblock-schema/src/index.ts`. A gBlock has `type` (tutorial / episode / essay / repo / tool / demo), `collection` (GCanBuild, Weekly SOTA, Weekly G, …), and optional `membership` gating (free / member).
-- **Collections group gBlocks.** They are tags with identity — a name, a description, optionally their own front door. Collections do **not** own their own repos or domains by default.
+- **Collections group gBlocks.** They are tags with identity — a name, a description, optionally their own front door. Collections do **not** own their own repos, domains, or separate YouTube channels by default.
 - **Content in-repo, file-backed.** MDX/YAML in `content/` rather than a DB. Git history per gBlock. Can move to Neon later if scale demands it.
 - **Membership is platform-level, not per-collection.** A single gBlockParty membership unlocks premium gBlocks across all collections. Stripe plumbing migrates from the BFR v1 repo when we get there.
-- **War-room separation.** `lexcorp-war-room`'s `portfolio/*.yaml` remains the private ops dashboard. A single `portfolio/gblockparty.yaml` entry rolls up content KPIs; `boston-founder-radio.yaml` will be decommissioned.
+- **War-room separation.** `lexcorp-war-room`'s `portfolio/*.yaml` remains the private ops dashboard. Weekly G uses lightweight recording artifacts for now; custom War Room recording infrastructure is deferred until the format proves itself.
 
-## Open questions for /spec-interview
+## Resolved strategy
 
-The scaffold intentionally stops short of design and content strategy. The following need answers before building out:
+The original `/spec-interview` questions are resolved in `specs/gblockparty-v1.md`. The post-v1 adjustment is deliberately narrower:
 
-1. **Visual system.** The stated direction is neo-brutalist / boxy / Duolingo-adjacent. The old `gBlockParty` repo's `globals.css` was empty (`@import "tailwindcss"` only) — there is no existing design system to copy. Needs: color palette, border + hard-shadow system, typography scale, radius scale, motion rules. Tailwind v4 is wired up and ready to receive tokens.
-2. **Site IA.** Home is a firehose? A curated front page? Collection-first? How do gBlocks surface — chronological, by collection, by type, by tag?
-3. **gBlock URL scheme.** `/g/<slug>`? `/<collection>/<slug>`? Both with a canonical?
-4. **Content authoring format.** MDX per gBlock is the default assumption. Confirm, and decide frontmatter extensions beyond `gblock-schema` (hero image, audio URL for episodes, repo URL for code gBlocks, etc.).
-5. **Membership gating.** Which gBlock types default to paid? How does a member-only gBlock render for non-members — paywall, preview, or hidden?
-6. **Migration plan.** What archived BFR v1 material, if any, is worth reworking into an active collection? Is there drafted GCanBuild content anywhere to seed with?
-7. **Portfolio rollup.** Which KPIs from the old `boston-founder-radio.yaml` carry forward onto `gblockparty.yaml` (paying members, MRR, weekly listens) — and which get rethought now that membership is platform-level?
+1. **One channel.** Keep the existing George Le channel; use playlists for WeeklyG, Technical Deep Dives, Build Logs, Livestream VODs, and Founder Interviews.
+2. **One required cadence.** Publish Weekly G weekly for 3 months before adding a second standing format.
+3. **Lightweight War Room visuals.** Use Notion, Sheets, GitHub, Linear, or slides for the first 10 episodes.
+4. **Channel cleanup.** Unlist off-brand VODs/promos and resolve the abandoned Mailchimp Clone series by finishing it or unlisting it with a pivot explanation.
 
 ## Structure
 
@@ -54,9 +53,7 @@ gblockparty/
 ## Next steps
 
 1. Install deps: `pnpm install`
-2. Run `/spec-interview` to resolve the open questions above and produce a design doc + phase-1 todo list.
-3. Scaffold design tokens in `apps/web/src/app/globals.css` per the spec.
-4. Build gBlock loader + index page.
-5. Create Vercel project, point `gblockparty.com` at it.
-6. Mine archived BFR material only if it is worth recutting into an active collection, and keep GCanBuild as the primary canary source.
-7. Update `lexcorp-war-room`: decommission `portfolio/boston-founder-radio.yaml`, add `portfolio/gblockparty.yaml`.
+2. Record and upload Weekly G Ep 1.
+3. Author the Weekly G Ep 1 MDX canary and unhide the Weekly G collection.
+4. Create the lightweight Weekly G episode template.
+5. Complete the YouTube channel cleanup audit.

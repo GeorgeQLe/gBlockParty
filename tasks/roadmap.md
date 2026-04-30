@@ -6,7 +6,9 @@
 
 ## Summary
 
-Four phases move gBlockParty from scaffold to live site. P1 builds the foundation (schema, tokens, MDX pipeline) in parallel lanes. P2 layers the UI (routes, home, collection and gBlock pages, inactive paywall). P3 is the launch: author 5 canary gBlocks, deploy to Vercel, point the domain. P4 is polish: analytics, nightly YT scraper, and the lexcorp-war-room portfolio rollup. The launch gate is three concrete checks: all 5 canaries live, `gblockparty.com` resolves to the Vercel deploy, and `featured: true` pins to the home hero rail.
+Four phases moved gBlockParty from scaffold to live site. P1 built the foundation (schema, tokens, MDX pipeline). P2 layered the UI (routes, home, collection and gBlock pages, inactive paywall). P3 launched the site. P4 added performance-signal plumbing and the lexcorp-war-room portfolio rollup.
+
+Post-v1 strategy changed on 2026-04-30: the next operating plan is one channel and one required show. Weekly G is the only committed cadence for 3 months. GCanBuild and Weekly SOTA remain supported by the site, but they are optional playlists/backlog until Weekly G has shipped 12 consecutive weekly episodes. Custom War Room tooling and channel splitting are explicitly deferred.
 
 ## Phase Overview
 
@@ -471,6 +473,10 @@ No overlap. Lane C is a different repo so its commit is separate.
 
 ## Deferred / Future Work
 
+- **Weekly G cadence proof** — publish 12 consecutive weekly episodes on the existing George Le channel before adding another standing format.
+- **Channel cleanup** — unlist Vibe Coding VODs, Discord promo, and Late Night with G; decide foodtech interviews based on relationship value; finish or unlist the abandoned Mailchimp Clone series with a short pivot explanation.
+- **Multi-channel YouTube split** — deferred until the main channel has enough audience for a standalone format to survive on its own.
+- **Custom Weekly G War Room tooling** — defer until at least 10 episodes prove the format and lightweight Notion/Sheets/slides tooling becomes a bottleneck.
 - **Podcast / RSS distribution for Weekly SOTA** — revisit after 8 weeks of stable weekly cadence (spec §12).
 - **Weekly G → lexcorp-war-room KPI injection at build time** — revisit when Weekly G becomes the dominant portfolio front-door (spec §7, §12).
 - **Membership paywall activation** — gated on concrete thresholds (≥1k monthly reads on any gBlock, ≥5k monthly uniques on any collection) per spec §7.

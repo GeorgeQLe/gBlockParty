@@ -2,6 +2,7 @@ slug: gcanbuild
 name: GCanBuild
 description: >-
   Full-stack build tutorials with named, SEO-loaded stacks (Next.js, Better
-  Auth, Neon, Drizzle, tRPC, Tanstack Query, Shadcn). Monolithic format by
-  default; serialized discouraged after the Mailchimp-Clone underperformance
-  (P1–P8 averaged 183–983 views vs. monolithic tutorials hitting 4.2k–10.2k).
+  Auth, Neon, Drizzle, tRPC, Tanstack Query, Shadcn). Kept as an SEO library and
+  optional deep-dive playlist while Weekly G proves the weekly cadence.
+  Monolithic format by default; serialized builds are discouraged after the
+  Mailchimp Clone underperformance and abandonment risk.

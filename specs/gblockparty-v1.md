@@ -10,18 +10,20 @@
 
 gBlockParty is the canonical home for George's content and code. Every artifact is a **gBlock**. Collections are editorial umbrellas grouping gBlocks.
 
-### Primary goal (next 6 months)
-**Audience growth via proven tutorial SEO + building a commentary flywheel.** Not monetization (audience too small), not personality brand alone (unproven track).
+### Primary goal (next 3 months)
+**Prove a sustainable Weekly G publishing cadence on the existing George Le YouTube channel.** Not multi-channel expansion, not monetization, and not a custom War Room product before the show format has earned it.
 
 ### Time budget reality check
 - Available: 5–10 hrs/wk (user stated).
-- Realistic plan sits at **~12 hrs/wk**; accepted as the working ceiling.
+- Working ceiling: **one Weekly G episode per week**. Technical deep dives and additional formats stay optional until the weekly cadence holds for at least 3 months.
 
 ### What is NOT in scope for Phase 1
 - Membership paywall **activation** (schema + UI shipped, zero gBlocks gated at launch).
 - Boston Founder Radio as an active collection (no guest pipeline; dropped).
 - Late Night with G (paused; Ep 1 not migrated).
 - VibeCoding as a standalone collection (livestream VODs underperform; raw streams are source material, not first-class content).
+- A multi-channel YouTube split. The existing George Le channel remains the hub; playlists carry format separation until the audience is large enough to justify separate channels.
+- Custom War Room infrastructure for recording visuals. Use lightweight Notion, Sheets, GitHub, Linear, or slides for the first 10 Weekly G episodes.
 - Cross-repo wiring to `lexcorp-war-room` portfolio KPIs (deferred).
 - YT Analytics retention telemetry (deferred to Phase 2).
 - Podcast RSS / Apple Podcasts distribution (deferred).
@@ -30,24 +32,26 @@ gBlockParty is the canonical home for George's content and code. Every artifact 
 
 ## 2. Content Strategy
 
-Three live collections, cadence and format locked to the time budget.
+One live publishing commitment, with supporting collections retained as playlists/backlog rather than weekly obligations.
 
 | Collection | Cadence | Format | Role | Budget |
 |---|---|---|---|---|
-| `gcanbuild` | 1 / month | Monolithic long-form video + MDX walkthrough | Flagship. SEO compound. Top-of-funnel. | ~5 hrs/wk |
-| `weekly-sota` | 1 / week | Video primary; aspirational multi-format (video + audio + text) | Commentary flywheel. AI industry coverage. | ~4 hrs/wk |
-| `weekly-g` | 1 / week | Vlog (lighter production than SOTA) | Lexcorp radical-transparency top-of-funnel. | ~3 hrs/wk |
+| `weekly-g` | 1 / week | 5-beat vlog: cold open, scoreboard, war room artifact, lesson, next bet | Flagship. Proves the radical-transparency build-in-public brand. | 5–10 hrs/wk |
+| `gcanbuild` | Optional / opportunistic | Monolithic long-form video + MDX walkthrough | SEO library and occasional deep dive. Add only after Weekly G cadence is stable. | no standing weekly commitment |
+| `weekly-sota` | Paused / optional | Video primary; aspirational multi-format later | Backlog/commentary source. Not a second weekly show during the cadence test. | no standing weekly commitment |
 
 ### Collection descriptions
 
-- **GCanBuild** — Full-stack build tutorials with named, SEO-loaded stacks (Next.js, Better Auth, Neon, Drizzle, tRPC, Tanstack Query, Shadcn). Monolithic format by default; serialized discouraged after the Mailchimp-Clone underperformance (P1–P8 averaged 183–983 views vs. monolithic tutorials hitting 4.2k–10.2k).
-- **Weekly SOTA** — Fast-moving AI industry show: frontier-model releases, product launches, lab drama, infra deals, business moves across OpenAI / Anthropic / Google / Meta / xAI / Mistral / Cursor. Absorbs what was previously "Late Night with G."
-- **Weekly G** — Weekly vlog tracking high-ticket items in the lexcorp portfolio. Top-of-funnel for the radical-transparency build-in-public brand. Pure editorial narrative in Phase 1 (no cross-repo KPI injection).
+- **Weekly G** — Weekly vlog tracking LexCorp progress with radical transparency. The first 3 months are a cadence test: one episode per week, no skipped weeks, using lightweight visuals rather than custom tooling.
+- **GCanBuild** — Full-stack build tutorials with named, SEO-loaded stacks (Next.js, Better Auth, Neon, Drizzle, tRPC, Tanstack Query, Shadcn). Keep as an SEO playlist/backlog, but do not make it a standing monthly obligation until Weekly G is proven. Serialized builds are discouraged after the Mailchimp Clone underperformance and abandonment risk.
+- **Weekly SOTA** — Fast-moving AI industry commentary source. Paused as a standalone weekly show; may be absorbed into Weekly G lessons or occasional videos.
 
 ### Paused / dropped
 - **Late Night with G** — Paused. Ep 1 (24 views) treated as a pilot; its content may be re-segmented into SOTA. No collection slug reserved at launch.
 - **Boston Founder Radio (BFR)** — Dropped as a Phase-1 collection. No guest pipeline exists and the single commentary-tagged video ("OpenAI CEO Sam Altman…", 791 views) fits better under SOTA. `portfolio/boston-founder-radio.yaml` in `lexcorp-war-room` will be decommissioned per the README plan.
 - **VibeCoding** — Dropped as a collection. The livestream VODs (24–37 views each) aren't first-class standalone content. Livestream material may still feed `stream`-type gBlocks linked from a GCanBuild tutorial or a Weekly G vlog.
+- **Mailchimp Clone series** — Must not sit as an abandoned public build series. Either finish it intentionally, or unlist the series and publish a short pivot note/video.
+- **Foodtech interviews** — Unlist unless maintaining the public relationship is strategically important.
 
 ---
 
@@ -232,6 +236,15 @@ No BFR, Late Night, or VibeCoding content migrates in Phase 1.
 - YouTube view counts surfaced per-gBlock at build time (scraped nightly from channel HTML, cached in a JSON snapshot committed to repo — same technique this interview used).
 - `portfolio/gblockparty.yaml` (in `lexcorp-war-room`) rolls up weekly: total visitors, top 5 gBlocks by views, views-per-collection.
 
+### Weekly G scoreboard
+Keep the public episode scoreboard to 3–4 honest signals:
+- Features shipped.
+- Waitlist/user interest.
+- User conversations or feedback.
+- Biggest lesson or decision.
+
+Do not pad the episode with ten-line KPI dashboards. If a metric did not move, say why in the narrative and omit it from the scoreboard.
+
 ### Ranking of performance signals (from most to least reliable)
 1. **Total views per gBlock, age-adjusted.** Primary KPI.
 2. **Median views per collection.** Tells which umbrella is paying attention rent.
@@ -276,7 +289,7 @@ No BFR, Late Night, or VibeCoding content migrates in Phase 1.
 ## 12. Open / Deferred Questions
 
 - **SOTA audio distribution.** Aspirational multi-format; RSS feed + podcast distribution deferred. Revisit once weekly cadence is stable for ≥8 weeks.
-- **Weekly G → lexcorp-war-room KPI injection.** Ruled out for Phase 1 at user's call. Revisit when Weekly G becomes the dominant portfolio front-door.
+- **Weekly G → lexcorp-war-room KPI injection / custom War Room app.** Ruled out until at least 10 Weekly G episodes prove the format and the lightweight tooling becomes a real bottleneck.
 - **Membership activation.** Gated on the thresholds in §7.
 - **Tag page (`/t/<tag>`).** Reserved URL pattern; not built in Phase 1.
 - **Search.** Deferred; at ~5 gBlocks there's nothing to search.
