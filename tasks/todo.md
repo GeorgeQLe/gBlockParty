@@ -6,7 +6,7 @@
 
 ## Priority Documentation Todo
 
-- [ ] `/pack install business-app` - install the business-app project pack so research skills are available. No `.agents/project.json` exists yet.
+- [x] `/pack install business-app` - install the business-app project pack so research skills are available. No `.agents/project.json` exists yet.
 - [ ] `/icp` - create `research/icp.md` because it is missing. Foundational — defines who the site serves; blocks all downstream research.
 - [ ] `/competitive-analysis` - create `research/competitive-analysis.md` because it is missing; after `/icp`.
 - [ ] `/positioning` - create `research/positioning.md` because it is missing; after `/competitive-analysis`.
