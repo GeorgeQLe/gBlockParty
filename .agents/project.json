@@ -1,5 +1,10 @@
 {
   "project_type": "business-app",
-  "enabled_packs": ["business-app"],
+  "enabled_packs": [
+    "business-research",
+    "customer-lifecycle",
+    "business-growth",
+    "business-ops"
+  ],
   "skill_pack_version": 1
 }
